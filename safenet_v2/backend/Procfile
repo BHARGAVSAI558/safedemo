@@ -1,0 +1,1 @@
+web: bash -c 'if [[ "$DATABASE_URL" == postgres* ]]; then alembic upgrade head; fi && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1'

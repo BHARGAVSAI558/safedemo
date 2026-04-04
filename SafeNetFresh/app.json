@@ -1,0 +1,35 @@
+{
+  "expo": {
+    "name": "SafeNet",
+    "slug": "safenet",
+    "version": "1.0.0",
+    "extra": {
+      "BACKEND_URL": "https://YOUR-RAILWAY-APP.railway.app",
+      "BACKEND_URL_DEV": "http://192.168.1.100:8000"
+    },
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#1a73e8"
+    },
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#1a73e8"
+      }
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-secure-store",
+      "expo-sqlite"
+    ]
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "default": {
+    "baseline_speed_kmh_by_hour": {
+      "6": 14.0,
+      "7": 16.0,
+      "8": 18.0,
+      "9": 20.0,
+      "10": 19.0,
+      "11": 18.0,
+      "12": 17.0,
+      "13": 16.0,
+      "14": 15.0,
+      "15": 16.0,
+      "16": 18.0,
+      "17": 21.0,
+      "18": 19.0,
+      "19": 17.0,
+      "20": 15.0,
+      "21": 13.0
+    },
+    "baseline_deliveries_per_hour": 2.6,
+    "baseline_active_hours_window": [8, 21],
+    "baseline_app_interaction_interval_minutes": 6.0,
+    "baseline_zone_polygon": {
+      "type": "Polygon",
+      "coordinates": [[[78.40, 17.30], [78.58, 17.30], [78.58, 17.47], [78.40, 17.47], [78.40, 17.30]]]
+    }
+  }
+}
+

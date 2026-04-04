@@ -1,0 +1,584 @@
+from datetime import datetime, timedelta, timezone
+from typing import Any, Optional
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from structlog.contextvars import bind_contextvars
+
+from app.core.security import get_user_id_from_token
+from app.db.session import get_db
+from app.models.claim import DecisionType, Simulation
+from app.models.device_fingerprint import DeviceFingerprint
+from app.models.policy import Policy
+from app.models.worker import OccupationType as OrmOccupation
+from app.models.worker import Profile, RiskProfile as OrmRisk, User
+from app.schemas.earnings_dna import EarningsDnaOut
+from app.schemas.worker import PolicyWeekHistoryItem, ProfileCreate, ProfileResponse, ProfileUpdate, WorkerProfileOut
+from app.services.cache_service import cache_invalidate
+from app.services.earnings_dna_service import build_worker_earnings_dna
+from app.services.zone_resolver import resolve_city_to_zone
+from app.utils.logger import get_logger
+
+log = get_logger(__name__)
+router = APIRouter()
+
+MAX_WEEKLY_COVERAGE_BY_PRODUCT = {
+    "income_shield_basic": 2450.0,
+    "income_shield_standard": 3500.0,
+    "income_shield_pro": 4900.0,
+}
+
+
+def _product_plan_label(product_code: str) -> str:
+    c = (product_code or "").lower()
+    if "pro" in c and "standard" not in c:
+        return "Pro"
+    if "standard" in c:
+        return "Standard"
+    return "Basic"
+
+
+def _week_bounds_utc(now: datetime | None = None) -> tuple[datetime, datetime]:
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    weekday = now.weekday()
+    start = (now - timedelta(days=weekday)).replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=7)
+    return start, end
+
+
+def _enum_or_str(v: Any, default: str) -> str:
+    if v is None:
+        return default
+    if hasattr(v, "value"):
+        return str(v.value)
+    return str(v)
+
+
+def _profile_response_from_orm(profile: Profile) -> ProfileResponse:
+    """Avoid from_attributes edge cases (NULL numerics, driver-specific enums)."""
+    name = (profile.name or "").strip() or "Worker"
+    city = (profile.city or "Hyderabad").strip()
+    return ProfileResponse(
+        id=int(profile.id),
+        user_id=int(profile.user_id),
+        name=name,
+        city=city,
+        occupation=_enum_or_str(profile.occupation, "delivery"),
+        avg_daily_income=float(profile.avg_daily_income) if profile.avg_daily_income is not None else 1000.0,
+        risk_profile=_enum_or_str(profile.risk_profile, "medium"),
+        trust_score=float(profile.trust_score) if profile.trust_score is not None else 1.0,
+        total_claims=int(profile.total_claims) if profile.total_claims is not None else 0,
+        total_payouts=float(profile.total_payouts) if profile.total_payouts is not None else 0.0,
+        platform=profile.platform,
+        zone_id=profile.zone_id,
+        working_hours_preset=profile.working_hours_preset,
+        coverage_tier=profile.coverage_tier,
+        created_at=profile.created_at,
+    )
+
+
+async def _worker_profile_payload(profile: Profile, current_user: User, db: AsyncSession) -> WorkerProfileOut:
+    zone_id, _lat, _lon = resolve_city_to_zone(profile.city or "")
+    start, end = _week_bounds_utc()
+    weekly_protected = 0.0
+    try:
+        weekly_sum = (
+            await db.execute(
+                select(func.coalesce(func.sum(Simulation.payout), 0.0)).where(
+                    Simulation.user_id == current_user.id,
+                    Simulation.decision == DecisionType.APPROVED,
+                    Simulation.created_at.isnot(None),
+                    Simulation.created_at >= start,
+                    Simulation.created_at < end,
+                )
+            )
+        ).scalar_one()
+        weekly_protected = float(weekly_sum or 0.0)
+    except Exception as exc:
+        log.warning(
+            "worker_weekly_payout_sum_failed",
+            engine_name="workers_route",
+            worker_id=current_user.id,
+            error=str(exc),
+        )
+
+    pol_row = None
+    hist_policies: list[Policy] = []
+    try:
+        pol_row = (
+            await db.execute(
+                select(Policy)
+                .where(Policy.user_id == current_user.id, Policy.status == "active")
+                .order_by(Policy.id.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        hist_policies = list(
+            (
+                await db.execute(
+                    select(Policy).where(Policy.user_id == current_user.id).order_by(Policy.id.desc()).limit(3)
+                )
+            ).scalars().all()
+        )
+    except Exception as exc:
+        log.warning(
+            "worker_policy_fetch_failed",
+            engine_name="workers_route",
+            worker_id=current_user.id,
+            error=str(exc),
+        )
+
+    product_code = (pol_row.product_code if pol_row else None) or "income_shield_basic"
+    max_weekly = MAX_WEEKLY_COVERAGE_BY_PRODUCT.get(product_code, 2450.0)
+
+    policy_history: list[PolicyWeekHistoryItem] = []
+    for p in hist_policies:
+        started = p.created_at.isoformat() if getattr(p, "created_at", None) else None
+        wp_raw = getattr(p, "weekly_premium", None)
+        policy_history.append(
+            PolicyWeekHistoryItem(
+                started_at=started,
+                plan=_product_plan_label(getattr(p, "product_code", None)),
+                status=str(getattr(p, "status", None) or "unknown"),
+                weekly_premium=float(wp_raw or 0.0),
+            )
+        )
+
+    base = _profile_response_from_orm(profile)
+    # WorkerProfileOut redefines zone_id (resolved from city); base.model_dump() already
+    # includes zone_id from the profile row — duplicate kwargs raise TypeError → HTTP 500.
+    payload = base.model_dump()
+    payload.pop("zone_id", None)
+    return WorkerProfileOut(
+        **payload,
+        zone_id=zone_id,
+        earnings_protected_this_week=weekly_protected,
+        max_weekly_coverage=max_weekly,
+        policy_history=policy_history,
+    )
+
+INDIA_LAT_MIN = 6.5
+INDIA_LAT_MAX = 37.5
+INDIA_LON_MIN = 68.0
+INDIA_LON_MAX = 97.5
+
+
+class AccelerometerIn(BaseModel):
+    mean_magnitude: float = 0.0
+    variance: float = 0.0
+    is_moving: bool = False
+
+
+class GPSPointIn(BaseModel):
+    lat: float
+    lon: float
+    accuracy: float = 0.0
+    altitude: float | None = None
+    timestamp: datetime
+    cell_carrier_name: str | None = None
+    network_type: str | None = None
+    accelerometer: AccelerometerIn
+    battery_level: float | None = None
+    app_state: str | None = None
+    gps_quality: str | None = None
+    suspicious_motion: bool = False
+    network_unstable: bool = False
+
+    @field_validator("lat")
+    @classmethod
+    def valid_lat(cls, v: float) -> float:
+        if not (INDIA_LAT_MIN <= float(v) <= INDIA_LAT_MAX):
+            raise ValueError("lat must be inside India bounds")
+        return float(v)
+
+    @field_validator("lon")
+    @classmethod
+    def valid_lon(cls, v: float) -> float:
+        if not (INDIA_LON_MIN <= float(v) <= INDIA_LON_MAX):
+            raise ValueError("lon must be inside India bounds")
+        return float(v)
+
+
+class GPSBatchIn(BaseModel):
+    points: list[GPSPointIn] = Field(default_factory=list, max_length=20)
+
+
+class AppEventIn(BaseModel):
+    event_type: str
+    screen_name: str | None = None
+    action: str | None = None
+    duration_ms: int | None = None
+    timestamp: datetime
+
+    @field_validator("duration_ms")
+    @classmethod
+    def valid_duration(cls, v: int | None) -> int | None:
+        if v is None:
+            return v
+        if v < 0:
+            raise ValueError("duration_ms cannot be negative")
+        return v
+
+
+class AppEventsBatchIn(BaseModel):
+    events: list[AppEventIn] = Field(default_factory=list, max_length=100)
+
+
+class DeviceFingerprintIn(BaseModel):
+    fingerprint_hash: str
+    model_name: str | None = None
+    os_version: str | None = None
+    platform_api_level: int | None = None
+    screen_width: int | None = None
+    screen_height: int | None = None
+    app_version: str | None = None
+    network_type_at_enrollment: str | None = None
+    battery_level: float | None = None
+
+
+
+async def get_current_user(
+    authorization: Optional[str] = Header(None),
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authorization header missing")
+    token = authorization.split(" ", 1)[1]
+    user_id = get_user_id_from_token(token)
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    bind_contextvars(worker_id=user.id)
+    return user
+
+
+@router.post("/create", response_model=ProfileResponse, status_code=201)
+async def create_profile(
+    request: Request,
+    body: ProfileCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    existing = await db.execute(select(Profile).where(Profile.user_id == current_user.id))
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="Profile already exists. Use PUT /workers/update")
+
+    profile = Profile(
+        user_id=current_user.id,
+        name=body.name,
+        city=body.city,
+        occupation=OrmOccupation(body.occupation.value),
+        avg_daily_income=body.avg_daily_income,
+        risk_profile=OrmRisk(body.risk_profile.value),
+    )
+    db.add(profile)
+    await db.commit()
+    await db.refresh(profile)
+    await cache_invalidate(getattr(request.app.state, "redis", None), f"trust:{current_user.id}")
+    log.info(
+        "profile_created",
+        engine_name="workers_route",
+        decision="created",
+        reason_code="PROFILE_OK",
+        worker_id=current_user.id,
+    )
+    return profile
+
+
+@router.get("/weekly-breakdown")
+async def get_weekly_breakdown(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Per-day payout breakdown for the current Mon–Sun week (IST-anchored, UTC stored)."""
+    start, end = _week_bounds_utc()
+
+    rows = (
+        await db.execute(
+            select(Simulation).where(
+                Simulation.user_id == current_user.id,
+                Simulation.decision == DecisionType.APPROVED,
+                Simulation.created_at >= start,
+                Simulation.created_at < end,
+            )
+        )
+    ).scalars().all()
+
+    # Aggregate by ISO weekday (0=Mon … 6=Sun)
+    day_amount: dict[int, float] = {i: 0.0 for i in range(7)}
+    day_disruption: dict[int, str | None] = {i: None for i in range(7)}
+
+    for sim in rows:
+        ca = sim.created_at
+        if ca is None:
+            continue
+        if ca.tzinfo is None:
+            ca = ca.replace(tzinfo=timezone.utc)
+        dow = ca.weekday()  # 0=Mon
+        day_amount[dow] += float(sim.payout or 0.0)
+        if day_disruption[dow] is None:
+            # Infer disruption label from boolean flags then reason text
+            if sim.weather_disruption:
+                label = "Heavy Rain"
+            elif sim.traffic_disruption:
+                label = "Traffic Disruption"
+            elif sim.event_disruption:
+                label = "Zone Event"
+            elif sim.final_disruption:
+                label = "Disruption"
+            else:
+                reason = str(sim.reason or "").upper()
+                if "RAIN" in reason or "WEATHER" in reason:
+                    label = "Heavy Rain"
+                elif "HEAT" in reason or "HOT" in reason:
+                    label = "Extreme Heat"
+                elif "AQI" in reason or "AIR" in reason:
+                    label = "AQI Spike"
+                elif "CURFEW" in reason:
+                    label = "Curfew"
+                else:
+                    label = "Disruption"
+            day_disruption[dow] = label
+
+    day_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    breakdown = [
+        {
+            "day": day_labels[i],
+            "amount": round(day_amount[i], 2),
+            "disruption": day_disruption[i] if day_amount[i] > 0 else None,
+        }
+        for i in range(7)
+    ]
+    total = round(sum(day_amount.values()), 2)
+
+    pol_row = (
+        await db.execute(
+            select(Policy)
+            .where(Policy.user_id == current_user.id, Policy.status == "active")
+            .order_by(Policy.id.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    product_code = (pol_row.product_code if pol_row else None) or "income_shield_basic"
+    max_coverage = MAX_WEEKLY_COVERAGE_BY_PRODUCT.get(product_code, 2450.0)
+
+    return {
+        "weekly_breakdown": breakdown,
+        "total_protected": total,
+        "max_coverage": max_coverage,
+    }
+
+
+@router.get("/me", response_model=WorkerProfileOut)
+async def get_profile(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(select(Profile).where(Profile.user_id == current_user.id))
+    profile = result.scalar_one_or_none()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found. Please create one first.")
+    return await _worker_profile_payload(profile, current_user, db)
+
+
+@router.get("/profile", response_model=WorkerProfileOut)
+async def get_profile_alias(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(select(Profile).where(Profile.user_id == current_user.id))
+    profile = result.scalar_one_or_none()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found. Please create one first.")
+    return await _worker_profile_payload(profile, current_user, db)
+
+
+@router.put("/update", response_model=ProfileResponse)
+async def update_profile(
+    request: Request,
+    body: ProfileUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(select(Profile).where(Profile.user_id == current_user.id))
+    profile = result.scalar_one_or_none()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    data = body.model_dump(exclude_none=True)
+    if "occupation" in data and data["occupation"] is not None:
+        data["occupation"] = OrmOccupation(data["occupation"].value)
+    if "risk_profile" in data and data["risk_profile"] is not None:
+        data["risk_profile"] = OrmRisk(data["risk_profile"].value)
+    for field, value in data.items():
+        setattr(profile, field, value)
+
+    await db.commit()
+    await db.refresh(profile)
+    await cache_invalidate(getattr(request.app.state, "redis", None), f"trust:{current_user.id}")
+    log.info(
+        "profile_updated",
+        engine_name="workers_route",
+        decision="updated",
+        reason_code="PROFILE_OK",
+        worker_id=current_user.id,
+    )
+    return profile
+
+
+async def _earnings_dna_payload(worker_id: int, db: AsyncSession) -> EarningsDnaOut:
+    pr = await db.execute(select(Profile).where(Profile.user_id == worker_id))
+    profile = pr.scalar_one_or_none()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    since = datetime.now(timezone.utc) - timedelta(days=30)
+    approved = (
+        (
+            await db.execute(
+                select(Simulation)
+                .where(
+                    Simulation.user_id == worker_id,
+                    Simulation.decision == DecisionType.APPROVED,
+                    Simulation.created_at >= since,
+                )
+                .order_by(Simulation.created_at.desc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    start, end = _week_bounds_utc()
+    weekly_payout_sum = (
+        await db.execute(
+            select(func.coalesce(func.sum(Simulation.payout), 0.0)).where(
+                Simulation.user_id == worker_id,
+                Simulation.decision == DecisionType.APPROVED,
+                Simulation.created_at >= start,
+                Simulation.created_at < end,
+            )
+        )
+    ).scalar_one()
+    weekly_f = float(weekly_payout_sum or 0.0)
+
+    payload = build_worker_earnings_dna(
+        approved,
+        float(profile.avg_daily_income or 600.0),
+        weekly_f,
+    )
+    return EarningsDnaOut.model_validate(payload)
+
+
+@router.get("/earnings-dna", response_model=EarningsDnaOut)
+async def get_earnings_dna_me(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """IST earnings heatmap + weekly rollups (APPROVED simulations, last 30 days)."""
+    return await _earnings_dna_payload(current_user.id, db)
+
+
+@router.get("/{worker_id}/earnings-dna", response_model=EarningsDnaOut)
+async def get_earnings_dna(
+    worker_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if worker_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="worker_id does not match JWT")
+    return await _earnings_dna_payload(worker_id, db)
+
+
+@router.post("/{worker_id}/gps-trail")
+async def ingest_gps_trail(
+    worker_id: int,
+    body: GPSBatchIn,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    if worker_id != current_user.id:
+        raise HTTPException(status_code=403, detail="worker_id does not match JWT")
+    if len(body.points) > 20:
+        raise HTTPException(status_code=422, detail="max 20 points per batch")
+
+    mongo_db = getattr(request.app.state, "mongo_db", None)
+    if mongo_db is None:
+        raise HTTPException(status_code=503, detail="Telemetry store unavailable")
+
+    suspicious = any(bool(p.suspicious_motion) or str(p.gps_quality or "").upper() == "POOR" for p in body.points)
+    if suspicious:
+        log.warning(
+            "gps_telemetry_suspicious_batch",
+            engine_name="workers_route",
+            decision="warning",
+            reason_code="GPS_SUSPICIOUS",
+            worker_id=worker_id,
+            batch_size=len(body.points),
+        )
+
+    payload = {
+        "worker_id": worker_id,
+        "points": [p.model_dump(mode="json") for p in body.points],
+        "received_at": datetime.now(timezone.utc),
+    }
+    await mongo_db["gps_trails"].insert_one(payload)
+    return {"received": len(body.points), "stored": True}
+
+
+@router.post("/{worker_id}/app-events")
+async def ingest_app_events(
+    worker_id: int,
+    body: AppEventsBatchIn,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    if worker_id != current_user.id:
+        raise HTTPException(status_code=403, detail="worker_id does not match JWT")
+    if len(body.events) > 100:
+        raise HTTPException(status_code=422, detail="max 100 events per batch")
+
+    mongo_db = getattr(request.app.state, "mongo_db", None)
+    if mongo_db is None:
+        raise HTTPException(status_code=503, detail="Events store unavailable")
+
+    await mongo_db["app_event_logs"].insert_one(
+        {
+            "worker_id": worker_id,
+            "events": [e.model_dump(mode="json") for e in body.events],
+            "received_at": datetime.now(timezone.utc),
+        }
+    )
+    return {"received": len(body.events), "stored": True}
+
+
+@router.post("/{worker_id}/device-fingerprint")
+async def upsert_device_fingerprint(
+    worker_id: int,
+    body: DeviceFingerprintIn,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if worker_id != current_user.id:
+        raise HTTPException(status_code=403, detail="worker_id does not match JWT")
+
+    row = (await db.execute(select(DeviceFingerprint).where(DeviceFingerprint.worker_id == worker_id))).scalar_one_or_none()
+    if row is None:
+        row = DeviceFingerprint(worker_id=worker_id)
+        db.add(row)
+    row.fingerprint_hash = body.fingerprint_hash
+    row.model_name = body.model_name
+    row.os_version = body.os_version
+    row.platform_api_level = body.platform_api_level
+    row.screen_width = body.screen_width
+    row.screen_height = body.screen_height
+    row.app_version = body.app_version
+    row.network_type_at_enrollment = body.network_type_at_enrollment
+    row.battery_level = body.battery_level
+    await db.commit()
+    return {"stored": True}

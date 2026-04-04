@@ -1,0 +1,12 @@
+{
+  "zones": {
+    "default": [],
+    "hyd_central": [
+      {
+        "type": "festival",
+        "severity": "GREEN",
+        "description": "Local festival — minor road closures"
+      }
+    ]
+  }
+}
