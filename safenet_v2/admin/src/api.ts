@@ -2,7 +2,10 @@ import axios from 'axios';
 
 import { useAuthStore } from './stores/auth';
 
-const api = axios.create({ baseURL: 'http://localhost:8000/api/v1' });
+const BASE_URL = (import.meta.env.VITE_BACKEND_URL ?? 'http://localhost:8000').replace(/\/$/, '');
+export const WS_URL = BASE_URL.replace('https://', 'wss://').replace('http://', 'ws://');
+
+const api = axios.create({ baseURL: `${BASE_URL}/api/v1` });
 
 // Attach JWT token to every request
 api.interceptors.request.use((config) => {
