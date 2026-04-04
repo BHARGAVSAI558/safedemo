@@ -1,3 +1,153 @@
+# 🛡️ SafeNet — AI Income Protection for Gig Workers
+
+> Built for **DevTrails 2026 — Scale (Phase 2)** | Team AlphaNexus
+
+---
+
+## 🚀 Live Links
+
+| What | URL |
+|------|-----|
+| 🌐 **Admin Dashboard** | [https://devtrails-2026-alphanexus-phase-scale.vercel.app](https://devtrails-2026-alphanexus-phase-scale.vercel.app) |
+| ⚙️ **Backend API** | [https://devtrails2026-alphanexus-phase2-2.onrender.com](https://devtrails2026-alphanexus-phase2-2.onrender.com) |
+| ❤️ **Health Check** | [https://devtrails2026-alphanexus-phase2-2.onrender.com/health](https://devtrails2026-alphanexus-phase2-2.onrender.com/health) |
+| 📱 **Mobile App** | Scan QR below with Expo Go |
+| 💻 **GitHub** | [https://github.com/BHARGAVSAI558/devtrails-2026-alphanexus-phase-scale](https://github.com/BHARGAVSAI558/devtrails-2026-alphanexus-phase-scale) |
+
+---
+
+## 📱 Try the Mobile App — 3 Steps
+
+### Step 1 — Install Expo Go on your phone
+
+| Platform | Link |
+|----------|------|
+| 🍎 iPhone | [App Store → search "Expo Go"](https://apps.apple.com/app/expo-go/id982107779) |
+| 🤖 Android | [Play Store → search "Expo Go"](https://play.google.com/store/apps/details?id=host.exp.exponent) |
+
+---
+
+### Step 2 — Scan this QR code
+
+Open **Expo Go** on your phone → tap **"Scan QR Code"** → scan below:
+
+```
+exp://u.expo.dev/safenet
+```
+
+> **OR** — run it yourself in 30 seconds:
+> ```bash
+> git clone https://github.com/BHARGAVSAI558/devtrails-2026-alphanexus-phase-scale
+> cd devtrails-2026-alphanexus-phase-scale/SafeNetFresh
+> npm install
+> npx expo start
+> ```
+> Then scan the QR that appears in your terminal with Expo Go.
+
+---
+
+### Step 3 — App loads instantly
+
+- Enter your phone number → receive OTP → verify
+- Set up your gig worker profile (platform, zone, coverage tier)
+- Dashboard shows live zone status, coverage, and earnings protection
+- Tap **"Simulate Disruption"** to see a live claim → payout in ~9 seconds
+
+---
+
+## 🌐 Try the Admin Dashboard
+
+1. Open [https://devtrails-2026-alphanexus-phase-scale.vercel.app](https://devtrails-2026-alphanexus-phase-scale.vercel.app)
+2. Login with admin OTP
+3. See live claims feed, fraud queue, zone heatmap, worker analytics
+
+---
+
+## 💡 What is SafeNet?
+
+SafeNet protects gig workers (Zomato/Swiggy delivery riders) from income loss caused by disruptions — heavy rain, extreme heat, curfew, or AQI spikes.
+
+When a disruption hits:
+1. 🔍 **Detected** — weather/AQI/event signals trigger automatically
+2. ✅ **Verified** — 4-layer fraud engine checks GPS, behavior, cluster, enrollment
+3. 💰 **Paid** — payout credited to worker wallet in seconds
+
+---
+
+## 🏗️ Architecture
+
+```mermaid
+flowchart TB
+  subgraph Mobile["📱 SafeNetFresh (Expo)"]
+    RN[React Native UI]
+    API_JS[services/api.js]
+    WS_M[WebSocket Client]
+  end
+
+  subgraph Admin["🖥️ Admin Dashboard (Vite + React)"]
+    ADM_UI[Live Feed + Analytics]
+    WS_A[WebSocket Client]
+  end
+
+  subgraph Backend["⚙️ FastAPI Backend (Render)"]
+    REST[REST /api/v1/*]
+    WSS[WebSockets /ws/*]
+    ENG[ML Engines: fraud, premium, payout]
+    PG[(PostgreSQL)]
+  end
+
+  RN --> API_JS --> REST
+  WS_M --> WSS
+  WS_A --> WSS
+  ADM_UI --> REST
+  REST --> ENG --> PG
+```
+
+---
+
+## 🛠️ Tech Stack
+
+| Layer | Technology |
+|-------|-----------|
+| Mobile | React Native, Expo, Zustand, TanStack Query |
+| Admin | React, Vite, TypeScript, TailwindCSS, Recharts |
+| Backend | FastAPI, SQLAlchemy, PostgreSQL, Alembic |
+| ML | scikit-learn, XGBoost, joblib |
+| Real-time | WebSockets, Redis pub/sub |
+| Deployment | Render (backend), Vercel (admin) |
+
+---
+
+## 📁 Project Structure
+
+```
+/
+├── safenet_v2/
+│   ├── backend/        ← FastAPI backend (deployed on Render)
+│   └── admin/          ← React admin dashboard (deployed on Vercel)
+└── SafeNetFresh/       ← Expo mobile app
+```
+
+---
+
+## ⚡ Key Features
+
+- **OTP Auth** — phone number login, no passwords
+- **Live Zone Status** — weather, AQI, active alerts per zone
+- **4-Layer Fraud Engine** — GPS, behavioral, cluster, enrollment checks
+- **ML Premium Engine** — dynamic weekly premium based on zone risk + tenure
+- **Real-time WebSockets** — claim status updates pushed live to mobile + admin
+- **Forecast Shield** — proactive coverage upgrade before predicted disruptions
+- **Earnings DNA** — 7×24 heatmap of worker earning patterns
+
+---
+
+*DevTrails 2026 — AlphaNexus Team*
+
+---
+
+---
+
 # SafeNet (ALPHA workspace) — project map
 
 This repository contains three applications that work together:
