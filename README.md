@@ -12,7 +12,7 @@
 | ⚙️ **Backend API** | [https://safenet-api-y4se.onrender.com](https://safenet-api-y4se.onrender.com) |
 | ❤️ **Health Check** | [https://safenet-api-y4se.onrender.com/health](https://safenet-api-y4se.onrender.com/health) |
 | 📱 **Mobile App** | Scan QR below with Expo Go |
-| 💻 **GitHub** | [https://github.com/BHARGAVSAI558/devtrails-2026-alphanexus-phase-scale](https://github.com/BHARGAVSAI558/devtrails-2026-alphanexus-phase-scale) |
+| 💻 **GitHub** | [https://github.com/BHARGAVSAI558/devtrails-2026-alphanexus-phase2](https://github.com/BHARGAVSAI558/devtrails-2026-alphanexus-phase2) |
 
 ---
 
@@ -37,8 +37,8 @@ exp://u.expo.dev/safenet
 
 > **OR** — run it yourself in 30 seconds:
 > ```bash
-> git clone https://github.com/BHARGAVSAI558/devtrails-2026-alphanexus-phase-scale
-> cd devtrails-2026-alphanexus-phase-scale/SafeNetFresh
+> git clone https://github.com/BHARGAVSAI558/devtrails-2026-alphanexus-phase2
+> cd devtrails-2026-alphanexus-phase2/SafeNetFresh
 > npm install
 > npm start
 > ```
@@ -165,6 +165,8 @@ npm run android:usb-api   # adb reverse tcp:8000 tcp:8000 — then set BACKEND_U
 
 `app.json` enables **`usesCleartextTraffic`** (Android) and **`NSAppTransportSecurity`** entries (iOS) for dev builds; **Expo Go** still depends on its own native shell for some HTTP rules.
 
+**Web (Expo web):** Run `npx expo start --web` (or press `w` in the Expo CLI). On wide viewports, `SafeNetFresh/components/WebPhoneFrame.js` centers a phone-width column so the worker UI stays app-like. Overlays such as **Pick a disruption**, **Switch plan**, and **Premium due** use `SafeNetFresh/components/AppModal.js` so sheets stay inside that frame instead of spanning the full browser (React Native `Modal` on web often portals to `document.body`). Verification on web uses a single OTP field with `autoComplete="one-time-code"` (SMS autofill works best on supported mobile browsers; desktop usually paste or type).
+
 ### Admin dashboard (`safenet_v2/admin`)
 
 ```bash
@@ -181,14 +183,16 @@ npm run dev
 
 ## ⚡ Key Features
 
-- **OTP Auth** — phone number login for workers in the mobile app
+- **OTP Auth** — phone number login for workers in the mobile app; web build uses a single-field OTP with spacing tuned for readability
 - **Admin sign-in** — username/password for the web dashboard (`/auth/admin-login`; default dev credentials documented under Local development)
+- **Worker app on web** — centered phone frame on desktop; modals constrained to the frame via `AppModal`
 - **Live Zone Status** — weather, AQI, active alerts per zone
 - **4-Layer Fraud Engine** — GPS, behavioral, cluster, enrollment checks
 - **ML Premium Engine** — dynamic weekly premium based on zone risk + tenure
 - **Real-time WebSockets** — claim status updates pushed live to mobile + admin
 - **Forecast Shield** — proactive coverage upgrade before predicted disruptions
 - **Earnings DNA** — 7×24 heatmap of worker earning patterns
+- **Disruption demo payouts** — `payout_engine.compute_demo_dna_payout` models ₹/hr at risk (capped by tier), with guards so repeated tiny demo runs or quiet IST hours do not produce meaningless ₹4-style credits (see `safenet_v2/backend/app/engines/payout_engine.py`)
 
 ---
 
@@ -426,11 +430,13 @@ ALPHA/
     │   ├── icon.png
     │   └── splash-icon.png
     ├── components/
+    │   ├── AppModal.js
     │   ├── DisruptionModal.js
     │   ├── LocationGate.js
     │   ├── NotificationInitializer.js
     │   ├── PolicyBootstrap.js
     │   ├── PremiumDueModal.js
+    │   ├── WebPhoneFrame.js
     │   └── WebSocketBridge.js
     ├── contexts/
     │   ├── AuthContext.js
@@ -626,11 +632,13 @@ Alphabetical list of project files **excluding** `node_modules`, `.git`, `__pyca
 - `assets/favicon.png`
 - `assets/icon.png`
 - `assets/splash-icon.png`
+- `components/AppModal.js`
 - `components/DisruptionModal.js`
 - `components/LocationGate.js`
 - `components/NotificationInitializer.js`
 - `components/PolicyBootstrap.js`
 - `components/PremiumDueModal.js`
+- `components/WebPhoneFrame.js`
 - `components/WebSocketBridge.js`
 - `contexts/AuthContext.js`
 - `contexts/ClaimContext.js`
@@ -661,6 +669,7 @@ Alphabetical list of project files **excluding** `node_modules`, `.git`, `__pyca
 
 - **Backend entry:** `safenet_v2/backend/app/main.py` — mounts REST v1 routes, middleware, health, WebSockets.
 - **Worker mobile API client:** `SafeNetFresh/services/api.js` — JWT, base URL from `app.json` `extra` (`BACKEND_URL`, `BACKEND_URL_DEV`, `BACKEND_URL_LOCAL`); timeouts and retry rules tuned for local vs hosted APIs.
+- **Web layout:** `SafeNetFresh/components/WebPhoneFrame.js` wraps the app on web; `SafeNetFresh/components/AppModal.js` renders in-tree overlays on web (full-width `Modal` avoided so UI stays inside the phone shell).
 - **Live updates:** `SafeNetFresh/services/websocket.service.js` and `safenet_v2/admin/src/services/admin_websocket.ts` talk to `app/api/v1/routes/websockets.py` via Redis pub/sub (`app/services/realtime_service.py`).
 - **Domain logic:** `app/engines/*` (confidence, fraud layers, premium ML, payout, etc.) with `app/services/*` for external data.
 - **Persistence:** SQLAlchemy models under `app/models/`, Alembic migrations under `app/db/migrations/versions/` and mirrored `alembic/versions/` for discovery.
