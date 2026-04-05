@@ -3,7 +3,7 @@ import { NavigationContainer, DefaultTheme } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { View, ActivityIndicator, Text } from 'react-native';
+import { View, ActivityIndicator, Text, Platform } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
@@ -17,6 +17,7 @@ import PremiumDueModal from './components/PremiumDueModal';
 import LocationGate from './components/LocationGate';
 import NotificationInitializer from './components/NotificationInitializer';
 import PolicyBootstrap from './components/PolicyBootstrap';
+import WebPhoneFrame from './components/WebPhoneFrame';
 
 import SplashScreen from './screens/SplashScreen';
 import OnboardingScreen from './screens/OnboardingScreen';
@@ -152,14 +153,15 @@ function RootNavigator() {
   );
 
   if (!isRestored) {
-    return (
+    const loading = (
       <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#f0f4ff' }}>
         <ActivityIndicator size="large" color="#1a73e8" />
       </View>
     );
+    return Platform.OS === 'web' ? <WebPhoneFrame>{loading}</WebPhoneFrame> : loading;
   }
 
-  return (
+  const nav = (
     <NavigationContainer
       theme={theme}
       ref={navigationRef}
@@ -200,6 +202,8 @@ function RootNavigator() {
       </Stack.Navigator>
     </NavigationContainer>
   );
+
+  return Platform.OS === 'web' ? <WebPhoneFrame>{nav}</WebPhoneFrame> : nav;
 }
 
 export default function App() {
@@ -207,17 +211,17 @@ export default function App() {
     <SafeAreaProvider>
       <GestureHandlerRootView style={{ flex: 1 }}>
         <QueryClientProvider client={queryClient}>
-        <AuthProvider>
-          <WsConnectionProvider>
-            <ClaimProvider>
-              <PolicyProvider>
-                <NotificationInitializer />
-                <RootNavigator />
-              </PolicyProvider>
-            </ClaimProvider>
-          </WsConnectionProvider>
-        </AuthProvider>
-      </QueryClientProvider>
+          <AuthProvider>
+            <WsConnectionProvider>
+              <ClaimProvider>
+                <PolicyProvider>
+                  <NotificationInitializer />
+                  <RootNavigator />
+                </PolicyProvider>
+              </ClaimProvider>
+            </WsConnectionProvider>
+          </AuthProvider>
+        </QueryClientProvider>
       </GestureHandlerRootView>
     </SafeAreaProvider>
   );
