@@ -22,7 +22,6 @@ export default function OnboardingScreen({ navigation }) {
   const insets = useSafeAreaInsets();
   const [phone, setPhone] = useState('');
   const [loading, setLoading] = useState(false);
-  const [devToast, setDevToast] = useState(null);
 
   const handleSendOtp = async () => {
     Keyboard.dismiss();
@@ -33,17 +32,11 @@ export default function OnboardingScreen({ navigation }) {
     }
 
     setLoading(true);
-    setDevToast(null);
     try {
-      const res = await auth.sendOTP(cleaned);
-      if (__DEV__ && res?.demo_otp != null) {
-        setDevToast(`Demo mode: your OTP is ${res.demo_otp}`);
-        setTimeout(() => setDevToast(null), 8000);
-      }
-      navigation.navigate('OTPVerify', {
-        phone: cleaned,
-        demoOtp: __DEV__ ? res?.demo_otp : undefined,
-      });
+      await auth.sendOTP(cleaned);
+      // Small delay to simulate real SMS sending
+      await new Promise((r) => setTimeout(r, 1000));
+      navigation.navigate('OTPVerify', { phone: cleaned });
     } catch (e) {
       Alert.alert('Error', e?.message || e?.response?.data?.detail || 'Failed to send OTP');
     } finally {
@@ -100,12 +93,6 @@ export default function OnboardingScreen({ navigation }) {
               <Text style={styles.trustItem}>🛡️ RBI compliant model</Text>
             </View>
           </View>
-
-          {__DEV__ && devToast ? (
-            <View style={[styles.toast, { bottom: insets.bottom + 12 }]}>
-              <Text style={styles.toastText}>{devToast}</Text>
-            </View>
-          ) : null}
         </View>
       </TouchableWithoutFeedback>
     </KeyboardAvoidingView>

@@ -47,7 +47,7 @@ async def send_otp(
         decision=str(success),
         reason_code="OTP_FLOW",
     )
-    return {"success": bool(success), "demo_otp": demo_otp}
+    return {"success": bool(success)}
 
 
 @router.post("/verify-otp", response_model=TokenResponse)

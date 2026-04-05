@@ -103,6 +103,19 @@ class OTPService:
 
     @staticmethod
     async def verify(phone: str, otp: str, redis_client: Any, request: Any) -> Tuple[bool, str]:
+        # DEMO MODE: accept any valid 6-digit OTP — no friction for judges
+        if settings.DEMO_MODE and len(otp) == 6 and otp.isdigit():
+            # Still try to clean up a real stored OTP if one exists
+            await OTPService._delete(phone, redis_client, request)
+            log.info(
+                "otp_demo_bypass",
+                engine_name="otp_service",
+                decision="ok",
+                reason_code="OTP_DEMO_BYPASS",
+                phone_suffix=phone[-4:],
+            )
+            return True, "OTP verified successfully"
+
         stored = await OTPService._get(phone, redis_client, request)
         if not stored:
             return False, "OTP expired or not found. Please request a new one."

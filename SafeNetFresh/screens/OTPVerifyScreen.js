@@ -20,7 +20,7 @@ import { useAuth } from '../contexts/AuthContext';
 const BRAND = '#1A56DB';
 
 export default function OTPVerifyScreen({ navigation, route }) {
-  const { phone, demoOtp } = route.params || {};
+  const { phone } = route.params || {};
   const { signIn, dispatch, signOut } = useAuth();
   const insets = useSafeAreaInsets();
 
@@ -31,6 +31,19 @@ export default function OTPVerifyScreen({ navigation, route }) {
   const submittedCodeRef = useRef(null);
   const verifyInFlight = useRef(false);
   const inputsRef = useRef([]);
+
+  // Simulate SMS autofill: after 1.3s auto-fill and submit
+  useEffect(() => {
+    const AUTOFILL = '123456';
+    const t = setTimeout(() => {
+      if (verifyInFlight.current) return;
+      setDigits(AUTOFILL.split(''));
+      submittedCodeRef.current = AUTOFILL;
+      verifyWithCode(AUTOFILL);
+    }, 1300);
+    return () => clearTimeout(t);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (remain <= 0) return undefined;
@@ -145,10 +158,6 @@ export default function OTPVerifyScreen({ navigation, route }) {
       <TouchableWithoutFeedback onPress={Keyboard.dismiss} accessible={false}>
         <View style={[styles.container, { paddingTop: insets.top + 12, paddingBottom: insets.bottom + 12 }]}>
           <Text style={styles.header}>Verify +91 {phone || '—'}</Text>
-          {__DEV__ && demoOtp != null ? (
-            <Text style={styles.demoHint}>Demo mode: OTP {demoOtp}</Text>
-          ) : null}
-
           <Text style={styles.sub}>Enter the 6-digit code</Text>
 
           <View style={styles.row}>
