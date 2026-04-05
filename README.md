@@ -689,4 +689,4 @@ Get-ChildItem -Path . -Recurse -File -ErrorAction SilentlyContinue |
 
 ---
 
-*Generated for the ALPHA workspace layout. Adjust paths if you add new packages or split services.*
+ 
