@@ -8,10 +8,10 @@
 
 | What | URL |
 |------|-----|
-| 🌐 **Admin Dashboard** | [https://safenet-sage.vercel.app/](https://safenet-sage.vercel.app/) |
+| 📱 **Mobile App** | Scan QR below with Expo Go or ([https://safenet-sage.vercel.app/](https://safenet-sage.vercel.app/))|
+| 🌐 **Admin Dashboard** | [https://safenet-admin-wine.vercel.app/login](https://safenet-admin-wine.vercel.app/login) |
 | ⚙️ **Backend API** | [https://safenet-api-y4se.onrender.com](https://safenet-api-y4se.onrender.com) |
 | ❤️ **Health Check** | [https://safenet-api-y4se.onrender.com/health](https://safenet-api-y4se.onrender.com/health) |
-| 📱 **Mobile App** | Scan QR below with Expo Go or ([https://safenet-sage.vercel.app/](https://safenet-sage.vercel.app/))|
 | 💻 **GitHub** | [https://github.com/BHARGAVSAI558/devtrails-2026-alphanexus-phase2](https://github.com/BHARGAVSAI558/devtrails-2026-alphanexus-phase2) |
 
 ---
