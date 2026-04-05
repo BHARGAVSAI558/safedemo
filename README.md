@@ -11,7 +11,7 @@
 | 🌐 **Admin Dashboard** | [https://devtrails-2026-alphanexus-phase-scale.vercel.app](https://devtrails-2026-alphanexus-phase-scale.vercel.app) |
 | ⚙️ **Backend API** | [https://safenet-api-y4se.onrender.com](https://safenet-api-y4se.onrender.com) |
 | ❤️ **Health Check** | [https://safenet-api-y4se.onrender.com/health](https://safenet-api-y4se.onrender.com/health) |
-| 📱 **Mobile App** | Scan QR below with Expo Go or https://safenet-sage.vercel.app/([https://safenet-sage.vercel.app/](url))|
+| 📱 **Mobile App** | Scan QR below with Expo Go or ([https://safenet-sage.vercel.app/](url))|
 | 💻 **GitHub** | [https://github.com/BHARGAVSAI558/devtrails-2026-alphanexus-phase2](https://github.com/BHARGAVSAI558/devtrails-2026-alphanexus-phase2) |
 
 ---
