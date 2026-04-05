@@ -40,9 +40,9 @@ exp://u.expo.dev/safenet
 > git clone https://github.com/BHARGAVSAI558/devtrails-2026-alphanexus-phase-scale
 > cd devtrails-2026-alphanexus-phase-scale/SafeNetFresh
 > npm install
-> npx expo start
+> npm start
 > ```
-> Then scan the QR that appears in your terminal with Expo Go.
+> (`npm start` runs `expo start --lan` so your phone uses the correct LAN URL.) Then scan the QR with Expo Go.
 
 ---
 
@@ -57,9 +57,9 @@ exp://u.expo.dev/safenet
 
 ## 🌐 Try the Admin Dashboard
 
-1. Open [https://devtrails-2026-alphanexus-phase-scale.vercel.app](https://devtrails-2026-alphanexus-phase-scale.vercel.app)
-2. Login with admin OTP
-3. See live claims feed, fraud queue, zone heatmap, worker analytics
+1. Open [https://devtrails-2026-alphanexus-phase-scale.vercel.app](https://devtrails-2026-alphanexus-phase-scale.vercel.app) (or run `safenet_v2/admin` locally — see [Local development](#local-development)).
+2. Sign in with **username** `admin` and **password** `admin123` (web admin only; workers still use OTP in the mobile app). Override in production with API env vars `ADMIN_DASHBOARD_USERNAME` / `ADMIN_DASHBOARD_PASSWORD`.
+3. Explore live claims feed, fraud queue, zone heatmap, workers, and simulations.
 
 ---
 
@@ -130,9 +130,59 @@ flowchart TB
 
 ---
 
+## Local development
+
+### Backend API (`safenet_v2/backend`)
+
+```bash
+cd safenet_v2/backend
+# Configure .env (DATABASE_URL, REDIS_URL, JWT_SECRET, etc.)
+python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+Use **`--host 0.0.0.0`** so phones, emulators, and other devices on your LAN can reach port **8000**. Health: [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health) or [http://127.0.0.1:8000/](http://127.0.0.1:8000/).
+
+### Mobile app (`SafeNetFresh`)
+
+API base URL is resolved in `SafeNetFresh/services/api.js` from `app.json` → `expo.extra`:
+
+| Key | Purpose |
+|-----|---------|
+| `BACKEND_URL` | Production API (HTTPS), e.g. Render — used when `BACKEND_URL_DEV` is `remote` or in release builds. |
+| `BACKEND_URL_DEV` | `local` — in dev, call `http://<Metro-LAN-host>:8000` (same machine as Expo). `remote` — in dev, always use `BACKEND_URL` (no local uvicorn). |
+| `BACKEND_URL_LOCAL` | Optional full URL override (e.g. `http://192.168.1.10:8000`, or an **https** ngrok URL if plain HTTP from the device is blocked). |
+
+Useful scripts (run from `SafeNetFresh/`):
+
+```bash
+npm start                 # expo start --lan
+npm run verify:api        # quick check that http://127.0.0.1:8000/ responds (uvicorn must be running)
+npm run windows:firewall-api   # PowerShell as Administrator: allow inbound TCP 8000 on all Windows firewall profiles (needed for iPhone hotspot → PC)
+npm run android:usb-api   # adb reverse tcp:8000 tcp:8000 — then set BACKEND_URL_LOCAL to http://127.0.0.1:8000
+```
+
+**Debugging “No response” / timeouts:** On the phone, open Safari (or Chrome) → `http://<YOUR_PC_IP>:8000/`. If the browser cannot load the API, fix Windows firewall + uvicorn binding before changing app code. Expo **tunnel** mode cannot reach your PC’s port 8000 unless you use **HTTPS** (e.g. ngrok) in `BACKEND_URL_LOCAL` or set `BACKEND_URL_DEV` to `remote`.
+
+`app.json` enables **`usesCleartextTraffic`** (Android) and **`NSAppTransportSecurity`** entries (iOS) for dev builds; **Expo Go** still depends on its own native shell for some HTTP rules.
+
+### Admin dashboard (`safenet_v2/admin`)
+
+```bash
+cd safenet_v2/admin
+npm install
+npm run dev
+```
+
+- With **no** `VITE_BACKEND_URL`, Vite proxies `/api` to `http://127.0.0.1:8000` (see `vite.config.js`).
+- Or create `.env.local`: `VITE_BACKEND_URL=http://127.0.0.1:8000` (or your deployed API).
+- Sign in with **admin** / **admin123** against a running API that exposes `POST /api/v1/auth/admin-login`.
+
+---
+
 ## ⚡ Key Features
 
-- **OTP Auth** — phone number login, no passwords
+- **OTP Auth** — phone number login for workers in the mobile app
+- **Admin sign-in** — username/password for the web dashboard (`/auth/admin-login`; default dev credentials documented under Local development)
 - **Live Zone Status** — weather, AQI, active alerts per zone
 - **4-Layer Fraud Engine** — GPS, behavioral, cluster, enrollment checks
 - **ML Premium Engine** — dynamic weekly premium based on zone risk + tenure
@@ -155,7 +205,7 @@ This repository contains three applications that work together:
 | Area | Path | Role |
 |------|------|------|
 | **API** | `safenet_v2/backend/` | FastAPI backend: auth, policies, claims, fraud/ML engines, WebSockets, schedulers |
-| **Admin** | `safenet_v2/admin/` | Vite + React + TypeScript dashboard (OTP login, live feed, zones, workers, simulations) |
+| **Admin** | `safenet_v2/admin/` | Vite + React + TypeScript dashboard (username/password admin login, live feed, zones, workers, simulations) |
 | **Mobile** | `SafeNetFresh/` | Expo / React Native worker app (dashboard, claims, telemetry) |
 
 ---
@@ -610,7 +660,7 @@ Alphabetical list of project files **excluding** `node_modules`, `.git`, `__pyca
 ## How the pieces connect (quick reference)
 
 - **Backend entry:** `safenet_v2/backend/app/main.py` — mounts REST v1 routes, middleware, health, WebSockets.
-- **Worker mobile API client:** `SafeNetFresh/services/api.js` — JWT, retries, base URL from `app.json` / Constants.
+- **Worker mobile API client:** `SafeNetFresh/services/api.js` — JWT, base URL from `app.json` `extra` (`BACKEND_URL`, `BACKEND_URL_DEV`, `BACKEND_URL_LOCAL`); timeouts and retry rules tuned for local vs hosted APIs.
 - **Live updates:** `SafeNetFresh/services/websocket.service.js` and `safenet_v2/admin/src/services/admin_websocket.ts` talk to `app/api/v1/routes/websockets.py` via Redis pub/sub (`app/services/realtime_service.py`).
 - **Domain logic:** `app/engines/*` (confidence, fraud layers, premium ML, payout, etc.) with `app/services/*` for external data.
 - **Persistence:** SQLAlchemy models under `app/models/`, Alembic migrations under `app/db/migrations/versions/` and mirrored `alembic/versions/` for discovery.

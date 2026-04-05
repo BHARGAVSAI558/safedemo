@@ -1,8 +1,9 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { useVirtualizer } from '@tanstack/react-virtual';
 
 import api from '../api';
+import { adminUi } from '../theme/adminUi';
+import { formatTierLabel } from '../utils/tier';
 
 type WorkerRow = {
   worker_id: number;
@@ -23,25 +24,6 @@ type WorkerListResponse = {
   page_size: number;
   next_cursor?: string | null;
 };
-
-const WorkerTableRow = React.memo(function WorkerTableRow({
-  row,
-}: {
-  row: WorkerRow;
-}) {
-  return (
-    <>
-      <td style={styles.td}>{row.phone_masked}</td>
-      <td style={styles.td}>{row.zone}</td>
-      <td style={styles.td}>{row.trust_score.toFixed(2)}</td>
-      <td style={styles.td}>{row.coverage_tier}</td>
-      <td style={styles.td}>₹{row.weekly_premium.toFixed(0)}</td>
-      <td style={styles.td}>{row.claims_total}</td>
-      <td style={styles.td}>{row.fraud_flags}</td>
-      <td style={styles.td}>{row.status}</td>
-    </>
-  );
-});
 
 export default function Workers() {
   const [q, setQ] = useState('');
@@ -64,7 +46,7 @@ export default function Workers() {
     queryKey: ['admin', 'workers', debouncedQ, debouncedZone, page],
     queryFn: async (): Promise<WorkerListResponse> =>
       (await api.get('/admin/workers', { params: { q: debouncedQ, zone: debouncedZone, page, page_size: 200 } })).data,
-    keepPreviousData: true,
+    placeholderData: (prev) => prev,
   });
 
   const detailQuery = useQuery({
@@ -74,96 +56,217 @@ export default function Workers() {
   });
 
   const rows = workersQuery.data?.data ?? [];
-  const totalPages = Math.max(1, Math.ceil((workersQuery.data?.total_count ?? 0) / (workersQuery.data?.page_size ?? 12)));
-  const parentRef = useRef<HTMLDivElement | null>(null);
-  const virtualizer = useVirtualizer({
-    count: rows.length,
-    getScrollElement: () => parentRef.current,
-    estimateSize: () => 46,
-    overscan: 8,
-  });
-  const virtualItems = virtualizer.getVirtualItems();
+  const totalPages = Math.max(
+    1,
+    Math.ceil((workersQuery.data?.total_count ?? 0) / (workersQuery.data?.page_size ?? 12))
+  );
 
   return (
-    <div>
-      <h1 style={styles.title}>Workers</h1>
-      <p style={styles.sub}>Searchable, filterable and paginated worker registry</p>
+    <div style={adminUi.page}>
+      <header style={adminUi.pageHeader}>
+        <h1 style={adminUi.h1}>Workers</h1>
+        <p style={adminUi.sub}>Search and filter the worker registry. Select a row for profile, claims, and device data.</p>
+      </header>
 
-      <div style={styles.filters}>
-        <input style={styles.input} placeholder="Search phone or worker id" value={q} onChange={(e) => setQ(e.target.value)} />
-        <input style={styles.input} placeholder="Filter zone (e.g. hyd)" value={zone} onChange={(e) => setZone(e.target.value)} />
-        <button style={styles.btn} onClick={() => setPage(1)}>Apply</button>
+      {workersQuery.isError ? (
+        <div
+          style={{
+            ...adminUi.card,
+            marginBottom: 16,
+            borderColor: '#fecaca',
+            background: '#fef2f2',
+            color: '#b91c1c',
+            fontWeight: 600,
+            fontSize: '0.875rem',
+          }}
+        >
+          Could not load workers.{' '}
+          <button type="button" style={{ ...adminUi.btnPrimary, marginTop: 10, display: 'inline-block' }} onClick={() => void workersQuery.refetch()}>
+            Retry
+          </button>
+        </div>
+      ) : null}
+
+      <div style={{ ...adminUi.toolbar, marginBottom: 8 }}>
+        <input
+          style={adminUi.input}
+          placeholder="Search phone or worker ID"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          aria-label="Search workers"
+        />
+        <input
+          style={{ ...adminUi.input, flex: '0 1 220px' }}
+          placeholder="Zone filter (e.g. hyd)"
+          value={zone}
+          onChange={(e) => setZone(e.target.value)}
+          aria-label="Filter by zone"
+        />
+        <button type="button" style={adminUi.btnPrimary} onClick={() => setPage(1)}>
+          Apply filters
+        </button>
       </div>
 
-      <div style={{ ...styles.tableWrap, height: 460, overflow: 'auto' }} ref={parentRef}>
-        <table style={styles.table}>
+      <div style={adminUi.tableScroll}>
+        <table style={{ ...adminUi.table, minWidth: 900 }}>
           <thead>
             <tr>
-              <th style={styles.th}>Phone</th>
-              <th style={styles.th}>Zone</th>
-              <th style={styles.th}>Trust Score</th>
-              <th style={styles.th}>Coverage Tier</th>
-              <th style={styles.th}>Weekly Premium</th>
-              <th style={styles.th}>Claims</th>
-              <th style={styles.th}>Fraud Flags</th>
-              <th style={styles.th}>Status</th>
+              <th style={adminUi.th}>Phone</th>
+              <th style={adminUi.th}>Zone</th>
+              <th style={adminUi.th}>Trust</th>
+              <th style={adminUi.th}>Tier</th>
+              <th style={adminUi.th}>Premium / wk</th>
+              <th style={adminUi.th}>Claims</th>
+              <th style={adminUi.th}>Fraud flags</th>
+              <th style={adminUi.th}>Status</th>
             </tr>
           </thead>
-          <tbody style={{ position: 'relative', height: virtualizer.getTotalSize() }}>
-            {virtualItems.map((vi) => {
-              const r = rows[vi.index];
-              if (!r) return null;
-              return (
-                <tr key={r.worker_id} style={{ ...styles.tr, position: 'absolute', transform: `translateY(${vi.start}px)`, width: '100%' }} onClick={() => setSelectedWorkerId(r.worker_id)}>
-                  <WorkerTableRow row={r} />
-                </tr>
-              );
-            })}
-            {rows.length === 0 ? (
+          <tbody>
+            {workersQuery.isFetching && rows.length === 0 ? (
               <tr>
-                <td style={styles.td} colSpan={8}>No workers found.</td>
+                <td colSpan={8} style={{ ...adminUi.td, textAlign: 'center', padding: 32 }}>
+                  Loading…
+                </td>
+              </tr>
+            ) : null}
+            {rows.map((row) => (
+              <tr
+                key={row.worker_id}
+                style={adminUi.trHover}
+                onClick={() => setSelectedWorkerId(row.worker_id)}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = 'var(--admin-bg-subtle)';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = 'transparent';
+                }}
+              >
+                <td style={adminUi.td}>{row.phone_masked}</td>
+                <td style={adminUi.td}>{row.zone}</td>
+                <td style={adminUi.td}>{row.trust_score.toFixed(2)}</td>
+                <td style={adminUi.td}>{formatTierLabel(row.coverage_tier)}</td>
+                <td style={adminUi.td}>₹{row.weekly_premium.toFixed(0)}</td>
+                <td style={adminUi.td}>{row.claims_total}</td>
+                <td style={adminUi.td}>{row.fraud_flags}</td>
+                <td style={adminUi.td}>
+                  <span
+                    style={{
+                      fontSize: '0.75rem',
+                      fontWeight: 700,
+                      padding: '4px 8px',
+                      borderRadius: 6,
+                      background: 'var(--admin-bg-subtle)',
+                      border: '1px solid var(--admin-border)',
+                    }}
+                  >
+                    {row.status}
+                  </span>
+                </td>
+              </tr>
+            ))}
+            {!workersQuery.isFetching && rows.length === 0 ? (
+              <tr>
+                <td colSpan={8} style={adminUi.td}>
+                  <div style={adminUi.empty}>No workers match your filters.</div>
+                </td>
               </tr>
             ) : null}
           </tbody>
         </table>
       </div>
 
-      <div style={styles.pagination}>
-        <button style={styles.btn} disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>Prev</button>
-        <span style={{ color: '#334155', fontWeight: 700 }}>Page {page} / {totalPages}</span>
-        <button style={styles.btn} disabled={page >= totalPages} onClick={() => setPage((p) => p + 1)}>Next</button>
+      <div style={{ ...adminUi.toolbar, marginTop: 16, justifyContent: 'flex-start' }}>
+        <button type="button" style={adminUi.btn} disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>
+          Previous
+        </button>
+        <span style={{ fontSize: '0.875rem', fontWeight: 700, color: 'var(--admin-muted)' }}>
+          Page {page} of {totalPages}
+        </span>
+        <button type="button" style={adminUi.btn} disabled={page >= totalPages} onClick={() => setPage((p) => p + 1)}>
+          Next
+        </button>
       </div>
 
       {selectedWorkerId ? (
-        <div style={styles.drawerOverlay} onClick={() => setSelectedWorkerId(null)}>
-          <div style={styles.drawer} onClick={(e) => e.stopPropagation()}>
-            <div style={styles.drawerHeader}>
-              <h3 style={{ margin: 0 }}>Worker #{selectedWorkerId}</h3>
-              <button style={styles.btn} onClick={() => setSelectedWorkerId(null)}>Close</button>
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(15, 23, 42, 0.45)',
+            zIndex: 50,
+            display: 'flex',
+            justifyContent: 'flex-end',
+            alignItems: 'stretch',
+          }}
+          onClick={() => setSelectedWorkerId(null)}
+          role="presentation"
+        >
+          <div
+            style={{
+              width: 'min(560px, 100vw)',
+              height: '100%',
+              overflow: 'auto',
+              background: 'var(--admin-surface)',
+              padding: 24,
+              borderLeft: '1px solid var(--admin-border)',
+              boxShadow: '-8px 0 32px rgba(15,23,42,0.12)',
+            }}
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="worker-drawer-title"
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+              <h2 id="worker-drawer-title" style={{ margin: 0, fontSize: '1.125rem', fontWeight: 800 }}>
+                Worker #{selectedWorkerId}
+              </h2>
+              <button type="button" style={adminUi.btn} onClick={() => setSelectedWorkerId(null)}>
+                Close
+              </button>
             </div>
 
-            {detailQuery.isLoading ? <p>Loading details...</p> : detailQuery.error ? <p>Failed to load details.</p> : (
-              <div style={{ display: 'grid', gap: 14 }}>
-                <div>
-                  <b>Profile</b>
-                  <pre style={styles.pre}>{JSON.stringify(detailQuery.data?.profile ?? {}, null, 2)}</pre>
-                </div>
-                <div>
-                  <b>Claim history</b>
-                  <pre style={styles.pre}>{JSON.stringify(detailQuery.data?.claim_history ?? [], null, 2)}</pre>
-                </div>
-                <div>
-                  <b>GPS trail map data</b>
-                  <pre style={styles.pre}>{JSON.stringify(detailQuery.data?.gps_trail ?? [], null, 2)}</pre>
-                </div>
-                <div>
-                  <b>Trust timeline</b>
-                  <pre style={styles.pre}>{JSON.stringify(detailQuery.data?.trust_timeline ?? [], null, 2)}</pre>
-                </div>
-                <div>
-                  <b>Device fingerprint</b>
-                  <pre style={styles.pre}>{JSON.stringify(detailQuery.data?.device_fingerprint ?? {}, null, 2)}</pre>
-                </div>
+            {detailQuery.isLoading ? (
+              <p style={{ color: 'var(--admin-muted)', fontWeight: 600 }}>Loading details…</p>
+            ) : detailQuery.error ? (
+              <p style={{ color: '#b91c1c', fontWeight: 600 }}>
+                Failed to load.{' '}
+                <button type="button" style={adminUi.btnPrimary} onClick={() => void detailQuery.refetch()}>
+                  Retry
+                </button>
+              </p>
+            ) : (
+              <div style={{ display: 'grid', gap: 20 }}>
+                {(['profile', 'claim_history', 'gps_trail', 'trust_timeline', 'device_fingerprint'] as const).map((key) => (
+                  <section key={key}>
+                    <h3
+                      style={{
+                        fontSize: '0.6875rem',
+                        fontWeight: 800,
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.08em',
+                        color: 'var(--admin-muted)',
+                        margin: '0 0 8px',
+                      }}
+                    >
+                      {key.replace(/_/g, ' ')}
+                    </h3>
+                    <pre
+                      style={{
+                        margin: 0,
+                        background: 'var(--admin-bg-subtle)',
+                        border: '1px solid var(--admin-border)',
+                        borderRadius: 10,
+                        padding: 14,
+                        fontSize: 12,
+                        overflow: 'auto',
+                        maxHeight: 240,
+                        lineHeight: 1.45,
+                      }}
+                    >
+                      {JSON.stringify((detailQuery.data as Record<string, unknown>)?.[key] ?? {}, null, 2)}
+                    </pre>
+                  </section>
+                ))}
               </div>
             )}
           </div>
@@ -172,22 +275,3 @@ export default function Workers() {
     </div>
   );
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  title: { fontSize: 24, fontWeight: 800, color: '#0f172a', margin: 0 },
-  sub: { color: '#6b7280', marginTop: 6, marginBottom: 14 },
-  filters: { display: 'flex', gap: 10, marginBottom: 12 },
-  input: { flex: 1, border: '1px solid #cbd5e1', borderRadius: 8, padding: '9px 12px' },
-  btn: { border: '1px solid #cbd5e1', borderRadius: 8, background: '#fff', padding: '8px 12px', cursor: 'pointer', fontWeight: 700 },
-  tableWrap: { border: '1px solid #e2e8f0', borderRadius: 10, overflow: 'hidden' },
-  table: { width: '100%', borderCollapse: 'collapse' },
-  th: { textAlign: 'left', padding: '10px', background: '#f8fafc', color: '#475569', fontSize: 12 },
-  td: { padding: '10px', borderTop: '1px solid #f1f5f9', fontSize: 13, color: '#0f172a' },
-  tr: { cursor: 'pointer' },
-  pagination: { marginTop: 12, display: 'flex', alignItems: 'center', gap: 10 },
-  drawerOverlay: { position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.45)', display: 'flex', justifyContent: 'flex-end', zIndex: 50 },
-  drawer: { width: 560, background: '#fff', height: '100%', padding: 16, overflowY: 'auto' },
-  drawerHeader: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
-  pre: { background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, padding: 10, fontSize: 12, overflow: 'auto' },
-};
-

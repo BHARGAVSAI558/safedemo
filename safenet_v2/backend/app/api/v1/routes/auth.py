@@ -1,21 +1,31 @@
+import hmac
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.security import create_admin_token, create_access_token, create_refresh_token, verify_token
 from app.db.session import get_db
 from app.models.claim import Log
 from app.models.auth_token import RefreshToken
 from app.models.worker import User
-from app.schemas.auth import RefreshRequest, SendOTPRequest, TokenResponse, VerifyOTPRequest
+from app.schemas.auth import AdminLoginRequest, RefreshRequest, SendOTPRequest, TokenResponse, VerifyOTPRequest
 from app.services.otp_service import OTPService
 from app.utils.logger import get_logger
 from structlog.contextvars import bind_contextvars
 
 log = get_logger(__name__)
 router = APIRouter()
+
+
+def _const_time_eq(expected: str, provided: str) -> bool:
+    e = (expected or "").encode("utf-8")
+    p = (provided or "").encode("utf-8")
+    if len(e) != len(p):
+        return False
+    return hmac.compare_digest(e, p)
 
 
 def get_redis(request: Request):
@@ -30,7 +40,7 @@ async def send_otp(
 ):
     redis = get_redis(request)
     phone = body.phone_number
-    success, message, demo_otp = await OTPService.send(phone, redis, request)
+    success, message = await OTPService.send(phone, redis, request)
 
     db.add(
         Log(
@@ -48,6 +58,74 @@ async def send_otp(
         reason_code="OTP_FLOW",
     )
     return {"success": bool(success)}
+
+
+@router.post("/admin-login", response_model=TokenResponse)
+async def admin_login(
+    request: Request,
+    body: AdminLoginRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Username/password for the web admin only (no OTP). Creates a synthetic admin user row if needed."""
+    u = body.username.strip()
+    p = (body.password or "").strip()
+    if not _const_time_eq(settings.ADMIN_DASHBOARD_USERNAME, u):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
+    if not _const_time_eq(settings.ADMIN_DASHBOARD_PASSWORD, p):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
+
+    phone = (settings.ADMIN_CONSOLE_PHONE or "9000000001").strip()
+    result = await db.execute(select(User).where(User.phone == phone))
+    user = result.scalar_one_or_none()
+    if not user:
+        user = User(phone=phone, is_active=True, is_admin=True)
+        db.add(user)
+        await db.flush()
+        await db.refresh(user)
+        log.info(
+            "admin_console_user_created",
+            engine_name="auth_route",
+            worker_id=user.id,
+        )
+    else:
+        if not user.is_admin:
+            user.is_admin = True
+        log.info(
+            "admin_password_login",
+            engine_name="auth_route",
+            worker_id=user.id,
+        )
+
+    bind_contextvars(worker_id=user.id)
+    token_data = {"user_id": user.id, "phone": user.phone}
+    access_token = create_admin_token(token_data)
+    refresh_token = create_refresh_token(token_data)
+    refresh_payload = verify_token(refresh_token, token_type="refresh")
+    db.add(
+        Log(
+            user_id=user.id,
+            event_type="admin_login",
+            detail="password",
+            ip_address=request.client.host if request.client else None,
+        )
+    )
+    db.add(
+        RefreshToken(
+            user_id=user.id,
+            token_jti=str(refresh_payload.get("jti")),
+            token_value=refresh_token,
+            used=False,
+            expires_at=datetime.now(timezone.utc) + timedelta(days=7),
+        )
+    )
+    await db.commit()
+
+    return TokenResponse(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        user_id=user.id,
+        is_new_user=False,
+    )
 
 
 @router.post("/verify-otp", response_model=TokenResponse)

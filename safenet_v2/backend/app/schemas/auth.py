@@ -36,6 +36,11 @@ class TokenResponse(BaseModel):
     is_new_user: bool = False
 
 
+class AdminLoginRequest(BaseModel):
+    username: str = Field(..., min_length=1, max_length=64)
+    password: str = Field(..., min_length=1, max_length=256)
+
+
 class RefreshRequest(BaseModel):
     refresh_token: str
     # When true, attempt to mint a JWT with `type="admin"` (requires the user to be an admin).

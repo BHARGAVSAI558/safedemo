@@ -1,55 +1,70 @@
-from datetime import datetime, timezone
-
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from structlog.contextvars import bind_contextvars
 
 from app.api.v1.routes.workers import get_current_user
 from app.db.session import get_db
-from app.models.policy import Policy
 from app.models.worker import OccupationType as OrmOccupation
 from app.models.worker import Profile, RiskProfile as OrmRisk, User
-from app.schemas.profile import GigProfileUpsert
+from app.schemas.profile import GigProfileResponse, GigProfileUpsert, ProfileBootstrapResponse
 from app.services.cache_service import cache_invalidate
-from app.engines.premium_engine import PremiumEngine
+from app.services.onboarding_pricing import (
+    TIER_MAX_DAILY,
+    ZONE_RISK_LABEL,
+    ZONE_TO_RISK,
+    compute_risk_score,
+    compute_weekly_premium,
+    normalize_zone,
+)
 from app.utils.logger import get_logger
-from structlog.contextvars import bind_contextvars
 
 log = get_logger(__name__)
 router = APIRouter()
 
-TIER_TO_PRODUCT = {
-    "Basic": "income_shield_basic",
-    "Standard": "income_shield_standard",
-    "Pro": "income_shield_pro",
-}
 
-TIER_MULT = {
-    "Basic": 0.92,
-    "Standard": 1.0,
-    "Pro": 1.12,
-}
-
-# Normalized zone_id (lowercase snake) → risk tier for pricing / engine
-ZONE_TO_RISK: dict[str, OrmRisk] = {
-    "kukatpally": OrmRisk.high,
-    "hitec_city": OrmRisk.low,
-    "secunderabad": OrmRisk.medium,
-    "gachibowli": OrmRisk.medium,
-    "lb_nagar": OrmRisk.high,
-    "ameerpet": OrmRisk.medium,
-    "other": OrmRisk.medium,
-}
+def _mask_phone(phone: str | None) -> str:
+    if not phone or len(str(phone)) < 4:
+        return "****"
+    p = str(phone)
+    return f"****{p[-4:]}"
 
 
-def _normalize_zone(zone_id: str) -> str:
-    z = (zone_id or "").strip().lower().replace(" ", "_")
-    if z == "hitec_city" or z == "hitec":
-        return "hitec_city"
-    return z
+def _trust_display(trust_raw: float | None) -> float:
+    t = float(trust_raw or 0.0)
+    if t <= 1.0:
+        return round(min(100.0, max(0.0, t * 100.0)), 2)
+    return round(min(100.0, max(0.0, t)), 2)
 
 
-@router.post("")
+@router.get("", response_model=ProfileBootstrapResponse)
+async def get_profile_bootstrap(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Lightweight profile row for onboarding: defaults when no `profiles` row yet."""
+    row = (await db.execute(select(Profile).where(Profile.user_id == current_user.id))).scalar_one_or_none()
+    if row is None:
+        return ProfileBootstrapResponse(
+            id=current_user.id,
+            phone_number=_mask_phone(current_user.phone),
+            is_profile_complete=False,
+        )
+    complete = bool(str(row.zone_id or "").strip()) and bool(str(row.platform or "").strip())
+    return ProfileBootstrapResponse(
+        id=current_user.id,
+        phone_number=_mask_phone(current_user.phone),
+        name=(row.name or None) if str(row.name or "").strip() else None,
+        city=(row.city or None) if str(row.city or "").strip() else None,
+        zone_id=(row.zone_id or None) if str(row.zone_id or "").strip() else None,
+        platform=(row.platform or None) if str(row.platform or "").strip() else None,
+        avg_daily_income=float(row.avg_daily_income or 650.0),
+        trust_score=_trust_display(row.trust_score),
+        is_profile_complete=complete,
+    )
+
+
+@router.post("", response_model=GigProfileResponse)
 async def upsert_gig_profile(
     request: Request,
     body: GigProfileUpsert,
@@ -57,8 +72,14 @@ async def upsert_gig_profile(
     db: AsyncSession = Depends(get_db),
 ):
     bind_contextvars(worker_id=current_user.id)
-    zone_key = _normalize_zone(body.zone_id)
+    zone_key = normalize_zone(body.zone_id)
     risk = ZONE_TO_RISK.get(zone_key, OrmRisk.medium)
+    risk_score = compute_risk_score(zone_key, body.working_hours_preset, body.platform)
+    tier = body.coverage_tier.strip()
+    if tier not in TIER_MAX_DAILY:
+        raise HTTPException(status_code=422, detail="Invalid coverage_tier — use Basic, Standard, or Pro")
+
+    weekly = compute_weekly_premium(zone_key, body.working_hours_preset, tier)
 
     row = (await db.execute(select(Profile).where(Profile.user_id == current_user.id))).scalar_one_or_none()
     if row is None:
@@ -72,7 +93,9 @@ async def upsert_gig_profile(
             platform=body.platform.strip(),
             zone_id=body.zone_id.strip(),
             working_hours_preset=body.working_hours_preset.strip(),
-            coverage_tier=body.coverage_tier.strip(),
+            coverage_tier=tier,
+            risk_score=float(risk_score),
+            weekly_premium=float(weekly),
         )
         db.add(row)
     else:
@@ -83,62 +106,14 @@ async def upsert_gig_profile(
         row.platform = body.platform.strip()
         row.zone_id = body.zone_id.strip()
         row.working_hours_preset = body.working_hours_preset.strip()
-        row.coverage_tier = body.coverage_tier.strip()
+        row.coverage_tier = tier
+        row.risk_score = float(risk_score)
+        row.weekly_premium = float(weekly)
 
     await db.commit()
     await db.refresh(row)
 
-    tier = body.coverage_tier.strip()
-    if tier not in TIER_TO_PRODUCT:
-        raise HTTPException(status_code=422, detail="Invalid coverage_tier — use Basic, Standard, or Pro")
-
-    product_code = TIER_TO_PRODUCT[tier]
-    try:
-        calc = await PremiumEngine.calculate(current_user.id, db=db, profile=row, user=current_user)
-    except Exception as exc:
-        log.warning(
-            "premium_calculate_failed",
-            engine_name="profile_route",
-            worker_id=current_user.id,
-            error=str(exc),
-        )
-        calc = {"weekly_premium": 35.0}
-    base_weekly = float(calc.get("weekly_premium") or 35.0)
-    mult = TIER_MULT.get(tier, 1.0)
-    weekly = int(max(35, min(85, round(base_weekly * mult))))
-    monthly = round(weekly * 4.33, 2)
-    now = datetime.now(timezone.utc)
-
-    existing = (
-        await db.execute(
-            select(Policy)
-            .where(Policy.user_id == current_user.id, Policy.status == "active")
-            .order_by(Policy.id.desc())
-            .limit(1)
-        )
-    ).scalar_one_or_none()
-
-    if existing:
-        existing.product_code = product_code
-        existing.weekly_premium = float(weekly)
-        existing.monthly_premium = monthly
-        existing.status = "active"
-        existing.updated_at = now
-    else:
-        db.add(
-            Policy(
-                user_id=current_user.id,
-                product_code=product_code,
-                status="active",
-                monthly_premium=monthly,
-                weekly_premium=float(weekly),
-                updated_at=now,
-            )
-        )
-
-    await db.commit()
     await cache_invalidate(getattr(request.app.state, "redis", None), f"trust:{current_user.id}")
-    await cache_invalidate(getattr(request.app.state, "redis", None), f"policy_active:{current_user.id}")
 
     log.info(
         "gig_profile_saved",
@@ -147,5 +122,21 @@ async def upsert_gig_profile(
         reason_code="GIG_PROFILE",
         worker_id=current_user.id,
         tier=tier,
+        risk_score=risk_score,
+        weekly_premium=weekly,
     )
-    return {"success": True, "profile_id": row.id, "policy_activated": True, "weekly_premium": weekly}
+
+    return GigProfileResponse(
+        success=True,
+        profile_id=row.id,
+        risk_score=risk_score,
+        weekly_premium=weekly,
+        coverage_tier=tier,
+        zone_id=body.zone_id.strip(),
+        zone_risk_level=ZONE_RISK_LABEL.get(zone_key, "Medium Risk"),
+        max_coverage_per_day=TIER_MAX_DAILY.get(tier, 500.0),
+        platform=body.platform.strip(),
+        working_hours_preset=body.working_hours_preset.strip(),
+        name=body.name.strip(),
+        city=body.city.strip() or "Hyderabad",
+    )

@@ -24,11 +24,14 @@ function safeJsonParse<T>(raw: unknown): T | null {
   }
 }
 
-const DEFAULT_HTTP_BASE = 'http://localhost:8000';
-
 let ws: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let isStopped = true;
+
+const BACKEND = (
+  (import.meta.env.VITE_BACKEND_URL as string | undefined) ||
+  'https://devtrails2026-alphanexus-phase2-2.onrender.com'
+).replace(/\/$/, '');
 
 export function connectAdminWebSocket(jwt: string) {
   isStopped = false;
@@ -39,7 +42,7 @@ export function connectAdminWebSocket(jwt: string) {
   const zoneStore = useZoneEventsStore.getState();
   const poolStore = usePoolHealthStore.getState();
 
-  const httpBase = (import.meta as any).env?.VITE_BACKEND_URL ?? DEFAULT_HTTP_BASE;
+  const httpBase = BACKEND;
 
   let attempt = 0;
   const maxDelayMs = 30_000;

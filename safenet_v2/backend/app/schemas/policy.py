@@ -21,8 +21,32 @@ class PolicyResponse(BaseModel):
     weekly_premium: float = 0.0
     created_at: datetime | None
     updated_at: datetime | None = None
+    valid_from: datetime | None = None
+    valid_until: datetime | None = None
 
     model_config = {"from_attributes": True}
+
+
+class PolicyActivatedFullResponse(BaseModel):
+    """Returned after POST /policies/activate — full context for the mobile success screen."""
+
+    id: int
+    user_id: int
+    product_code: str
+    status: str
+    tier: Literal["Basic", "Standard", "Pro"]
+    monthly_premium: float
+    weekly_premium: float
+    valid_from: str
+    valid_until: str
+    max_coverage_per_day: float
+    risk_score: float
+    zone_id: str
+    zone_label: str
+    zone_risk_level: str
+    city: str
+    name: str
+    trust_level: str = "Newcomer"
 
 
 class PolicyCurrentResponse(BaseModel):
@@ -37,6 +61,7 @@ class PolicyCurrentResponse(BaseModel):
     pool_balance: float = 0.0
     pool_utilization_pct: float = 0.0
     policy_id: Optional[int] = None
+    message: Optional[str] = None
 
 
 class PoolHealthResponse(BaseModel):

@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: safenet-backend
+    runtime: python
+    region: oregon
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1
+    envVars:
+      - key: DEMO_MODE
+        value: "true"
+      - key: JWT_SECRET
+        value: safenet-prod-2026-alphaNexus
+      - key: ADMIN_JWT_SECRET
+        value: admin-safenet-2026
+      - key: ALLOWED_ORIGINS
+        value: "*"
+      - key: OPENWEATHER_API_KEY
+        value: ""

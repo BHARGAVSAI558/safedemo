@@ -3,7 +3,7 @@ import { NavigationContainer, DefaultTheme } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { View, ActivityIndicator } from 'react-native';
+import { View, ActivityIndicator, Text } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
@@ -52,17 +52,59 @@ async function endScreenVisitSafe(name) {
   } catch (_) {}
 }
 
+function tabIcon(emoji, focused) {
+  return (
+    <Text style={{ fontSize: 20, opacity: focused ? 1 : 0.45 }}>{emoji}</Text>
+  );
+}
+
 function MainTabs() {
   return (
     <Tabs.Navigator
       screenOptions={{
         headerShown: false,
+        tabBarActiveTintColor: '#1a73e8',
+        tabBarInactiveTintColor: '#94a3b8',
+        tabBarStyle: {
+          borderTopColor: 'rgba(0,0,0,0.08)',
+          paddingTop: 4,
+          height: 58,
+        },
+        tabBarLabelStyle: { fontSize: 11, fontWeight: '700' },
       }}
     >
-      <Tabs.Screen name="Home" component={DashboardScreen} />
-      <Tabs.Screen name="Coverage" component={PolicyScreen} />
-      <Tabs.Screen name="Claims" component={ClaimsScreen} />
-      <Tabs.Screen name="Account" component={ProfileScreen} />
+      <Tabs.Screen
+        name="Home"
+        component={DashboardScreen}
+        options={{
+          tabBarLabel: 'Home',
+          tabBarIcon: ({ focused }) => tabIcon('🏠', focused),
+        }}
+      />
+      <Tabs.Screen
+        name="Claims"
+        component={ClaimsScreen}
+        options={{
+          tabBarLabel: 'Claims',
+          tabBarIcon: ({ focused }) => tabIcon('📋', focused),
+        }}
+      />
+      <Tabs.Screen
+        name="Coverage"
+        component={PolicyScreen}
+        options={{
+          tabBarLabel: 'Coverage',
+          tabBarIcon: ({ focused }) => tabIcon('🛡️', focused),
+        }}
+      />
+      <Tabs.Screen
+        name="Account"
+        component={ProfileScreen}
+        options={{
+          tabBarLabel: 'Account',
+          tabBarIcon: ({ focused }) => tabIcon('👤', focused),
+        }}
+      />
     </Tabs.Navigator>
   );
 }

@@ -3,7 +3,19 @@ import { useQuery } from '@tanstack/react-query';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, LineChart, Line, CartesianGrid } from 'recharts';
 
 import api from '../api';
+import { adminUi } from '../theme/adminUi';
 import { useFraudQueueStore } from '../stores/fraudQueue';
+
+type QueueRow = {
+  cluster_id: string;
+  ring_confidence: string;
+  worker_ids?: number[];
+  workers_in_ring?: number[];
+  zone_id?: string;
+  zone?: string;
+  timestamp: number;
+  freeze_status?: string;
+};
 
 export default function FraudInsights() {
   const wsQueue = useFraudQueueStore((s) => s.items);
@@ -19,97 +31,113 @@ export default function FraudInsights() {
     refetchInterval: 30_000,
   });
 
-  const rows = wsQueue.length ? wsQueue : (alertsQuery.data ?? []).map((x: any) => ({
-    cluster_id: `sim-${x.id}`,
-    ring_confidence: x.fraud_score > 0.85 ? 'CONFIRMED' : 'PROBABLE',
-    workers_in_ring: [x.user_id],
-    zone: 'unknown',
-    timestamp: new Date(x.created_at).getTime(),
-    freeze_status: x.fraud_score > 0.85 ? 'FROZEN' : 'PENDING',
-  }));
+  const rows: QueueRow[] = wsQueue.length
+    ? (wsQueue as QueueRow[])
+    : (alertsQuery.data ?? []).map((x: { id: number; user_id: number; fraud_score: number; created_at: string }) => ({
+        cluster_id: `sim-${x.id}`,
+        ring_confidence: x.fraud_score > 0.85 ? 'CONFIRMED' : 'PROBABLE',
+        workers_in_ring: [x.user_id],
+        zone: 'unknown',
+        timestamp: new Date(x.created_at).getTime(),
+        freeze_status: x.fraud_score > 0.85 ? 'FROZEN' : 'PENDING',
+      }));
 
   const doAction = async (clusterId: string, action: string) => {
     await api.post(`/admin/fraud/${clusterId}/action`, { action });
   };
 
   return (
-    <div>
-      <h1 style={styles.title}>Fraud Insights</h1>
-      <p style={styles.sub}>Queue + analytics for fraud operations</p>
+    <div style={adminUi.page}>
+      <header style={adminUi.pageHeader}>
+        <h1 style={adminUi.h1}>Fraud insights</h1>
+        <p style={adminUi.sub}>Queue from WebSocket when live; otherwise from API. Actions post to the fraud endpoints.</p>
+      </header>
 
-      <div style={styles.tableWrap}>
-        <table style={styles.table}>
-          <thead>
-            <tr>
-              <th style={styles.th}>Cluster ID</th>
-              <th style={styles.th}>Ring Confidence</th>
-              <th style={styles.th}>Workers in Ring</th>
-              <th style={styles.th}>Zone</th>
-              <th style={styles.th}>Timestamp</th>
-              <th style={styles.th}>Freeze Status</th>
-              <th style={styles.th}>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r: any) => (
-              <tr key={String(r.cluster_id)} style={styles.tr}>
-                <td style={styles.td}>{r.cluster_id}</td>
-                <td style={styles.td}>{r.ring_confidence}</td>
-                <td style={styles.td}>{(r.worker_ids ?? r.workers_in_ring ?? []).length}</td>
-                <td style={styles.td}>{r.zone_id ?? r.zone ?? '—'}</td>
-                <td style={styles.td}>{new Date(r.timestamp).toLocaleString()}</td>
-                <td style={styles.td}>{r.freeze_status ?? (r.ring_confidence === 'CONFIRMED' ? 'FROZEN' : 'PENDING')}</td>
-                <td style={styles.td}>
-                  <button style={styles.btn} onClick={() => doAction(r.cluster_id, 'CONFIRM_FRAUD')}>Confirm Fraud</button>{' '}
-                  <button style={styles.btn} onClick={() => doAction(r.cluster_id, 'CLEAR_CLUSTER')}>Clear Cluster</button>{' '}
-                  <button style={styles.btn} onClick={() => doAction(r.cluster_id, 'MANUAL_REVIEW')}>Manual Review</button>
-                </td>
+      <div style={{ ...adminUi.card, marginBottom: 20, padding: 0, overflow: 'hidden' }}>
+        <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--admin-border)' }}>
+          <div style={adminUi.cardTitle}>Fraud queue</div>
+          <div style={{ ...adminUi.cardSub, marginBottom: 0 }}>{rows.length} row{rows.length === 1 ? '' : 's'}</div>
+        </div>
+        <div style={{ ...adminUi.tableScroll, maxHeight: 'min(480px, 55vh)', border: 'none', borderRadius: 0 }}>
+          <table style={{ ...adminUi.table, minWidth: 960 }}>
+            <thead>
+              <tr>
+                <th style={adminUi.th}>Cluster</th>
+                <th style={adminUi.th}>Confidence</th>
+                <th style={adminUi.th}>Workers</th>
+                <th style={adminUi.th}>Zone</th>
+                <th style={adminUi.th}>Time</th>
+                <th style={adminUi.th}>Freeze</th>
+                <th style={adminUi.th}>Actions</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={String(r.cluster_id)}>
+                  <td style={{ ...adminUi.td, fontWeight: 700, fontFamily: 'ui-monospace, monospace', fontSize: 12 }}>{r.cluster_id}</td>
+                  <td style={adminUi.td}>{r.ring_confidence}</td>
+                  <td style={adminUi.td}>{(r.worker_ids ?? r.workers_in_ring ?? []).length}</td>
+                  <td style={adminUi.td}>{r.zone_id ?? r.zone ?? '—'}</td>
+                  <td style={{ ...adminUi.td, whiteSpace: 'nowrap' }}>{new Date(r.timestamp).toLocaleString()}</td>
+                  <td style={adminUi.td}>{r.freeze_status ?? (r.ring_confidence === 'CONFIRMED' ? 'FROZEN' : 'PENDING')}</td>
+                  <td style={{ ...adminUi.td, minWidth: 280 }}>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                      <button type="button" style={adminUi.btnDanger} onClick={() => void doAction(r.cluster_id, 'CONFIRM_FRAUD')}>
+                        Confirm fraud
+                      </button>
+                      <button type="button" style={adminUi.btnMuted} onClick={() => void doAction(r.cluster_id, 'CLEAR_CLUSTER')}>
+                        Clear cluster
+                      </button>
+                      <button type="button" style={adminUi.btnMuted} onClick={() => void doAction(r.cluster_id, 'MANUAL_REVIEW')}>
+                        Manual review
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+              {rows.length === 0 ? (
+                <tr>
+                  <td colSpan={7} style={adminUi.td}>
+                    <div style={adminUi.empty}>No fraud alerts.</div>
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
       </div>
 
-      <div style={styles.charts}>
-        <div style={styles.chartCard}>
-          <h3>Fraud score distribution</h3>
-          <ResponsiveContainer width="100%" height={220}>
-            <BarChart data={analyticsQuery.data?.fraud_score_histogram ?? []}>
-              <XAxis dataKey="bucket" />
-              <YAxis />
-              <Tooltip />
-              <Bar dataKey="count" fill="#ef4444" />
-            </BarChart>
-          </ResponsiveContainer>
+      <div className="admin-chart-row">
+        <div style={adminUi.card}>
+          <div style={adminUi.cardTitle}>Fraud score distribution</div>
+          <div style={{ height: 260, marginTop: 12 }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={analyticsQuery.data?.fraud_score_histogram ?? []} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--admin-border)" vertical={false} />
+                <XAxis dataKey="bucket" tick={{ fontSize: 11, fill: 'var(--admin-muted)' }} />
+                <YAxis tick={{ fontSize: 11, fill: 'var(--admin-muted)' }} />
+                <Tooltip contentStyle={{ borderRadius: 10, border: '1px solid var(--admin-border)' }} />
+                <Bar dataKey="count" fill="#ef4444" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
         </div>
-        <div style={styles.chartCard}>
-          <h3>Enrollment anomaly timeline</h3>
-          <ResponsiveContainer width="100%" height={220}>
-            <LineChart data={analyticsQuery.data?.enrollment_timeline ?? []}>
-              <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="hour" />
-              <YAxis />
-              <Tooltip />
-              <Line dataKey="enrollments" stroke="#1d4ed8" />
-              <Line dataKey="weather_alert" stroke="#f59e0b" />
-            </LineChart>
-          </ResponsiveContainer>
+        <div style={adminUi.card}>
+          <div style={adminUi.cardTitle}>Enrollment vs weather signal</div>
+          <div style={{ height: 260, marginTop: 12 }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={analyticsQuery.data?.enrollment_timeline ?? []} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--admin-border)" />
+                <XAxis dataKey="hour" tick={{ fontSize: 11, fill: 'var(--admin-muted)' }} />
+                <YAxis tick={{ fontSize: 11, fill: 'var(--admin-muted)' }} />
+                <Tooltip contentStyle={{ borderRadius: 10, border: '1px solid var(--admin-border)' }} />
+                <Line type="monotone" dataKey="enrollments" stroke="#2563eb" strokeWidth={2} dot={false} />
+                <Line type="monotone" dataKey="weather_alert" stroke="#d97706" strokeWidth={2} dot={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
         </div>
       </div>
     </div>
   );
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  title: { fontSize: 24, fontWeight: 800, color: '#0f172a', margin: 0 },
-  sub: { color: '#6b7280', marginTop: 6, marginBottom: 14 },
-  tableWrap: { border: '1px solid #e2e8f0', borderRadius: 10, overflow: 'hidden' },
-  table: { width: '100%', borderCollapse: 'collapse' },
-  th: { textAlign: 'left', padding: 10, background: '#f8fafc', fontSize: 12, color: '#475569' },
-  td: { padding: 10, borderTop: '1px solid #f1f5f9', fontSize: 13, color: '#0f172a' },
-  tr: {},
-  btn: { border: '1px solid #cbd5e1', borderRadius: 6, background: '#fff', padding: '4px 8px', cursor: 'pointer', fontSize: 12 },
-  charts: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 12 },
-  chartCard: { background: '#fff', border: '1px solid #e2e8f0', borderRadius: 10, padding: 12 },
-};
-

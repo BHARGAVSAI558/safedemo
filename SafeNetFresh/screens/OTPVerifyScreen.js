@@ -18,6 +18,11 @@ import { auth, workers } from '../services/api';
 import { useAuth } from '../contexts/AuthContext';
 
 const BRAND = '#1A56DB';
+const SMS_AUTOFILL_MS = 1350;
+
+function randomSixDigitOtp() {
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
 
 export default function OTPVerifyScreen({ navigation, route }) {
   const { phone } = route.params || {};
@@ -31,16 +36,17 @@ export default function OTPVerifyScreen({ navigation, route }) {
   const submittedCodeRef = useRef(null);
   const verifyInFlight = useRef(false);
   const inputsRef = useRef([]);
+  const demoOtpRef = useRef(randomSixDigitOtp());
 
-  // Simulate SMS autofill: after 1.3s auto-fill and submit
+  // Simulates carrier / OS SMS autofill: brief delay, then code appears and verifies (demo: any 6-digit code works when backend DEMO_MODE is on).
   useEffect(() => {
-    const AUTOFILL = '123456';
+    const code = demoOtpRef.current;
     const t = setTimeout(() => {
       if (verifyInFlight.current) return;
-      setDigits(AUTOFILL.split(''));
-      submittedCodeRef.current = AUTOFILL;
-      verifyWithCode(AUTOFILL);
-    }, 1300);
+      setDigits(code.split(''));
+      submittedCodeRef.current = code;
+      verifyWithCode(code);
+    }, SMS_AUTOFILL_MS);
     return () => clearTimeout(t);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -80,6 +86,11 @@ export default function OTPVerifyScreen({ navigation, route }) {
         try {
           const profile = await workers.getProfile();
           dispatch({ type: 'SET_PROFILE', profile });
+          if (profile?.is_profile_complete === false) {
+            navigation.replace('ProfileSetup');
+            return;
+          }
+          // profileReady true → RootNavigator swaps to MainTabs (no named route on this stack)
         } catch (e) {
           const status = e?.response?.status;
           if (status === 401) {
@@ -140,8 +151,17 @@ export default function OTPVerifyScreen({ navigation, route }) {
     setResending(true);
     try {
       await auth.sendOTP(phone);
+      demoOtpRef.current = randomSixDigitOtp();
       setRemain(60);
       submittedCodeRef.current = null;
+      setDigits(['', '', '', '', '', '']);
+      const code = demoOtpRef.current;
+      setTimeout(() => {
+        if (verifyInFlight.current) return;
+        setDigits(code.split(''));
+        submittedCodeRef.current = code;
+        verifyWithCode(code);
+      }, SMS_AUTOFILL_MS);
     } catch (e) {
       Alert.alert('Error', e?.message || 'Could not resend OTP');
     } finally {
@@ -157,8 +177,10 @@ export default function OTPVerifyScreen({ navigation, route }) {
     >
       <TouchableWithoutFeedback onPress={Keyboard.dismiss} accessible={false}>
         <View style={[styles.container, { paddingTop: insets.top + 12, paddingBottom: insets.bottom + 12 }]}>
-          <Text style={styles.header}>Verify +91 {phone || '—'}</Text>
-          <Text style={styles.sub}>Enter the 6-digit code</Text>
+          <Text style={styles.kicker}>Verification</Text>
+          <Text style={styles.header}>+91 {phone || '—'}</Text>
+          <Text style={styles.sub}>We sent a 6-digit code to this number</Text>
+          <Text style={styles.subMuted}>Enter it below to continue</Text>
 
           <View style={styles.row}>
             {digits.map((d, i) => (
@@ -184,7 +206,7 @@ export default function OTPVerifyScreen({ navigation, route }) {
             onPress={() => verifyWithCode(digits.join(''))}
             disabled={loading || digits.join('').length !== 6}
           >
-            {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.btnText}>Verify and continue</Text>}
+            {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.btnText}>Verify & Login</Text>}
           </TouchableOpacity>
 
           <TouchableOpacity
@@ -193,9 +215,9 @@ export default function OTPVerifyScreen({ navigation, route }) {
             disabled={remain > 0 || resending || loading}
           >
             {remain > 0 ? (
-              <Text style={styles.resendMuted}>Resend OTP in {remain}s</Text>
+              <Text style={styles.resendMuted}>Resend code in {remain}s</Text>
             ) : (
-              <Text style={styles.resendActive}>{resending ? 'Sending…' : 'Resend OTP'}</Text>
+              <Text style={styles.resendActive}>{resending ? 'Sending…' : 'Resend code'}</Text>
             )}
           </TouchableOpacity>
 
@@ -210,9 +232,18 @@ export default function OTPVerifyScreen({ navigation, route }) {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#f8fafc', paddingHorizontal: 20 },
-  header: { fontSize: 22, fontWeight: '800', color: '#111827' },
+  kicker: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: BRAND,
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+    marginBottom: 6,
+  },
+  header: { fontSize: 26, fontWeight: '800', color: '#111827', letterSpacing: -0.3 },
   demoHint: { marginTop: 8, fontSize: 13, color: BRAND, fontWeight: '700' },
-  sub: { fontSize: 14, color: '#6b7280', marginTop: 8, marginBottom: 24 },
+  sub: { fontSize: 15, color: '#374151', marginTop: 10, fontWeight: '600', lineHeight: 22 },
+  subMuted: { fontSize: 14, color: '#6b7280', marginTop: 6, marginBottom: 20 },
   row: { flexDirection: 'row', justifyContent: 'space-between', gap: 8 },
   box: {
     flex: 1,

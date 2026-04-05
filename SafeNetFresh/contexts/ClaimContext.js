@@ -79,6 +79,8 @@ function reducer(state, action) {
       return { ...state, premiumDue: null };
     case 'SET_PAYOUT_HISTORY':
       return { ...state, payoutHistory: action.payoutHistory || [] };
+    case 'RESET':
+      return initialState;
     default:
       return state;
   }
@@ -110,6 +112,10 @@ export function ClaimProvider({ children }) {
     [dispatch]
   );
 
+  const resetClaims = useCallback(() => {
+    dispatch({ type: 'RESET' });
+  }, []);
+
   const value = useMemo(
     () => ({
       ...state,
@@ -118,9 +124,10 @@ export function ClaimProvider({ children }) {
       setPremiumDue,
       clearPremiumDue,
       setClaimUpdate,
+      resetClaims,
       dispatch,
     }),
-    [state, setDisruptionAlert, clearDisruptionAlert, setPremiumDue, clearPremiumDue, setClaimUpdate]
+    [state, setDisruptionAlert, clearDisruptionAlert, setPremiumDue, clearPremiumDue, setClaimUpdate, resetClaims]
   );
 
   return <ClaimContext.Provider value={value}>{children}</ClaimContext.Provider>;

@@ -11,6 +11,7 @@ import {
   Animated,
   Modal,
   Pressable,
+  Alert,
 } from 'react-native';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -26,6 +27,7 @@ import { useWorkerProfile } from '../hooks/useWorkerProfile';
 import { usePayoutHistory } from '../hooks/usePayoutHistory';
 import { logButtonTap, logClaimStatusView } from '../services/device_fingerprint.service';
 import { trustBadge } from '../utils/trustBadge';
+import { canonicalTierLabel } from '../utils/tierDisplay';
 
 function getTimeGreeting(now = new Date()) {
   const h = now.getHours();
@@ -38,7 +40,16 @@ function getTimeGreeting(now = new Date()) {
 const CITY_TO_ZONE_ID = {
   hyderabad: 'hyd_central',
   'hyderabad central': 'hyd_central',
-  kukatpally: 'hyd_kukatpally',
+  kukatpally: 'kukatpally',
+  miyapur: 'miyapur',
+  madhapur: 'madhapur',
+  'jubilee hills': 'jubilee_hills',
+  'banjara hills': 'banjara_hills',
+  begumpet: 'begumpet',
+  uppal: 'uppal',
+  kondapur: 'kondapur',
+  'old city': 'old_city',
+  ameerpet: 'ameerpet',
   'hitec city': 'hitec_city',
   hitec: 'hitec_city',
   secunderabad: 'secunderabad',
@@ -97,7 +108,6 @@ function aqiCategory(aqi) {
 
 const DNA_DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const DNA_DAY_NAMES_LONG = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
-const DNA_Y_LETTERS = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
 /** IST hours shown in heatmap: 6 → 22 (17 columns) */
 const DNA_H_START = 6;
 const DNA_H_END = 22;
@@ -140,19 +150,15 @@ function getIstHour() {
   return hp ? parseInt(hp.value, 10) : 12;
 }
 
-/** Heat colors: empty → high (#EEF2FF → #1D4ED8) */
-function dnaHeatColorBlue(t) {
+/** Heat: light = quieter hours, deep green = stronger typical earnings (₹/hr). */
+function dnaHeatColorEarnings(t) {
   const x = Math.min(1, Math.max(0, t));
-  const stops = [
-    [238, 242, 255],
-    [147, 197, 253],
-    [59, 130, 246],
-    [29, 78, 216],
-  ];
-  const seg = Math.min(2, Math.floor(x * 3));
-  const local = x * 3 - seg;
-  const a = stops[seg];
-  const b = stops[seg + 1];
+  const low = [241, 245, 249];
+  const mid = [187, 247, 208];
+  const high = [22, 101, 52];
+  const a = x < 0.5 ? low : mid;
+  const b = x < 0.5 ? mid : high;
+  const local = x < 0.5 ? x * 2 : (x - 0.5) * 2;
   const r = Math.round(a[0] + (b[0] - a[0]) * local);
   const g = Math.round(a[1] + (b[1] - a[1]) * local);
   const bl = Math.round(a[2] + (b[2] - a[2]) * local);
@@ -165,6 +171,15 @@ const DEMO_SCENARIOS = [
   { label: 'Air Quality Alert', value: 'AQI_SPIKE', emoji: '🏭', hint: 'Hazardous AQI >300' },
   { label: 'Zone Curfew', value: 'CURFEW', emoji: '🚫', hint: 'Social disruption' },
 ];
+
+/** Often show “all clear” so every tap does not pay out — feels closer to real checks. */
+const DEMO_NO_EVENT_CHANCE = 0.42;
+const DEMO_NO_EVENT_MESSAGES = {
+  HEAVY_RAIN: 'No heavy rain alerts in your area right now.',
+  EXTREME_HEAT: 'No extreme heat warnings for your zone at the moment.',
+  AQI_SPIKE: 'Air quality looks normal where you ride — no hazard spike.',
+  CURFEW: 'No curfew or movement restrictions reported in your zone.',
+};
 
 function demoCompletedSteps(status) {
   const s = String(status || '').toUpperCase();
@@ -349,7 +364,7 @@ function ProgressRing({ value, max, size, stroke, scheme }) {
           transform={`rotate(-90 ${c} ${c})`}
         />
       </Svg>
-      <Text style={{ color: fg, fontSize: 10, fontWeight: '900' }}>{label}</Text>
+      <Text style={{ color: fg, fontSize: size >= 90 ? 15 : 11, fontWeight: '900' }}>{label}</Text>
     </View>
   );
 }
@@ -384,12 +399,15 @@ function Stepper({ step, flagged, scheme }) {
 export default function DashboardScreen({ navigation }) {
   const scheme = useColorScheme() || 'light';
   const qc = useQueryClient();
-  const { phone, userId } = useAuth();
+  const { userId, workerProfile } = useAuth();
   const { status: wsStatus } = useWsConnection();
 
   const { disruptionAlert, lastClaimUpdate, activeClaims } = useClaims();
   const { coverageStatus, policy } = usePolicy();
-  const { data: profile, isLoading: profileLoading } = useWorkerProfile();
+  const homePlanTier = useMemo(() => canonicalTierLabel(policy?.tier), [policy?.tier]);
+  const { data: profileQueryData, isLoading: profileQueryLoading } = useWorkerProfile();
+  const profile = profileQueryData ?? workerProfile ?? null;
+  const profileLoading = Boolean(profileQueryLoading && !workerProfile);
   const payoutsQuery = usePayoutHistory();
 
   const trust = profile?.trust_score;
@@ -402,17 +420,15 @@ export default function DashboardScreen({ navigation }) {
       const part = raw.split(/\s+/)[0];
       if (part) return part;
     }
-    const digits = String(phone || '').replace(/\D/g, '');
-    if (digits.length >= 10) {
-      const national = digits.length > 10 && digits.startsWith('91') ? digits.slice(2) : digits;
-      return national.slice(0, 5) || digits.slice(0, 4);
-    }
-    if (digits.length >= 4) return digits.slice(0, 4);
-    if (digits.length) return digits;
+    if (profileLoading) return '';
     return 'there';
-  }, [profile?.name, phone]);
+  }, [profile?.name, profileLoading]);
 
-  const greeting = useMemo(() => `${getTimeGreeting()}${firstName ? `, ${firstName} 👋` : ' 👋'}`, [firstName]);
+  const greetingName = useMemo(() => {
+    if (firstName) return `${firstName} 👋`;
+    if (profileLoading) return '👋';
+    return 'there 👋';
+  }, [firstName, profileLoading]);
 
   const zoneId = useMemo(() => resolveZoneIdFromCity(profile?.city), [profile?.city]);
   const effectiveZoneId = useMemo(() => {
@@ -428,16 +444,14 @@ export default function DashboardScreen({ navigation }) {
       const res = await api.get(`/zones/${encodeURIComponent(effectiveZoneId)}/status`);
       return res.data;
     },
-    refetchInterval: 1000 * 60 * 2,
-    staleTime: 1000 * 30,
+    staleTime: 1000 * 60 * 5,
   });
 
   const forecastShieldQuery = useQuery({
     queryKey: ['forecastShield', effectiveZoneId],
     enabled: Boolean(effectiveZoneId),
     queryFn: () => zonesApi.getForecastShield(effectiveZoneId),
-    refetchInterval: 1000 * 60 * 30,
-    staleTime: 1000 * 60 * 5,
+    staleTime: 1000 * 60 * 10,
   });
 
   const zoneStatus = zoneStatusQuery.data || null;
@@ -446,8 +460,9 @@ export default function DashboardScreen({ navigation }) {
     Boolean(zoneStatus?.disruption_active) ||
     String(zoneStatus?.status || '').toLowerCase() === 'disruption';
 
+  /** Amber = live socket (fintech “connected” cue); muted when offline */
   const wsDotColor =
-    wsStatus === 'connected' ? '#69f0ae' : wsStatus === 'reconnecting' ? '#ffb74d' : '#ff8a80';
+    wsStatus === 'connected' ? '#FBBF24' : wsStatus === 'reconnecting' ? '#F59E0B' : 'rgba(255,255,255,0.35)';
 
   const [approvalToast, setApprovalToast] = useState(null);
   const approvalSlide = useRef(new Animated.Value(-140)).current;
@@ -538,7 +553,44 @@ export default function DashboardScreen({ navigation }) {
     staleTime: 60 * 1000,
   });
 
-  const [earningsExpanded, setEarningsExpanded] = useState(false);
+  const breakdownHasData = useMemo(() => {
+    const rows = breakdownQuery.data?.weekly_breakdown;
+    if (!Array.isArray(rows)) return false;
+    return rows.some((r) => Number(r?.amount) > 0);
+  }, [breakdownQuery.data]);
+
+  const [dnaExpanded, setDnaExpanded] = useState(false);
+  const [coverageExpanded, setCoverageExpanded] = useState(false);
+  const [tick, setTick] = useState(0);
+  const [dnaTooltip, setDnaTooltip] = useState({
+    visible: false,
+    dayName: '',
+    hour: '',
+    amount: 0,
+    x: 0,
+    y: 0,
+  });
+  const zoneBgPulse = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    const id = setInterval(() => setTick((x) => x + 1), 30000);
+    return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    if (!disruptionActive) {
+      zoneBgPulse.setValue(0);
+      return;
+    }
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(zoneBgPulse, { toValue: 1, duration: 1100, useNativeDriver: false }),
+        Animated.timing(zoneBgPulse, { toValue: 0, duration: 1100, useNativeDriver: false }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [disruptionActive, zoneBgPulse]);
 
   const inFlight = useMemo(() => isInFlightClaim(lastClaimUpdate, activeClaims), [lastClaimUpdate, activeClaims]);
   const flagged = useMemo(() => String(lastClaimUpdate?.status || '').toUpperCase().includes('FLAG'), [lastClaimUpdate?.status]);
@@ -565,8 +617,6 @@ export default function DashboardScreen({ navigation }) {
     return () => clearInterval(t);
   }, [inFlight]);
 
-  const [dnaPopover, setDnaPopover] = useState({ visible: false, x: 0, y: 0, text: '' });
-
   const dnaQuery = useQuery({
     queryKey: ['earningsDna'],
     queryFn: () => workersApi.getEarningsDna(),
@@ -586,6 +636,13 @@ export default function DashboardScreen({ navigation }) {
     }
     return mx > 0 ? mx : 1;
   }, [dnaQuery.data?.dna]);
+
+  const fingerprintPct = useMemo(() => {
+    const exp = Number(dnaQuery.data?.weekly_expected);
+    const act = Number(dnaQuery.data?.weekly_actual);
+    if (!Number.isFinite(exp) || exp <= 0) return null;
+    return Math.min(100, Math.round((act / exp) * 100));
+  }, [dnaQuery.data]);
 
   const istDnaRow = getIstWeekdayMon0();
   const istDnaHour = getIstHour();
@@ -616,6 +673,9 @@ export default function DashboardScreen({ navigation }) {
       setSheetPhase('progress');
     },
   });
+
+  const runningScenario =
+    simMutation.isPending && simMutation.variables != null ? simMutation.variables : null;
 
   useEffect(() => {
     if (!disruptionSheetVisible || sheetPhase !== 'progress') return;
@@ -676,6 +736,7 @@ export default function DashboardScreen({ navigation }) {
     }
     qc.invalidateQueries({ queryKey: ['workerProfile'] });
     qc.invalidateQueries({ queryKey: ['payoutHistory'] });
+    qc.invalidateQueries({ queryKey: ['claimsHistory'] });
     qc.invalidateQueries({ queryKey: ['earningsDna'] });
     qc.invalidateQueries({ queryKey: ['zoneStatus'] });
     qc.invalidateQueries({ queryKey: ['forecastShield'] });
@@ -690,13 +751,21 @@ export default function DashboardScreen({ navigation }) {
     payoutsQuery.isRefetching ||
     zoneStatusQuery.isRefetching ||
     dnaQuery.isRefetching ||
-    forecastShieldQuery.isRefetching;
+    forecastShieldQuery.isRefetching ||
+    breakdownQuery.isRefetching;
   const onRefresh = useCallback(() => {
     void payoutsQuery.refetch();
     void zoneStatusQuery.refetch();
     void dnaQuery.refetch();
     void forecastShieldQuery.refetch();
-  }, [payoutsQuery.refetch, zoneStatusQuery.refetch, dnaQuery.refetch, forecastShieldQuery.refetch]);
+    void breakdownQuery.refetch();
+  }, [
+    payoutsQuery.refetch,
+    zoneStatusQuery.refetch,
+    dnaQuery.refetch,
+    forecastShieldQuery.refetch,
+    breakdownQuery.refetch,
+  ]);
 
   const colors = useMemo(() => {
     const isDark = scheme === 'dark';
@@ -715,6 +784,33 @@ export default function DashboardScreen({ navigation }) {
   }, [scheme]);
 
   const payouts = (payoutsQuery.data || []).slice(0, 3);
+
+  const zoneDisplayName = zoneStatus?.zone_name || profile?.city || 'Your zone';
+  const timeGreeting = getTimeGreeting();
+
+  const zoneUpdatedText = useMemo(() => {
+    const t = zoneStatusQuery.dataUpdatedAt;
+    if (!t) return '';
+    void tick;
+    const sec = Math.floor((Date.now() - t) / 1000);
+    if (sec < 8) return 'Updated just now';
+    if (sec < 60) return `Updated ${sec}s ago`;
+    const m = Math.floor(sec / 60);
+    if (m < 120) return `Updated ${m}m ago`;
+    return 'Updated earlier';
+  }, [zoneStatusQuery.dataUpdatedAt, tick]);
+
+  const rideStatus = useMemo(() => {
+    if (disruptionActive) return { key: 'red', label: 'Disruption active', bar: '#dc2626' };
+    if (safeLevel === 'WATCH' || (Number.isFinite(aqiNum) && aqiNum > 150))
+      return { key: 'amber', label: 'Be careful', bar: '#d97706' };
+    return { key: 'green', label: 'Safe to ride', bar: '#16a34a' };
+  }, [disruptionActive, safeLevel, aqiNum]);
+
+  const zonePulseOverlayOpacity = zoneBgPulse.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0.08, 0.22],
+  });
 
   const zoneCardBorderColor = zoneStressAnim.interpolate({
     inputRange: [0, 1],
@@ -753,21 +849,17 @@ export default function DashboardScreen({ navigation }) {
         refreshControl={<RefreshControl refreshing={Boolean(refreshing)} onRefresh={onRefresh} />}
       >
       <LinearGradient
-        colors={scheme === 'dark' ? ['#0f1a3a', '#0b1020'] : ['#1a73e8', '#6aa6ff']}
+        colors={scheme === 'dark' ? ['#0b1f4a', '#1e3a8a', '#172554'] : ['#1557C7', '#2563eb', '#38bdf8']}
         start={{ x: 0, y: 0 }}
         end={{ x: 1, y: 1 }}
         style={styles.headerGradient}
       >
-        <View style={styles.headerTopRow}>
-          <View style={styles.headerGreetingRow}>
-            <View style={[styles.wsLiveDot, { backgroundColor: wsDotColor }]} />
-            <Text style={styles.headerGreeting} numberOfLines={1}>
-              {greeting || 'Good morning 👋'}
-            </Text>
-          </View>
-        </View>
-
+        <Text style={styles.headerGreetingLine1}>{timeGreeting},</Text>
+        <Text style={styles.headerGreetingLine2} numberOfLines={1}>
+          {greetingName}
+        </Text>
         <View style={styles.headerBadgeRow}>
+          <View style={[styles.wsLiveDot, { backgroundColor: wsDotColor }]} accessibilityLabel="WebSocket live status" />
           <TouchableOpacity
             onPress={() => navigation.navigate('Coverage')}
             style={[
@@ -781,54 +873,69 @@ export default function DashboardScreen({ navigation }) {
           >
             <Text style={styles.pillText}>{cb.label}</Text>
           </TouchableOpacity>
-
-          <View style={[styles.pill, tb.tone === 'premium' ? styles.pillPremium : tb.tone === 'trusted' ? styles.pillTrusted : styles.pillNeutral]}>
+          <View
+            style={[
+              styles.pill,
+              tb.tone === 'premium' ? styles.pillPremium : tb.tone === 'trusted' ? styles.pillTrusted : styles.pillNeutral,
+            ]}
+          >
             <Text style={styles.pillText}>{tb.label}</Text>
           </View>
         </View>
+        {homePlanTier && homePlanTier !== '—' ? (
+          <Text style={styles.headerPlanLine} numberOfLines={1}>
+            Plan: {homePlanTier}
+          </Text>
+        ) : null}
       </LinearGradient>
 
-      {primaryForecastShield && !forecastShieldQuery.isError ? (
-        <LinearGradient
-          colors={['#1E40AF', '#1D4ED8']}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 1 }}
-          style={styles.forecastShieldCard}
-        >
-          <Text style={styles.forecastShieldTitle}>🛡️ Forecast Shield Active</Text>
-          <Text style={styles.forecastShieldSubtitle}>
-            {primaryForecastShield.subtitle || 'Elevated weather risk in the next 48 hours'}
-          </Text>
-          <Text style={styles.forecastShieldFooter}>
-            {primaryForecastShield.coverage_line || 'Coverage auto-upgraded to Pro'}
-          </Text>
-          <View style={styles.forecastShieldBadge}>
-            <Text style={styles.forecastShieldBadgeText}>No extra cost</Text>
-          </View>
-        </LinearGradient>
-      ) : null}
-
-      {/* Zone status */}
+      {/* Zone status — innovation #1: real-time zone intelligence */}
       <Animated.View
         style={[
           styles.card,
+          styles.cardElevated,
           {
-            backgroundColor: disruptionActive ? colors.dangerBg : colors.card,
+            backgroundColor: colors.card,
             borderWidth: 1,
             borderColor: zoneCardBorderColor,
+            overflow: 'hidden',
           },
         ]}
       >
+        {disruptionActive ? (
+          <Animated.View
+            pointerEvents="none"
+            style={[
+              StyleSheet.absoluteFillObject,
+              { backgroundColor: '#fecaca', opacity: zonePulseOverlayOpacity },
+            ]}
+          />
+        ) : null}
         <View style={styles.cardHeaderRow}>
           <View style={{ flex: 1 }}>
-            <Text style={[styles.cardTitle, { color: colors.text }]}>Zone status</Text>
+            <Text style={[styles.zoneCardTitle, { color: colors.text }]}>Your Zone · {zoneDisplayName}</Text>
             <Text style={[styles.cardSub, { color: colors.muted }]} numberOfLines={1}>
-              {zoneStatus?.zone_name || profile?.city || 'Your zone'} · auto-refresh 2 min
+              {zoneUpdatedText || 'Pull down on Home to refresh'}
             </Text>
             {disruptionAlert?.visible && disruptionAlert?.disruption_type ? (
               <Text style={[styles.liveDisruptionLine, { color: scheme === 'dark' ? '#ff8a80' : '#b71c1c' }]}>
-                Live alert: {formatDisruptionLabel(disruptionAlert.disruption_type)}
+                Live: {formatDisruptionLabel(disruptionAlert.disruption_type)}
               </Text>
+            ) : null}
+            {!primaryForecastShield &&
+            !forecastShieldQuery.isLoading &&
+            !forecastShieldQuery.isError &&
+            effectiveZoneId ? (
+              <View style={styles.forecastClearChipInline}>
+                <Text
+                  style={[
+                    styles.forecastClearChipText,
+                    { color: scheme === 'dark' ? '#4ade80' : '#15803d' },
+                  ]}
+                >
+                  48h forecast clear 🛡️
+                </Text>
+              </View>
             ) : null}
           </View>
           <ZonePulseDot tone={zoneStatus ? zonePulseTone : disruptionActive ? 'danger' : 'success'} />
@@ -842,22 +949,24 @@ export default function DashboardScreen({ navigation }) {
         ) : zoneStatusQuery.isError ? (
           <View style={styles.errorBox}>
             <Text style={[styles.errorText, { color: colors.muted }]}>
-              Couldn’t load zone status. Check your connection and try pull-to-refresh.
+              Couldn’t load zone status. Pull down to retry.
             </Text>
           </View>
         ) : (
           <View style={styles.zoneGrid}>
             <View style={styles.zoneCell}>
               <Text style={[styles.zoneLabel, { color: colors.muted }]}>Weather</Text>
-              <Text style={[styles.zoneValue, { color: colors.text }]}>
-                {weatherEmoji} {tempC != null ? `${tempC}°C` : '—°C'}
+              <Text style={[styles.zoneValue, { color: colors.text }]} numberOfLines={2}>
+                {weatherEmoji}
+                {'\n'}
+                {tempC != null ? `${tempC}°C` : '—'}
               </Text>
             </View>
             <View style={styles.zoneCell}>
               <Text style={[styles.zoneLabel, { color: colors.muted }]}>AQI</Text>
-              <Text style={[styles.zoneValue, { color: aqiHex }]}>
+              <Text style={[styles.zoneValue, { color: aqiHex }]} numberOfLines={3}>
                 {aqiLabel}
-                {Number.isFinite(aqiNum) ? ` (${Math.round(aqiNum)})` : ''}
+                {Number.isFinite(aqiNum) ? `\n${Math.round(aqiNum)}` : ''}
               </Text>
             </View>
             <View style={styles.zoneCell}>
@@ -868,52 +977,73 @@ export default function DashboardScreen({ navigation }) {
                   { color: alertCount > 0 ? '#c62828' : colors.text, fontWeight: '900' },
                 ]}
               >
-                {alertCount > 0 ? `${alertCount} alert${alertCount === 1 ? '' : 's'}` : 'None'}
+                {alertCount}
               </Text>
             </View>
           </View>
         )}
 
+        <View style={[styles.zoneStatusBarWrap, { backgroundColor: rideStatus.bar }]}>
+          <Text style={styles.zoneStatusBarLabel}>{rideStatus.label}</Text>
+        </View>
+
         {disruptionActive ? (
           <View style={styles.disruptionBanner}>
             <Text style={[styles.disruptionTitle, { color: scheme === 'dark' ? '#ffd6d6' : '#b71c1c' }]}>
-              DISRUPTION DETECTED — Your claim is being processed
+              Disruption active — claim in progress
             </Text>
           </View>
         ) : null}
       </Animated.View>
 
-      {!primaryForecastShield &&
-      !forecastShieldQuery.isLoading &&
-      !forecastShieldQuery.isError &&
-      effectiveZoneId ? (
-        <View style={styles.forecastClearChip}>
-          <Text
-            style={[
-              styles.forecastClearChipText,
-              { color: scheme === 'dark' ? '#4ade80' : '#15803d' },
-            ]}
-          >
-            🛡️ No forecast risks · 48h clear
+      {primaryForecastShield && !forecastShieldQuery.isError ? (
+        <LinearGradient
+          colors={['#0f172a', '#1d4ed8', '#3b82f6']}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.forecastShieldCardHero}
+        >
+          <Text style={styles.forecastShieldHeroIcon}>🛡️</Text>
+          <Text style={styles.forecastShieldHeroTitle}>Forecast Shield Active</Text>
+          <Text style={styles.forecastShieldHeroSubtitle}>
+            {primaryForecastShield.subtitle || 'Heavy rain predicted tomorrow 3–7 PM'}
           </Text>
-        </View>
+          <Text style={styles.forecastShieldHeroFooter}>
+            {primaryForecastShield.coverage_line || 'Your coverage auto-upgraded to Pro'}
+          </Text>
+          <View style={styles.forecastShieldBadge}>
+            <Text style={styles.forecastShieldBadgeText}>Proactive · no extra cost</Text>
+          </View>
+        </LinearGradient>
       ) : null}
 
-      {/* Your Earnings DNA — heatmap (IST 6AM–11PM) */}
-      <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
-        <View style={styles.cardHeaderRow}>
+      {/* Earnings DNA — hour × day heatmap */}
+      <View style={[styles.card, styles.cardElevated, { backgroundColor: colors.card, borderColor: colors.border }]}>
+        <TouchableOpacity
+          style={[
+            styles.dnaCollapseHeader,
+            { borderColor: colors.primary, backgroundColor: dnaExpanded ? 'transparent' : `${colors.primary}14` },
+          ]}
+          onPress={() => setDnaExpanded((v) => !v)}
+          activeOpacity={0.85}
+        >
           <View style={{ flex: 1 }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-              <Text style={[styles.cardTitle, { color: colors.text }]}>Your Earnings DNA</Text>
+              <Text style={[styles.sectionTitle, { color: colors.text }]}>Earnings DNA</Text>
               <Text style={{ fontSize: 16 }} accessibilityLabel="About Earnings DNA">
                 ℹ️
               </Text>
             </View>
             <Text style={[styles.cardSub, { color: colors.muted }]}>
-              Average ₹/hr by weekday & time (IST). Tap a cell for details.
+              {dnaExpanded
+                ? 'Tap to collapse · darker green = busier hours (typical ₹/hr)'
+                : dnaQuery.data?.peak_window?.label
+                  ? `${dnaQuery.data.peak_window.label} · tap to expand`
+                  : 'Your ride-time earning pattern · tap to expand'}
             </Text>
           </View>
-        </View>
+          <Text style={[styles.dnaChevron, { color: colors.primary }]}>{dnaExpanded ? '▲' : '▼'}</Text>
+        </TouchableOpacity>
         {dnaQuery.isLoading ? (
           <View style={styles.loadingRow}>
             <ActivityIndicator color={colors.primary} />
@@ -921,20 +1051,20 @@ export default function DashboardScreen({ navigation }) {
           </View>
         ) : dnaQuery.isError ? (
           <Text style={[styles.cardSub, { color: colors.muted }]}>Could not load Earnings DNA.</Text>
-        ) : dnaQuery.data ? (
+        ) : dnaQuery.data && dnaExpanded ? (
           <>
             <View style={{ flexDirection: 'row', marginTop: 4 }}>
-              <View style={{ width: 22, justifyContent: 'flex-end', paddingBottom: 18 }}>
-                {DNA_Y_LETTERS.map((L, yi) => (
+              <View style={{ width: 34, justifyContent: 'flex-end', paddingBottom: 18, paddingRight: 4 }}>
+                {DNA_DAY_LABELS.map((L, yi) => (
                   <Text
                     key={`dna-row-${yi}`}
                     style={{
                       height: DNA_CELL_H + DNA_CELL_GAP,
                       lineHeight: DNA_CELL_H,
-                      fontSize: 11,
+                      fontSize: 10,
                       fontWeight: '800',
                       color: colors.muted,
-                      textAlign: 'center',
+                      textAlign: 'right',
                     }}
                   >
                     {L}
@@ -960,8 +1090,8 @@ export default function DashboardScreen({ navigation }) {
                             width={DNA_CELL_W}
                             height={DNA_CELL_H}
                             rx={1}
-                            fill={dnaHeatColorBlue(t)}
-                            stroke={highlight ? '#F59E0B' : 'none'}
+                            fill={dnaHeatColorEarnings(t)}
+                            stroke={highlight ? '#1a73e8' : 'none'}
                             strokeWidth={highlight ? 2 : 0}
                           />
                         );
@@ -984,11 +1114,13 @@ export default function DashboardScreen({ navigation }) {
                           }}
                           onPress={(e) => {
                             const { pageX, pageY } = e.nativeEvent;
-                            setDnaPopover({
+                            setDnaTooltip({
                               visible: true,
+                              dayName: DNA_DAY_NAMES_LONG[di],
+                              hour: formatDnaHour12Long(hour),
+                              amount: Math.round(v),
                               x: pageX,
                               y: pageY,
-                              text: `${DNA_DAY_NAMES_LONG[di]} ${formatDnaHour12Long(hour)}: avg ₹${Math.round(v)}/hr`,
                             });
                           }}
                         />
@@ -1042,56 +1174,60 @@ export default function DashboardScreen({ navigation }) {
             </View>
             <Text style={[styles.dnaConfNote, { color: colors.muted }]}>
               {(dnaQuery.data.simulation_count ?? 0) >= 14
-                ? `Based on ${Number(dnaQuery.data.data_weeks_equivalent ?? (dnaQuery.data.simulation_count || 0) / 14).toFixed(1)} weeks of data`
-                : 'Estimated pattern — updates as you work'}
+                ? `Based on about ${Number(dnaQuery.data.data_weeks_equivalent ?? (dnaQuery.data.simulation_count || 0) / 14).toFixed(1)} weeks of ride patterns`
+                : 'Pattern fills in as you complete more shifts and demos'}
             </Text>
           </>
         ) : null}
       </View>
 
-      {/* Weekly earnings protection */}
-      <TouchableOpacity
-        activeOpacity={0.9}
-        onPress={() => setEarningsExpanded((v) => !v)}
-        style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}
-      >
-        <View style={styles.cardHeaderRow}>
-          <View style={{ flex: 1 }}>
-            <Text style={[styles.cardTitle, { color: colors.text }]}>Weekly earnings protection</Text>
-            <Text style={[styles.cardSub, { color: colors.muted }]}>
-              Tap to {earningsExpanded ? 'collapse' : 'expand'} breakdown
+      {/* Coverage ring — weekly protection */}
+      <View style={[styles.card, styles.cardElevated, { backgroundColor: colors.card, borderColor: colors.border }]}>
+        <View style={styles.coverageRingRow}>
+          <View style={{ flex: 1, paddingRight: 8 }}>
+            <Text style={[styles.sectionTitle, { color: colors.text }]}>Weekly protection</Text>
+            <Text style={[styles.coverageRingAmount, { color: colors.text }]}>
+              ₹{Math.round(shownWeeklyProtected).toLocaleString('en-IN')} protected this week
             </Text>
+            <Text style={[styles.fingerprintHint, { color: colors.muted }]}>
+              {fingerprintPct != null
+                ? `↗ ${fingerprintPct}% of your earning fingerprint`
+                : `${trend.dir === 'up' ? '↗' : trend.dir === 'down' ? '↘' : '→'} ${trend.pct}% vs typical week`}
+            </Text>
+            <Text style={[styles.cardSub, { color: colors.muted, marginTop: 6 }]}>
+              Weekly cap ₹{Math.round(protectedMax).toLocaleString('en-IN')}
+            </Text>
+            {breakdownHasData ? (
+              <TouchableOpacity onPress={() => setCoverageExpanded((x) => !x)} style={{ marginTop: 10 }}>
+                <Text style={[styles.linkText, { color: colors.primary }]}>
+                  {coverageExpanded ? 'Hide' : 'Show'} week breakdown
+                </Text>
+              </TouchableOpacity>
+            ) : null}
           </View>
-          <View style={{ width: 62, height: 62 }}>
-            <ProgressRing value={shownWeeklyProtected} max={protectedMax} size={62} stroke={8} scheme={scheme} />
+          <View style={styles.coverageRingWrap}>
+            <ProgressRing value={shownWeeklyProtected} max={protectedMax} size={104} stroke={10} scheme={scheme} />
           </View>
         </View>
-
-        <View style={{ marginTop: 10 }}>
-          <Text style={[styles.bigMoney, { color: colors.text }]}>
-            ₹{Math.round(shownWeeklyProtected)} protected this week{' '}
-            <Text style={{ color: colors.muted, fontSize: 12 }}>
-              {trend.dir === 'up' ? '↗' : trend.dir === 'down' ? '↘' : '→'} {trend.pct}%
-            </Text>
-          </Text>
-          <Text style={[styles.cardSub, { color: colors.muted }]}>Max coverage: ₹{Math.round(protectedMax)}</Text>
-        </View>
-
-        {earningsExpanded ? (
+        {coverageExpanded && breakdownHasData ? (
           <View style={styles.breakdownWrap}>
-            {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((d) => (
-              <View key={d} style={[styles.breakdownRow, { borderColor: colors.border }]}>
-                <Text style={[styles.breakdownDay, { color: colors.text }]}>{d}</Text>
-                <Text style={[styles.breakdownReason, { color: colors.muted }]}>—</Text>
-                <Text style={[styles.breakdownAmt, { color: colors.text }]}>₹0</Text>
+            {(breakdownQuery.data?.weekly_breakdown || []).map((row) => (
+              <View
+                key={String(row.day)}
+                style={[styles.breakdownRow, { borderColor: colors.border }]}
+              >
+                <Text style={[styles.breakdownDay, { color: colors.text }]}>{row.day}</Text>
+                <Text style={[styles.breakdownReason, { color: colors.muted }]} numberOfLines={1}>
+                  {row.disruption || '—'}
+                </Text>
+                <Text style={[styles.breakdownAmt, { color: colors.text }]}>
+                  ₹{Math.round(Number(row.amount || 0))}
+                </Text>
               </View>
             ))}
-            <Text style={[styles.breakdownNote, { color: colors.muted }]}>
-              Detailed daily breakdown can be tied to approved payouts as data grows.
-            </Text>
           </View>
         ) : null}
-      </TouchableOpacity>
+      </View>
 
       {/* Active claim card (hidden while demo bottom sheet shows progress) */}
       {inFlight && !disruptionSheetVisible ? (
@@ -1123,51 +1259,30 @@ export default function DashboardScreen({ navigation }) {
 
       {/* Simulate disruption — primary demo CTA */}
       {!inFlight ? (
-        <TouchableOpacity
-          style={[styles.simulateCta, { backgroundColor: colors.primary }]}
-          activeOpacity={0.9}
-          onPress={() => {
-            logButtonTap('simulate_disruption_open');
-            weeklyBeforeDemoRef.current = protectedThisWeek;
-            demoStepStatusRef.current = null;
-            setSheetPhase('scenarios');
-            setDisruptionSheetVisible(true);
-          }}
-        >
-          <Text style={styles.simulateCtaText}>Simulate Disruption</Text>
-          <Text style={styles.simulateCtaSub}>See a live claim → payout in ~9 seconds</Text>
-        </TouchableOpacity>
+        <View style={styles.simulateBlock}>
+          <TouchableOpacity
+            style={[styles.simulateCta, { backgroundColor: colors.primary }]}
+            activeOpacity={0.9}
+            onPress={() => {
+              logButtonTap('simulate_disruption_open');
+              weeklyBeforeDemoRef.current = protectedThisWeek;
+              demoStepStatusRef.current = null;
+              setSheetPhase('scenarios');
+              setDisruptionSheetVisible(true);
+            }}
+          >
+            <Text style={styles.simulateCtaText}>Simulate Disruption — See a live claim in ~9 seconds</Text>
+          </TouchableOpacity>
+          <Text style={[styles.simulateCtaHint, { color: colors.muted }]}>
+            Full fraud + payout pipeline — best for judge demos. Use Coverage & Claims tabs for more.
+          </Text>
+        </View>
       ) : null}
 
-      <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
-        <Text style={[styles.cardTitle, { color: colors.text, marginBottom: 10 }]}>More</Text>
-        <View style={styles.actionsRow}>
-          <TouchableOpacity
-            style={[styles.actionBtn, { borderColor: colors.border }]}
-            onPress={() => {
-              logButtonTap('view_payout_history_button');
-              navigation.navigate('Claims');
-            }}
-          >
-            <Text style={[styles.actionText, { color: colors.text }]}>Payout history</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.actionBtn, { borderColor: colors.border }]}
-            onPress={() => {
-              logButtonTap('upgrade_plan_button');
-              navigation.navigate('Coverage');
-            }}
-          >
-            <Text style={[styles.actionText, { color: colors.text }]}>Coverage</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-
-      {/* Recent payouts */}
-      <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
+      <View style={[styles.card, styles.cardElevated, { backgroundColor: colors.card, borderColor: colors.border }]}>
         <View style={styles.cardHeaderRow}>
-          <Text style={[styles.cardTitle, { color: colors.text }]}>Recent payouts</Text>
-          <TouchableOpacity onPress={() => payoutsQuery.refetch()}>
+          <Text style={[styles.sectionTitle, { color: colors.text }]}>Recent payouts</Text>
+          <TouchableOpacity onPress={() => payoutsQuery.refetch()} hitSlop={12}>
             <Text style={[styles.linkText, { color: colors.primary }]}>Refresh</Text>
           </TouchableOpacity>
         </View>
@@ -1178,10 +1293,12 @@ export default function DashboardScreen({ navigation }) {
             <Text style={[styles.loadingText, { color: colors.muted }]}>Loading payouts…</Text>
           </View>
         ) : payouts.length === 0 ? (
-          <Text style={[styles.cardSub, { color: colors.muted }]}>No payouts yet — you're all set</Text>
+          <Text style={[styles.emptyPayouts, { color: colors.muted }]}>
+            {"No disruptions yet — you're all set ✅"}
+          </Text>
         ) : (
           payouts.map((p) => {
-            const when = p.date || (p.created_at ? new Date(p.created_at).toLocaleDateString() : '—');
+            const when = p.date || (p.created_at ? new Date(p.created_at).toLocaleDateString('en-IN') : '—');
             const amount =
               typeof p.amount === 'number'
                 ? p.amount
@@ -1191,13 +1308,15 @@ export default function DashboardScreen({ navigation }) {
                     ? p.payout_amount
                     : 0;
             const typeIcon = payoutIconEmoji(p.icon);
-            const disruption = p.disruption_type || 'Payout';
-            const chip =
-              p.status === 'credited'
-                ? 'CREDITED'
-                : String(p.decision || p.status || 'DONE').toUpperCase().slice(0, 12);
+            const disruption = formatDisruptionLabel(p.disruption_type || p.label || 'Payout');
+            const isCredited =
+              String(p.status || '').toLowerCase() === 'credited' ||
+              String(p.decision || '').toUpperCase().includes('APPROV');
             return (
-              <View key={String(p.id || p.claim_id || when + disruption)} style={[styles.payoutRow, { borderColor: colors.border }]}>
+              <View
+                key={String(p.id || p.claim_id || when + disruption)}
+                style={[styles.payoutRow, { borderColor: colors.border }]}
+              >
                 <Text style={[styles.payoutDate, { color: colors.muted }]} numberOfLines={2}>
                   {when}
                 </Text>
@@ -1206,8 +1325,8 @@ export default function DashboardScreen({ navigation }) {
                   {disruption}
                 </Text>
                 <Text style={[styles.payoutAmt, { color: colors.text }]}>₹{Math.round(amount)}</Text>
-                <View style={[styles.chip, { borderColor: colors.border }]}>
-                  <Text style={[styles.chipText, { color: colors.muted }]}>{chip}</Text>
+                <View style={styles.payoutCreditedBadge}>
+                  <Text style={styles.payoutCreditedText}>{isCredited ? 'CREDITED' : 'PAID'}</Text>
                 </View>
               </View>
             );
@@ -1251,14 +1370,25 @@ export default function DashboardScreen({ navigation }) {
               <>
                 <Text style={[styles.cardTitle, { color: colors.text, marginBottom: 6 }]}>Pick a disruption</Text>
                 <Text style={[styles.cardSub, { color: colors.muted, marginBottom: 14 }]}>
-                  We will run a live claim check for your zone — watch each step update in real time.
+                  Pick one scenario — only that run starts. Watch each step update in real time.
                 </Text>
                 {DEMO_SCENARIOS.map((s) => (
                   <TouchableOpacity
                     key={s.value}
-                    style={[styles.scenarioCard, { borderColor: colors.border }]}
+                    style={[
+                      styles.scenarioCard,
+                      { borderColor: runningScenario === s.value ? colors.primary : colors.border },
+                      runningScenario === s.value ? { borderWidth: 2 } : null,
+                    ]}
                     onPress={() => {
                       logButtonTap('trigger_simulation_button');
+                      if (Math.random() < DEMO_NO_EVENT_CHANCE) {
+                        Alert.alert(
+                          'All clear',
+                          DEMO_NO_EVENT_MESSAGES[s.value] || 'No disruption signals in your area right now.'
+                        );
+                        return;
+                      }
                       weeklyBeforeDemoRef.current = protectedThisWeek;
                       demoStepStatusRef.current = null;
                       simMutation.mutate(s.value);
@@ -1270,7 +1400,11 @@ export default function DashboardScreen({ navigation }) {
                       <Text style={[styles.scenarioTitle, { color: colors.text }]}>{s.label}</Text>
                       <Text style={[styles.scenarioHint, { color: colors.muted }]}>{s.hint}</Text>
                     </View>
-                    {simMutation.isPending ? <ActivityIndicator size="small" color={colors.primary} /> : <Text style={{ color: colors.muted }}>→</Text>}
+                    {runningScenario === s.value ? (
+                      <ActivityIndicator size="small" color={colors.primary} />
+                    ) : (
+                      <Text style={{ color: colors.muted }}>→</Text>
+                    )}
                   </TouchableOpacity>
                 ))}
                 {simMutation.isError ? (
@@ -1318,17 +1452,27 @@ export default function DashboardScreen({ navigation }) {
       </Modal>
     </ScrollView>
 
-      {dnaPopover.visible ? (
+      {dnaTooltip.visible ? (
         <>
           <Pressable
             style={[StyleSheet.absoluteFillObject, { zIndex: 400 }]}
-            onPress={() => setDnaPopover({ visible: false, x: 0, y: 0, text: '' })}
+            onPress={() =>
+              setDnaTooltip({ visible: false, dayName: '', hour: '', amount: 0, x: 0, y: 0 })
+            }
           />
           <View
-            style={[styles.dnaPopBubble, { left: Math.max(12, dnaPopover.x - 130), top: Math.max(56, dnaPopover.y - 56) }]}
+            style={[
+              styles.dnaTooltipCard,
+              {
+                left: Math.max(16, dnaTooltip.x - 140),
+                top: Math.max(120, dnaTooltip.y - 72),
+              },
+            ]}
             pointerEvents="box-none"
           >
-            <Text style={styles.dnaPopText}>{dnaPopover.text}</Text>
+            <Text style={styles.dnaTooltipText}>
+              {dnaTooltip.dayName} {dnaTooltip.hour} · typical ~₹{dnaTooltip.amount}/hr
+            </Text>
           </View>
         </>
       ) : null}
@@ -1368,33 +1512,79 @@ const styles = StyleSheet.create({
     paddingHorizontal: 4,
   },
 
-  headerGradient: { borderRadius: 18, padding: 16, marginBottom: 14 },
-
-  forecastShieldCard: {
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 12,
+  headerGradient: {
+    borderRadius: 20,
+    paddingHorizontal: 18,
+    paddingVertical: 14,
+    marginBottom: 14,
+    maxHeight: 140,
+    overflow: 'hidden',
   },
-  forecastShieldTitle: { color: '#fff', fontSize: 17, fontWeight: '900' },
-  forecastShieldSubtitle: { color: 'rgba(255,255,255,0.92)', fontSize: 14, marginTop: 8, lineHeight: 20, fontWeight: '600' },
-  forecastShieldFooter: { color: 'rgba(255,255,255,0.88)', fontSize: 13, marginTop: 12, fontWeight: '700' },
+  headerGreetingLine1: { color: 'rgba(255,255,255,0.92)', fontSize: 16, fontWeight: '700' },
+  headerGreetingLine2: { color: '#fff', fontSize: 26, fontWeight: '900', marginTop: 2 },
+
+  forecastShieldCardHero: {
+    borderRadius: 20,
+    padding: 22,
+    marginBottom: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.2)',
+    shadowColor: '#1d4ed8',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.35,
+    shadowRadius: 20,
+    elevation: 8,
+  },
+  forecastShieldHeroIcon: { fontSize: 36, marginBottom: 6 },
+  forecastShieldHeroTitle: { color: '#fff', fontSize: 20, fontWeight: '900' },
+  forecastShieldHeroSubtitle: {
+    color: 'rgba(255,255,255,0.95)',
+    fontSize: 15,
+    marginTop: 10,
+    lineHeight: 22,
+    fontWeight: '600',
+  },
+  forecastShieldHeroFooter: {
+    color: 'rgba(255,255,255,0.9)',
+    fontSize: 14,
+    marginTop: 14,
+    fontWeight: '800',
+    lineHeight: 20,
+  },
   forecastShieldBadge: {
     alignSelf: 'flex-start',
-    marginTop: 12,
-    backgroundColor: 'rgba(255,255,255,0.2)',
+    marginTop: 14,
+    backgroundColor: 'rgba(255,255,255,0.22)',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 10,
+  },
+  forecastShieldBadgeText: { color: '#fff', fontSize: 12, fontWeight: '800' },
+  forecastClearChipInline: {
+    alignSelf: 'flex-start',
+    marginTop: 8,
+    backgroundColor: 'rgba(22,163,74,0.12)',
     paddingHorizontal: 10,
     paddingVertical: 5,
-    borderRadius: 8,
+    borderRadius: 999,
   },
-  forecastShieldBadgeText: { color: '#fff', fontSize: 11, fontWeight: '800' },
-  forecastClearChip: { marginBottom: 12 },
-  forecastClearChipText: { fontSize: 13, fontWeight: '800' },
-  headerTopRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  headerGreetingRow: { flexDirection: 'row', alignItems: 'center', flex: 1, gap: 10 },
-  wsLiveDot: { width: 10, height: 10, borderRadius: 5, borderWidth: 1, borderColor: 'rgba(255,255,255,0.5)' },
-  headerGreeting: { color: '#fff', fontSize: 20, fontWeight: '900', flex: 1 },
+  forecastClearChipText: { fontSize: 12, fontWeight: '800' },
+  wsLiveDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.55)',
+    marginRight: 2,
+  },
   liveDisruptionLine: { fontSize: 12, fontWeight: '900', marginTop: 6 },
-  headerBadgeRow: { marginTop: 12, flexDirection: 'row', gap: 10, flexWrap: 'wrap' },
+  headerBadgeRow: { marginTop: 12, flexDirection: 'row', gap: 8, flexWrap: 'wrap', alignItems: 'center' },
+  headerPlanLine: {
+    marginTop: 10,
+    fontSize: 13,
+    fontWeight: '700',
+    color: 'rgba(255,255,255,0.92)',
+  },
 
   pill: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999, borderWidth: 1, borderColor: 'rgba(255,255,255,0.22)' },
   pillText: { color: '#fff', fontSize: 12, fontWeight: '900' },
@@ -1406,8 +1596,17 @@ const styles = StyleSheet.create({
   pillNeutral: { backgroundColor: 'rgba(255,255,255,0.10)' },
 
   card: { borderRadius: 18, padding: 16, marginBottom: 14, borderWidth: 1 },
+  cardElevated: {
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.07,
+    shadowRadius: 12,
+    elevation: 3,
+  },
   cardHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   cardTitle: { fontSize: 14, fontWeight: '900' },
+  sectionTitle: { fontSize: 16, fontWeight: '900' },
+  zoneCardTitle: { fontSize: 17, fontWeight: '900' },
   cardSub: { fontSize: 12, marginTop: 4 },
 
   loadingRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingTop: 10 },
@@ -1420,6 +1619,14 @@ const styles = StyleSheet.create({
   zoneLabel: { fontSize: 12, fontWeight: '700' },
   zoneValue: { fontSize: 14, fontWeight: '900', marginTop: 6 },
 
+  zoneStatusBarWrap: {
+    marginTop: 14,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    alignItems: 'center',
+  },
+  zoneStatusBarLabel: { color: '#fff', fontSize: 13, fontWeight: '800' },
   disruptionBanner: { marginTop: 12, padding: 12, borderRadius: 14, backgroundColor: 'rgba(183,28,28,0.12)' },
   disruptionTitle: { fontSize: 12, fontWeight: '900' },
 
@@ -1512,35 +1719,62 @@ const styles = StyleSheet.create({
   dnaProgressTrack: { height: 8, borderRadius: 4, marginTop: 10, overflow: 'hidden' },
   dnaProgressFill: { height: '100%', borderRadius: 4 },
   dnaConfNote: { fontSize: 11, marginTop: 10, fontWeight: '600' },
-  dnaPopBubble: {
-    position: 'absolute',
-    maxWidth: 260,
+  dnaCollapseHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
     paddingVertical: 10,
     paddingHorizontal: 12,
+    marginHorizontal: -4,
     borderRadius: 12,
-    backgroundColor: 'rgba(17,24,39,0.94)',
-    zIndex: 401,
-    elevation: 8,
-    shadowColor: '#000',
-    shadowOpacity: 0.2,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 2 },
+    borderWidth: 2,
+    borderColor: 'transparent',
   },
-  dnaPopText: { color: '#fff', fontSize: 13, fontWeight: '700' },
+  dnaChevron: { fontSize: 14, fontWeight: '900', paddingLeft: 8 },
+  coverageRingRow: { flexDirection: 'row', alignItems: 'center' },
+  coverageRingWrap: { width: 112, height: 112, alignItems: 'center', justifyContent: 'center' },
+  coverageRingAmount: { fontSize: 18, fontWeight: '900', marginTop: 6, lineHeight: 24 },
+  fingerprintHint: { fontSize: 13, fontWeight: '700', marginTop: 8 },
+  simulateBlock: { marginBottom: 14 },
+  simulateCtaHint: { fontSize: 12, textAlign: 'center', marginTop: 10, lineHeight: 18, paddingHorizontal: 8 },
+  emptyPayouts: { fontSize: 14, fontWeight: '600', textAlign: 'center', paddingVertical: 16 },
+  payoutCreditedBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    backgroundColor: 'rgba(22,163,74,0.15)',
+  },
+  payoutCreditedText: { fontSize: 10, fontWeight: '900', color: '#15803d' },
+  dnaTooltipCard: {
+    position: 'absolute',
+    maxWidth: 280,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    borderRadius: 14,
+    backgroundColor: '#fff',
+    zIndex: 401,
+    elevation: 10,
+    shadowColor: '#000',
+    shadowOpacity: 0.18,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    borderWidth: 1,
+    borderColor: 'rgba(0,0,0,0.06)',
+  },
+  dnaTooltipText: { color: '#0f172a', fontSize: 14, fontWeight: '700' },
 
   simulateCta: {
     borderRadius: 16,
-    padding: 18,
-    marginBottom: 14,
+    paddingVertical: 18,
+    paddingHorizontal: 16,
     alignItems: 'center',
-    shadowColor: '#000',
-    shadowOpacity: 0.12,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 4,
+    shadowColor: '#1a73e8',
+    shadowOpacity: 0.35,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 6,
   },
-  simulateCtaText: { color: '#fff', fontSize: 18, fontWeight: '900' },
-  simulateCtaSub: { color: 'rgba(255,255,255,0.92)', fontSize: 12, marginTop: 8, fontWeight: '600' },
+  simulateCtaText: { color: '#fff', fontSize: 16, fontWeight: '900', textAlign: 'center', lineHeight: 22 },
 
   scenarioCard: {
     flexDirection: 'row',

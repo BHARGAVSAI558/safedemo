@@ -1,4 +1,3 @@
-import json
 from datetime import datetime, timezone
 from typing import Any, List
 from zoneinfo import ZoneInfo
@@ -11,9 +10,9 @@ from app.api.v1.routes.workers import get_current_user
 from app.db.session import get_db
 from app.engines.decision_engine import DecisionEngine
 from app.models.claim import DecisionType, Simulation
-from app.models.payout import PayoutRecord
 from app.models.worker import User
-from app.schemas.claim import DisruptionData, SimulationRequest, SimulationResponse
+from app.schemas.claim import SimulationRequest, SimulationResponse
+from app.services.simulation_labels import disruption_from_simulation
 from app.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -21,12 +20,44 @@ router = APIRouter()
 
 IST = ZoneInfo("Asia/Kolkata")
 
-SCENARIO_TO_UI = {
-    "HEAVY_RAIN": ("Heavy Rain", "rain"),
-    "EXTREME_HEAT": ("Extreme Heat", "hot"),
-    "AQI_SPIKE": ("AQI Spike", "cloudy"),
-    "CURFEW": ("Curfew", "cloudy"),
-}
+
+def _ui_status_from_decision(decision: Any) -> str:
+    v = decision.value if hasattr(decision, "value") else str(decision or "")
+    u = str(v).upper()
+    if u == "APPROVED":
+        return "APPROVED"
+    if u == "FRAUD":
+        return "BLOCKED"
+    if u == "REJECTED":
+        return "REJECTED"
+    return "PENDING"
+
+
+def _history_reason(s: Simulation, ui_status: str, payout_amt: float) -> str:
+    if ui_status == "APPROVED":
+        return f"Disruption verified · GPS clean · Paid ₹{int(round(payout_amt))}"
+    if ui_status == "BLOCKED":
+        return "GPS anomaly detected · Claim blocked"
+    if ui_status == "REJECTED":
+        return "Disruption signal too weak · No payout"
+    return (s.reason or "")[:500]
+
+
+def _history_row(s: Simulation) -> dict[str, Any]:
+    label, _icon = disruption_from_simulation(s)
+    ui_status = _ui_status_from_decision(s.decision)
+    payout_amt = float(s.payout or 0.0) if ui_status == "APPROVED" else 0.0
+    created = s.created_at
+    created_iso = created.isoformat() if created is not None else ""
+    return {
+        "id": s.id,
+        "disruption_type": label,
+        "status": ui_status,
+        "payout_amount": round(payout_amt, 2),
+        "created_at": created_iso,
+        "fraud_score": float(s.fraud_score or 0.0),
+        "reason": _history_reason(s, ui_status, float(s.payout or 0.0) if ui_status == "APPROVED" else 0.0),
+    }
 
 
 def _format_payout_date_display(created_at: datetime | None) -> str:
@@ -49,24 +80,8 @@ def _format_payout_date_display(created_at: datetime | None) -> str:
     return dt.strftime("%d %b %Y")
 
 
-def _disruption_from_simulation(s: Simulation) -> tuple[str, str]:
-    if s.weather_data:
-        try:
-            wd = json.loads(s.weather_data)
-            key = str(wd.get("scenario") or wd.get("disruption_type") or "").upper()
-            if key in SCENARIO_TO_UI:
-                return SCENARIO_TO_UI[key]
-        except (json.JSONDecodeError, TypeError):
-            pass
-    if s.weather_disruption:
-        return "Heavy Rain", "rain"
-    if getattr(s, "event_disruption", False):
-        return "Curfew", "cloudy"
-    return "Disruption", "cloudy"
-
-
 def _payout_row_from_simulation(s: Simulation) -> dict[str, Any]:
-    label, icon = _disruption_from_simulation(s)
+    label, icon = disruption_from_simulation(s)
     amt = float(s.payout or 0.0)
     return {
         "date": _format_payout_date_display(s.created_at),
@@ -76,22 +91,6 @@ def _payout_row_from_simulation(s: Simulation) -> dict[str, Any]:
         "icon": icon,
         "claim_id": s.id,
         "source": "simulation",
-    }
-
-
-def _payout_row_from_record(p: PayoutRecord, s: Simulation) -> dict[str, Any]:
-    label, icon = _disruption_from_simulation(s)
-    st = str(p.status or "").lower()
-    status_ui = "credited" if st in ("completed", "credited", "paid") else st or "pending"
-    return {
-        "date": _format_payout_date_display(p.created_at),
-        "disruption_type": label,
-        "amount": round(float(p.amount), 2),
-        "status": status_ui,
-        "icon": icon,
-        "claim_id": s.id,
-        "id": p.id,
-        "source": "payout_record",
     }
 
 
@@ -131,8 +130,9 @@ async def claim_history(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     cursor: int | None = None,
-    limit: int = 20,
+    limit: int = 50,
 ):
+    """All simulations for this user, newest first — mobile-friendly claim history."""
     limit = max(1, min(100, int(limit)))
     total_count = (
         await db.execute(select(func.count(Simulation.id)).where(Simulation.user_id == current_user.id))
@@ -140,45 +140,16 @@ async def claim_history(
     stmt = (
         select(Simulation)
         .where(Simulation.user_id == current_user.id)
-        .order_by(Simulation.id.desc())
+        .order_by(Simulation.created_at.desc(), Simulation.id.desc())
         .limit(limit + 1)
     )
     if cursor is not None:
-        stmt = stmt.where(Simulation.id < cursor)
-    result = await db.execute(
-        stmt
-    )
+        stmt = stmt.where(Simulation.id < int(cursor))
+    result = await db.execute(stmt)
     sims = result.scalars().all()
     has_more = len(sims) > limit
     sims = sims[:limit]
-    out: List[dict[str, Any]] = []
-    for s in sims:
-        wd = None
-        if s.weather_data:
-            try:
-                wd = json.loads(s.weather_data)
-            except json.JSONDecodeError:
-                wd = None
-        out.append(
-            SimulationResponse(
-            id=s.id,
-            disruption=DisruptionData(
-                weather=s.weather_disruption,
-                traffic=s.traffic_disruption,
-                event=s.event_disruption,
-                final_disruption=s.final_disruption,
-            ),
-            decision=s.decision.value if hasattr(s.decision, "value") else str(s.decision),
-            reason=s.reason,
-            fraud_score=s.fraud_score,
-            expected_income=s.expected_income,
-            actual_income=s.actual_income,
-            loss=s.loss,
-            payout=s.payout,
-            weather_data=wd,
-            created_at=s.created_at,
-            ).model_dump()
-        )
+    out: List[dict[str, Any]] = [_history_row(s) for s in sims]
     next_cursor = sims[-1].id if has_more and sims else None
     return {"data": out, "next_cursor": str(next_cursor) if next_cursor is not None else None, "total_count": int(total_count)}
 
@@ -188,47 +159,36 @@ async def payout_history(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     cursor: int | None = None,
-    limit: int = 20,
+    limit: int = 10,
 ):
-    """Recent payouts for the worker app: mobile-friendly rows; falls back to APPROVED simulations if no payout rows."""
+    """Last N APPROVED simulations as payout rows (credited), newest first by simulation time."""
     limit = max(1, min(100, int(limit)))
-    stmt = (
-        select(PayoutRecord, Simulation)
-        .join(Simulation, Simulation.id == PayoutRecord.simulation_id)
-        .where(Simulation.user_id == current_user.id)
-        .order_by(PayoutRecord.id.desc())
+    sim_stmt = (
+        select(Simulation)
+        .where(
+            Simulation.user_id == current_user.id,
+            Simulation.decision == DecisionType.APPROVED,
+        )
+        .order_by(Simulation.created_at.desc(), Simulation.id.desc())
         .limit(limit + 1)
     )
     if cursor is not None:
-        stmt = stmt.where(PayoutRecord.id < cursor)
-    rows = (await db.execute(stmt)).all()
-    has_more = len(rows) > limit
-    rows = rows[:limit]
-    data: List[dict[str, Any]] = [_payout_row_from_record(p, s) for p, s in rows]
-
-    if not data:
-        sim_stmt = (
-            select(Simulation)
-            .where(
-                Simulation.user_id == current_user.id,
-                Simulation.decision == DecisionType.APPROVED,
-                Simulation.payout > 0,
-            )
-            .order_by(Simulation.id.desc())
-            .limit(limit)
-        )
-        sims = (await db.execute(sim_stmt)).scalars().all()
-        data = [_payout_row_from_simulation(s) for s in sims]
-        total_count = len(data)
-        return {"data": data, "next_cursor": None, "total_count": int(total_count)}
-
+        sim_stmt = sim_stmt.where(Simulation.id < int(cursor))
+    sims = (await db.execute(sim_stmt)).scalars().all()
+    has_more = len(sims) > limit
+    sims = sims[:limit]
+    data: List[dict[str, Any]] = [_payout_row_from_simulation(s) for s in sims]
     total_count = (
         await db.execute(
-            select(func.count(PayoutRecord.id))
-            .select_from(PayoutRecord)
-            .join(Simulation, Simulation.id == PayoutRecord.simulation_id)
-            .where(Simulation.user_id == current_user.id)
+            select(func.count(Simulation.id)).where(
+                Simulation.user_id == current_user.id,
+                Simulation.decision == DecisionType.APPROVED,
+            )
         )
     ).scalar_one() or 0
-    next_cursor = rows[-1][0].id if has_more and rows else None
-    return {"data": data, "next_cursor": str(next_cursor) if next_cursor else None, "total_count": int(total_count)}
+    next_cursor = sims[-1].id if has_more and sims else None
+    return {
+        "data": data,
+        "next_cursor": str(next_cursor) if next_cursor is not None else None,
+        "total_count": int(total_count),
+    }

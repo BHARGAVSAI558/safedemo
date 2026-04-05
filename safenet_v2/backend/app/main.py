@@ -1,7 +1,8 @@
 from contextlib import asynccontextmanager
+import traceback
 
 import redis.asyncio as aioredis
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -9,16 +10,20 @@ from pydantic import ValidationError
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
-from sqlalchemy import text
+from sqlalchemy import func, select, text
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.routes import admin, auth, claims, policies, pools, profile, simulation, websockets, workers, zones
+from app.api.v1.routes import admin, auth, claims, notifications, policies, pools, profile, simulation, websockets, workers, zones
+from app.api.v1.routes.admin import HYDERABAD_ZONES_GEO
 from app.core.config import settings
 from app.core.exceptions import SafeNetBaseException
 from app.db.mongo import connect_mongo, disconnect_mongo
 from app.services.event_service import load_government_alerts_from_path
 from app.core.middleware import MaxBodySizeMiddleware, RequestIDMiddleware, RequestTimingMiddleware
 from app.core.rate_limit import limiter
-from app.db.session import engine, init_db
+from app.db.session import engine, get_db, init_db
+from app.models.claim import DecisionType, Simulation
+from app.models.worker import User
 from app.tasks.background_scheduler import shutdown_background_scheduler, start_background_scheduler
 from app.utils.logger import logger
 
@@ -27,6 +32,7 @@ from app.utils.logger import logger
 async def lifespan(app: FastAPI):
     try:
         await init_db()
+        logger.info("Database initialized")
         logger.info(
             "startup_db",
             engine_name="main",
@@ -35,6 +41,7 @@ async def lifespan(app: FastAPI):
             version=settings.APP_VERSION,
         )
     except Exception as exc:
+        logger.warning(f"DB init warning (continuing): {exc}")
         logger.warning(
             "startup_db_warning",
             engine_name="main",
@@ -43,8 +50,8 @@ async def lifespan(app: FastAPI):
             error=str(exc),
         )
 
-    if settings.REDIS_URL:
-        try:
+    try:
+        if settings.REDIS_URL:
             app.state.redis = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
             await app.state.redis.ping()
             logger.info(
@@ -53,21 +60,16 @@ async def lifespan(app: FastAPI):
                 decision="connected",
                 reason_code="REDIS_OK",
             )
-        except Exception:
+        else:
             app.state.redis = None
-            logger.warning(
-                "startup_redis_failed",
-                engine_name="main",
-                decision="fallback",
-                reason_code="REDIS_DOWN",
-            )
-    else:
+            logger.info("Redis not configured — using in-memory fallback")
+    except Exception:
         app.state.redis = None
         logger.warning(
-            "startup_redis_skipped",
+            "startup_redis_failed",
             engine_name="main",
             decision="fallback",
-            reason_code="REDIS_NO_URL",
+            reason_code="REDIS_DOWN",
         )
 
     app.state.mongo_db = await connect_mongo()
@@ -83,6 +85,7 @@ async def lifespan(app: FastAPI):
     load_government_alerts_from_path(seed)
 
     app.state.forecast_shields = {}
+    app.state.zone_status_last = {}
     start_background_scheduler(app)
 
     logger.info(
@@ -119,18 +122,20 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.origins,
-    allow_credentials=(settings.origins != ["*"]),
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
-    expose_headers=["X-Request-ID"],
-)
+# Middleware runs in reverse order of registration: last added runs first on each request.
+# CORS must be outermost so every response (including errors from inner layers) gets CORS headers.
 app.add_middleware(MaxBodySizeMiddleware)
 app.add_middleware(RequestIDMiddleware)
 app.add_middleware(RequestTimingMiddleware)
 app.add_middleware(SlowAPIMiddleware)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["X-Request-ID"],
+)
 
 
 @app.exception_handler(HTTPException)
@@ -187,6 +192,7 @@ async def pydantic_validation_handler(request: Request, exc: ValidationError) ->
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     rid = getattr(request.state, "request_id", None)
+    logger.error(f"500 error: {request.url} — {traceback.format_exc()}")
     logger.exception(
         "unhandled_exception",
         engine_name="main",
@@ -202,6 +208,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 
 
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["Authentication"])
+app.include_router(notifications.router, prefix="/api/v1/notifications", tags=["Notifications"])
 app.include_router(profile.router, prefix="/api/v1/profile", tags=["Profile"])
 app.include_router(workers.router, prefix="/api/v1/workers", tags=["Workers"])
 app.include_router(zones.router, prefix="/api/v1", tags=["Zones"])
@@ -211,6 +218,38 @@ app.include_router(claims.router, prefix="/api/v1/claims", tags=["Claims"])
 app.include_router(simulation.router, prefix="/api/v1/simulation", tags=["Simulation"])
 app.include_router(admin.router, prefix="/api/v1/admin", tags=["Admin"])
 app.include_router(websockets.router, tags=["WebSockets"])
+
+
+@app.get("/api/v1/demo/status", tags=["Demo"])
+async def demo_public_status(db: AsyncSession = Depends(get_db)):
+    """Public health snapshot for demos (no auth)."""
+    workers_registered = int((await db.execute(select(func.count(User.id)))).scalar_one() or 0)
+    claims_processed = int((await db.execute(select(func.count(Simulation.id)))).scalar_one() or 0)
+    approved = int(
+        (await db.execute(select(func.count(Simulation.id)).where(Simulation.decision == DecisionType.APPROVED))).scalar_one()
+        or 0
+    )
+    fraud_blocked = int(
+        (await db.execute(select(func.count(Simulation.id)).where(Simulation.decision == DecisionType.FRAUD))).scalar_one()
+        or 0
+    )
+    approval_rate = round((approved / claims_processed * 100.0), 1) if claims_processed else 0.0
+    live_zones = [str(z["zone_name"]) for z in HYDERABAD_ZONES_GEO]
+    ow = (settings.OPENWEATHER_API_KEY or "").strip()
+    wu = (settings.WEATHERAPI_KEY or "").strip()
+    oq = (settings.OPENAQ_API_KEY or "").strip()
+    return {
+        "status": "operational",
+        "workers_registered": workers_registered,
+        "claims_processed": claims_processed,
+        "approval_rate": approval_rate,
+        "fraud_blocked": fraud_blocked,
+        "live_zones": live_zones,
+        "apis": {
+            "weather": "live" if (ow or wu) else "mock",
+            "aqi": "live" if oq else "mock",
+        },
+    }
 
 
 @app.get("/", tags=["Health"])

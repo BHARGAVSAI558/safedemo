@@ -69,6 +69,8 @@ class ProfileResponse(BaseModel):
     zone_id: str | None = None
     working_hours_preset: str | None = None
     coverage_tier: str | None = None
+    risk_score: float | None = None
+    weekly_premium: float | None = None
     created_at: datetime | None
 
     model_config = {"from_attributes": True}
@@ -95,6 +97,20 @@ class ProfileResponse(BaseModel):
     def claims_none_safe(cls, v: Any) -> int:
         return 0 if v is None else int(v)
 
+    @field_validator("risk_score", mode="before")
+    @classmethod
+    def risk_score_none(cls, v: Any) -> float | None:
+        if v is None:
+            return None
+        return float(v)
+
+    @field_validator("weekly_premium", mode="before")
+    @classmethod
+    def weekly_premium_profile_none(cls, v: Any) -> float | None:
+        if v is None:
+            return None
+        return float(v)
+
 
 class PolicyWeekHistoryItem(BaseModel):
     started_at: str | None = None
@@ -108,3 +124,5 @@ class WorkerProfileOut(ProfileResponse):
     earnings_protected_this_week: float
     max_weekly_coverage: float
     policy_history: list[PolicyWeekHistoryItem] = Field(default_factory=list)
+    is_profile_complete: bool = True
+    phone_number: str | None = Field(default=None, description="Masked phone for onboarding state")

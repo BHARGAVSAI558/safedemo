@@ -17,29 +17,37 @@ class Settings(BaseSettings):
     DEBUG: bool = False
     DEMO_MODE: bool = True
 
+    # Comma-separated origins for browser clients (admin Vite = http://localhost:5173).
+    # On Render, set e.g. ALLOWED_ORIGINS=http://localhost:5173,https://your-admin.example.com
+    # Use * alone to allow any origin (no credentials).
     ALLOWED_ORIGINS: str = "*"
 
     # SQLite fallback so the app starts without a Postgres instance
-    DATABASE_URL: str = "sqlite+aiosqlite:///./safenet_demo.db"
+    DATABASE_URL: str = "sqlite+aiosqlite:///./safenet.db"
 
     # Optional — None disables Redis; cache_service already guards for None
     REDIS_URL: Optional[str] = None
 
     JWT_SECRET: str = Field(
-        default="safenet-demo-secret-2026-changeme",
+        default="safenet-dev-secret-2026",
         validation_alias=AliasChoices("JWT_SECRET", "JWT_SECRET_KEY"),
     )
     JWT_ALGORITHM: str = "HS256"
-    JWT_EXPIRY_MINUTES: int = Field(
-        default=60,
-        validation_alias=AliasChoices("JWT_EXPIRY_MINUTES", "ACCESS_TOKEN_EXPIRE_MINUTES"),
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(
+        default=240,
+        validation_alias=AliasChoices("ACCESS_TOKEN_EXPIRE_MINUTES", "JWT_EXPIRY_MINUTES"),
     )
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
-    ACCESS_TOKEN_EXPIRE_HOURS: int = 4
     ADMIN_ACCESS_TOKEN_EXPIRE_HOURS: int = 1
 
+    # Dashboard login (not worker OTP). Override in production.
+    ADMIN_DASHBOARD_USERNAME: str = "admin"
+    ADMIN_DASHBOARD_PASSWORD: str = "admin123"
+    # Reserved `users.phone` for the synthetic admin row used in JWT `user_id`.
+    ADMIN_CONSOLE_PHONE: str = "9000000001"
+
     ADMIN_JWT_SECRET: str = Field(
-        default="safenet-admin-secret-2026",
+        default="admin-dev-secret-2026",
         validation_alias=AliasChoices("ADMIN_JWT_SECRET", "ADMIN_JWT"),
     )
     ADMIN_JWT_PRIVATE_KEY: str = ""
@@ -68,10 +76,12 @@ class Settings(BaseSettings):
     @computed_field
     @property
     def origins(self) -> List[str]:
-        raw = self.ALLOWED_ORIGINS.strip()
-        if raw == "*":
+        raw = (self.ALLOWED_ORIGINS or "*").strip()
+        if raw == "*" or raw == "":
             return ["*"]
-        return [o.strip() for o in raw.split(",") if o.strip()]
+        parts = [o.strip().rstrip("/") for o in raw.split(",") if o.strip()]
+        # Empty list (e.g. typo in env) would block all browsers — fall back to *.
+        return parts if parts else ["*"]
 
     @computed_field
     @property

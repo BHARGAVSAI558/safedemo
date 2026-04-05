@@ -33,7 +33,8 @@ export async function registerForPushNotificationsAsync() {
 export function setupNotificationHandlers({ onClaimApproved, onDisruptionAlert, onPremiumDue } = {}) {
   Notifications.setNotificationHandler({
     handleNotification: async () => ({
-      shouldShowAlert: true,
+      shouldShowBanner: true,
+      shouldShowList: true,
       shouldPlaySound: false,
       shouldSetBadge: false,
     }),

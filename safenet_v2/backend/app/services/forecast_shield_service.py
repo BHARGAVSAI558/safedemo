@@ -158,9 +158,11 @@ async def fetch_zone_forecast_items(
 
 def items_to_merged_shields(
     zone_id: str,
-    items: list[dict[str, Any]],
+    items: list[dict[str, Any]] | None,
     issued_at: datetime,
 ) -> dict[str, dict[str, Any]]:
+    if not items:
+        return {}
     blocks: list[tuple[datetime, datetime, str, float]] = []
     for item in items:
         risk = classify_openweather_item(item)
@@ -331,6 +333,8 @@ async def refresh_forecast_shields(app: Any) -> None:
         for _city, zone_id, lat, lon in zones:
             try:
                 items = await fetch_zone_forecast_items(client, lat, lon, key)
+                if items is None:
+                    continue
                 merged_map = items_to_merged_shields(zone_id, items, issued_at)
                 combined.update(merged_map)
                 zones_refreshed.add(zone_id)

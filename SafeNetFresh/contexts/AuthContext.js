@@ -47,7 +47,7 @@ function reducer(state, action) {
         ...state,
         workerProfile: action.profile,
         trustScore: action.profile?.trust_score ?? null,
-        profileReady: true,
+        profileReady: action.profile?.is_profile_complete !== false,
       };
     case 'SET_PROFILE_READY':
       return {

@@ -17,20 +17,22 @@ from app.services.event_service import default_event_signals, government_alert_s
 from app.services.forecast_shield_service import active_shields_next_48h, enrich_shield_for_client
 from app.services.signal_types import UnavailableSignal
 from app.services.weather_service import WeatherService
+from app.utils.logger import get_logger
 
 IST = ZoneInfo("Asia/Kolkata")
 
 router = APIRouter()
+log = get_logger(__name__)
 
 MOCK_WEATHER_HYDERABAD: dict[str, Any] = {
     "temp_c": 28.0,
     "rainfall_mm_hr": 0.0,
-    "condition": "Clear",
-    "icon_code": "sunny",
+    "condition": "Partly Cloudy",
+    "icon_code": "cloudy",
     "source": "mock_hyderabad",
 }
 
-MOCK_AQI: dict[str, Any] = {"value": 42.0, "category": "Good", "color": "#16a34a"}
+MOCK_AQI: dict[str, Any] = {"value": 145.0, "category": "Moderate", "color": "#ca8a04"}
 
 
 def _load_zone_coords() -> dict[str, dict[str, Any]]:
@@ -125,11 +127,27 @@ async def zone_status(
     aqi_service = AQIService(redis=redis)
     event_service = default_event_signals()
 
-    weather_sig, aqi_sig, gov_sig = await asyncio.gather(
-        weather_service.get_weather(lat, lon),
-        aqi_service.get_aqi("Hyderabad", zone_id),
-        event_service.get_government_alert(zone_id),
-    )
+    try:
+        weather_sig, aqi_sig, gov_sig = await asyncio.wait_for(
+            asyncio.gather(
+                weather_service.get_weather(lat, lon),
+                aqi_service.get_aqi("Hyderabad", zone_id),
+                event_service.get_government_alert(zone_id),
+            ),
+            timeout=5.0,
+        )
+    except (asyncio.TimeoutError, Exception) as exc:
+        log.warning(
+            "zone_status_upstream_timeout",
+            zone_id=zone_id,
+            error=str(exc),
+        )
+        last_map = getattr(request.app.state, "zone_status_last", None)
+        if isinstance(last_map, dict) and zone_id in last_map:
+            return last_map[zone_id]
+        weather_sig = UnavailableSignal()
+        aqi_sig = UnavailableSignal()
+        gov_sig = await event_service.get_government_alert(zone_id)
 
     gov_rows = government_alert_store.get_raw(zone_id)
 
@@ -214,6 +232,11 @@ async def zone_status(
         "last_updated": datetime.now(timezone.utc).isoformat(),
     }
     await cache_set_json(redis, cache_key, payload, ttl_seconds=120)
+    last_map = getattr(request.app.state, "zone_status_last", None)
+    if not isinstance(last_map, dict):
+        last_map = {}
+        request.app.state.zone_status_last = last_map
+    last_map[zone_id] = payload
     return payload
 
 

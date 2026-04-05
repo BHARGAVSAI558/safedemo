@@ -12,21 +12,27 @@ from app.db.base import Base
 
 
 def _make_engine():
-    url = settings.async_database_url
-    if settings.is_sqlite:
-        # SQLite: single shared connection, no pool sizing
+    """SQLite (file) vs PostgreSQL (pooled); mirrors Render `postgres://` DSN handling."""
+    database_url = settings.DATABASE_URL
+    if database_url.startswith("postgres://"):
+        database_url = database_url.replace("postgres://", "postgresql+asyncpg://", 1)
+
+    if database_url.startswith("sqlite"):
+        if "+aiosqlite" not in database_url:
+            database_url = database_url.replace("sqlite://", "sqlite+aiosqlite://", 1)
         return create_async_engine(
-            url,
+            database_url,
             connect_args={"check_same_thread": False},
             poolclass=StaticPool,
             echo=False,
         )
-    # PostgreSQL
+
+    url = settings.async_database_url
     return create_async_engine(
         url,
         pool_pre_ping=True,
-        pool_size=10,
-        max_overflow=20,
+        pool_size=5,
+        max_overflow=10,
         echo=bool(settings.DEBUG),
     )
 
@@ -73,7 +79,22 @@ async def init_db() -> None:
             await conn.execute(text("ALTER TABLE profiles ADD COLUMN IF NOT EXISTS zone_id VARCHAR(64)"))
             await conn.execute(text("ALTER TABLE profiles ADD COLUMN IF NOT EXISTS working_hours_preset VARCHAR(64)"))
             await conn.execute(text("ALTER TABLE profiles ADD COLUMN IF NOT EXISTS coverage_tier VARCHAR(32)"))
+            await conn.execute(text("ALTER TABLE profiles ADD COLUMN IF NOT EXISTS risk_score DOUBLE PRECISION"))
+            await conn.execute(text("ALTER TABLE profiles ADD COLUMN IF NOT EXISTS weekly_premium DOUBLE PRECISION"))
             await conn.execute(text("ALTER TABLE policies ADD COLUMN IF NOT EXISTS weekly_premium FLOAT DEFAULT 0.0"))
+            await conn.execute(text("ALTER TABLE policies ADD COLUMN IF NOT EXISTS valid_from TIMESTAMPTZ"))
+            await conn.execute(text("ALTER TABLE policies ADD COLUMN IF NOT EXISTS valid_until TIMESTAMPTZ"))
+        else:
+            for stmt in (
+                "ALTER TABLE profiles ADD COLUMN risk_score FLOAT",
+                "ALTER TABLE profiles ADD COLUMN weekly_premium FLOAT",
+                "ALTER TABLE policies ADD COLUMN valid_from DATETIME",
+                "ALTER TABLE policies ADD COLUMN valid_until DATETIME",
+            ):
+                try:
+                    await conn.execute(text(stmt))
+                except Exception:
+                    pass
 
 
 def get_engine() -> Any:

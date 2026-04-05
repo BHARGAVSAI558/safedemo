@@ -1,25 +1,62 @@
 import axios from 'axios';
 import axiosRetry from 'axios-retry';
 import Constants from 'expo-constants';
+import { Platform } from 'react-native';
 
 import { getCurrentTokenStore, clearTokenStore } from './tokenStore';
 
-const TIMEOUT_MS = 30000;
-
 const getBackendURL = () => {
-  if (__DEV__) {
-    return (
-      Constants?.expoConfig?.extra?.BACKEND_URL_DEV ||
-      'http://192.168.1.100:8000'
-    );
+  try {
+    const envPublic =
+      typeof process !== 'undefined' && process.env && process.env.EXPO_PUBLIC_BACKEND_URL;
+    if (envPublic && String(envPublic).trim().startsWith('http')) {
+      return String(envPublic).trim().replace(/\/$/, '');
+    }
+  } catch (_) {
+    /* ignore */
   }
-  return (
-    Constants?.expoConfig?.extra?.BACKEND_URL ||
-    'https://YOUR-RAILWAY-APP.railway.app'
-  );
+  const devMode = Constants.expoConfig?.extra?.BACKEND_URL_DEV;
+  const prodURL =
+    Constants.expoConfig?.extra?.BACKEND_URL ||
+    'https://devtrails2026-alphanexus-phase2-2.onrender.com';
+
+  if (__DEV__ && devMode === 'local') {
+    return 'http://192.168.1.100:8000';
+  }
+  return String(prodURL).trim().replace(/\/$/, '');
 };
 
-export const BACKEND_URL = getBackendURL();
+export const BASE_URL = getBackendURL();
+export const BACKEND_URL = BASE_URL;
+
+function _isLikelyLocalApi(url) {
+  if (!url || typeof url !== 'string') return false;
+  if (/localhost|127\.0\.0\.1|10\.0\.2\.2/i.test(url)) return true;
+  // Private LAN (phone -> PC hotspot / Wi‑Fi)
+  if (/^https?:\/\/(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(url)) return true;
+  if (/onrender\.com|amazonaws\.com|vercel\.app/i.test(url)) return false;
+  return /:\d{4,5}(\/|$)/i.test(url);
+}
+
+/** Hosted APIs: cold start. Local: keep moderate; retries on timeout are disabled so failures are fast. */
+const TIMEOUT_MS = /onrender\.com|render\.com|amazonaws\.com|vercel\.app/i.test(BACKEND_URL)
+  ? 90000
+  : _isLikelyLocalApi(BACKEND_URL)
+    ? 45000
+    : 30000;
+
+if (__DEV__) {
+  // eslint-disable-next-line no-console
+  console.log('[API] BACKEND_URL =', BACKEND_URL, '| timeout', TIMEOUT_MS, 'ms');
+  if (Platform.OS === 'ios' && _isLikelyLocalApi(BACKEND_URL)) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      '[API] iOS device → PC: iPhone hotspot makes Windows treat the link as Public. If calls time out, run PowerShell as Admin: npm run windows:firewall-api (opens TCP 8000 on all profiles). In Safari on the phone open:',
+      `${BACKEND_URL}/`,
+      '— if that fails, it is firewall or uvicorn not on 0.0.0.0:8000.'
+    );
+  }
+}
 
 const api = axios.create({
   baseURL: `${BACKEND_URL}/api/v1`,
@@ -59,11 +96,13 @@ axiosRetry(api, {
   retryDelay: axiosRetry.exponentialDelay,
   retryCondition: (error) => {
     const code = error?.code;
+    const msg = String(error?.message || '');
+    if (code === 'ECONNABORTED' || msg.toLowerCase().includes('timeout')) {
+      return false;
+    }
     const status = error?.response?.status;
-    const isNetworkError = !error?.response;
     const isRetryableStatus = [502, 503, 504].includes(status);
-    // ECONNABORTED = timeout; retry once after queue clears on the server
-    return isNetworkError || isRetryableStatus || code === 'ECONNABORTED';
+    return isRetryableStatus;
   },
 });
 
@@ -88,6 +127,39 @@ if (__DEV__) {
 }
 
 const unwrap = (res) => res.data;
+
+/** User-facing message; never surfaces raw axios error objects. */
+export function formatApiError(error) {
+  const status = error?.response?.status;
+  if (status === 401) {
+    return 'Your session expired. Please sign in again.';
+  }
+  if (status === 503 || status === 502 || status === 504) {
+    return 'SafeNet is temporarily unavailable. Please try again in a moment.';
+  }
+  if (!error?.response) {
+    if (error?.code === 'ECONNABORTED' || String(error?.message || '').includes('timeout')) {
+      return `No response from ${BACKEND_URL}.\n\n• Local: uvicorn must use --host 0.0.0.0 --port 8000. Windows: npm run windows:firewall-api (Admin). Test in Safari on the phone: ${BACKEND_URL}/\n• Hosted (Render): service may be waking up — wait and retry, or use BACKEND_URL_DEV "local" with PC running.\n• Tunnel Expo: set BACKEND_URL_LOCAL or BACKEND_URL_DEV "remote".`;
+    }
+    return 'We could not reach SafeNet. Check your internet connection and try again.';
+  }
+  const d = error?.response?.data?.detail;
+  if (typeof d === 'string') {
+    return d;
+  }
+  if (Array.isArray(d)) {
+    const parts = d
+      .map((x) => (typeof x?.msg === 'string' ? x.msg : typeof x?.message === 'string' ? x.message : null))
+      .filter(Boolean);
+    if (parts.length) {
+      return parts.join('\n');
+    }
+  }
+  if (status === 422) {
+    return 'Some information could not be saved. Please review your details and try again.';
+  }
+  return 'Something went wrong. Please try again.';
+}
 
 export const auth = {
   sendOTP: async (phone) => unwrap(await api.post('/auth/send-otp', { phone_number: phone })),
@@ -131,18 +203,8 @@ export const pools = {
 export const claims = {
   runSimulation: async ({ is_active, fraud_flag }) =>
     unwrap(await api.post('/simulation/run', { is_active, fraud_flag })),
-  getActive: async () => {
-    const raw = unwrap(await api.get('/claims/history'));
-    const history = Array.isArray(raw) ? raw : raw?.data ?? [];
-    const now = Date.now();
-    const weekMs = 1000 * 60 * 60 * 24 * 7;
-    return (history || []).filter((c) => {
-      const created = new Date(c.created_at || c.createdAt || now).getTime();
-      const recent = Number.isFinite(created) ? now - created <= weekMs : true;
-      const hasPayout = typeof c.payout === 'number' ? c.payout > 0 : Boolean(c.payout);
-      return recent && hasPayout;
-    });
-  },
+  /** Live claims come from WebSocket / ClaimContext — not from history API. */
+  getActive: async () => [],
   getHistory: async () => {
     const raw = unwrap(await api.get('/claims/history'));
     return Array.isArray(raw) ? raw : raw?.data ?? [];

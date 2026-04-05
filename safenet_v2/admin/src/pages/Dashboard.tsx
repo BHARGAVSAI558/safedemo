@@ -14,6 +14,7 @@ import {
 } from 'recharts';
 
 import api from '../api';
+import { adminUi } from '../theme/adminUi';
 import { useClaimsFeedStore, type AdminClaimUpdate } from '../stores/claimsFeed';
 import { useFraudQueueStore, type AdminFraudAlert } from '../stores/fraudQueue';
 import { usePoolHealthStore } from '../stores/poolHealth';
@@ -28,6 +29,18 @@ type AdminKpiResponse = {
   loss_ratio_actual_pct: number;
   loss_ratio_target_low: number;
   loss_ratio_target_high: number;
+};
+
+const EMPTY_KPIS: AdminKpiResponse = {
+  active_workers: 0,
+  claims_today: 0,
+  approval_rate_pct: 0,
+  fraud_blocked: 0,
+  pool_utilization_pct: 0,
+  pool_risk_level: '—',
+  loss_ratio_actual_pct: 0,
+  loss_ratio_target_low: 60,
+  loss_ratio_target_high: 75,
 };
 
 type ClaimDrawerState = {
@@ -57,7 +70,7 @@ function KpiCard({
   const deltaColor =
     delta?.direction === 'up' ? '#16a34a' : delta?.direction === 'down' ? '#dc2626' : '#6b7280';
   return (
-    <div style={styles.kpiCard}>
+    <div style={{ ...adminUi.kpiCard }}>
       <div style={styles.kpiTitle}>{title}</div>
       <div style={styles.kpiValue}>{value}</div>
       {delta ? (
@@ -132,11 +145,11 @@ export default function Dashboard() {
 
   const kpis = kpiQuery.data;
 
-  const activeWorkers = kpis?.active_workers ?? 0;
-  const claimsProcessedToday = kpis?.claims_today ?? 0;
-  const approvalRatePct = kpis?.approval_rate_pct ?? 0;
-  const fraudBlocked = kpis?.fraud_blocked ?? 0;
-  const poolUtilizationPct = kpis?.pool_utilization_pct ?? 0;
+  const activeWorkers = (kpis ?? EMPTY_KPIS).active_workers;
+  const claimsProcessedToday = (kpis ?? EMPTY_KPIS).claims_today;
+  const approvalRatePct = (kpis ?? EMPTY_KPIS).approval_rate_pct;
+  const fraudBlocked = (kpis ?? EMPTY_KPIS).fraud_blocked;
+  const poolUtilizationPct = (kpis ?? EMPTY_KPIS).pool_utilization_pct;
 
   const mergedFeed = useMemo(() => {
     const fromApi: AdminClaimUpdate[] = (simulationsFeedQuery.data ?? []).map((s: any) => ({
@@ -171,16 +184,17 @@ export default function Dashboard() {
   }, [poolHealthByZone]);
 
   const lossRatio = useMemo(() => {
-    const actual = kpis?.loss_ratio_actual_pct ?? 60;
+    const k = kpis ?? EMPTY_KPIS;
+    const actual = k.loss_ratio_actual_pct ?? 60;
     return {
-      targetLow: kpis?.loss_ratio_target_low ?? 60,
-      targetHigh: kpis?.loss_ratio_target_high ?? 75,
+      targetLow: k.loss_ratio_target_low ?? 60,
+      targetHigh: k.loss_ratio_target_high ?? 75,
       actual,
     };
   }, [kpis]);
 
   const kpiCards = (
-    <div style={styles.kpiGrid}>
+    <div style={adminUi.kpiGrid}>
       <KpiCard
         title="Total Active Workers"
         value={String(activeWorkers)}
@@ -243,25 +257,30 @@ export default function Dashboard() {
     setLocalDrawer({ open: false, selected: null });
   };
 
-  const loading = kpiQuery.isLoading;
-  if (loading) {
+  if (kpiQuery.isLoading && !kpiQuery.data) {
     return (
-      <div style={styles.loading}>
-        <span>Loading dashboard...</span>
+      <div style={{ ...adminUi.page, ...styles.loading }}>
+        <span>Loading dashboard…</span>
       </div>
     );
   }
 
-  if (kpiQuery.error || !kpis) {
+  if (kpiQuery.isError) {
     return (
-      <div style={styles.loading}>
-        <span>Dashboard unavailable.</span>
+      <div style={adminUi.page}>
+        <div style={adminUi.pageHeader}>
+          <h1 style={adminUi.h1}>Dashboard</h1>
+          <p style={adminUi.sub}>We couldn’t load KPIs. Check that the API is running and you’re signed in.</p>
+        </div>
+        <button type="button" style={adminUi.btnPrimary} onClick={() => void kpiQuery.refetch()}>
+          Try again
+        </button>
       </div>
     );
   }
 
   return (
-    <div style={styles.page}>
+    <div style={adminUi.page}>
       <style>
         {`
           @keyframes claimRowEnter {
@@ -292,20 +311,19 @@ export default function Dashboard() {
         </div>
       ) : null}
 
-      <div style={styles.header}>
-        <div>
-          <h1 style={styles.title}>Admin Dashboard</h1>
-          <p style={styles.sub}>Live operational overview (updates via WebSocket + periodic KPIs)</p>
-        </div>
-      </div>
+      <header style={adminUi.pageHeader}>
+        <h1 style={adminUi.h1}>Dashboard</h1>
+        <p style={adminUi.sub}>
+          Live KPIs, claim feed, pool health, and earnings DNA. Real-time rows update over the WebSocket; numbers refresh on a short interval.
+        </p>
+      </header>
 
       {kpiCards}
 
-      <div style={styles.card}>
-        <div style={styles.cardHeader}>
-          <div style={styles.cardTitle}>Earnings DNA · workforce</div>
-          <div style={styles.cardSub}>IST peak hours + simulation income (last 14d)</div>
-        </div>
+      <div style={{ ...adminUi.card, marginBottom: 20 }}>
+        <div style={adminUi.cardTitle}>Earnings DNA · workforce</div>
+        <div style={{ ...adminUi.cardSub, marginBottom: 0 }}>IST peak hours and simulation income (last 14 days)</div>
+        <div style={{ marginTop: 16 }}>
         {earningsDnaAnalyticsQuery.isLoading ? (
           <div style={styles.empty}>Loading earnings analytics…</div>
         ) : earningsDnaAnalyticsQuery.error ? (
@@ -346,16 +364,15 @@ export default function Dashboard() {
             </div>
           </div>
         )}
+        </div>
       </div>
 
-      <div style={styles.card}>
-        <div style={styles.cardHeader}>
-          <div style={styles.cardTitle}>Fleet DNA Insights</div>
-          <div style={styles.cardSub}>
-            Fleet earning patterns — when your workers earn most. Lunch (~12–2 PM) and dinner (~7–10 PM) peaks
-            highlight when coverage events cluster — actuarial signal for costly hours.
-          </div>
+      <div style={{ ...adminUi.card, marginBottom: 20 }}>
+        <div style={adminUi.cardTitle}>Fleet DNA · hourly payout pattern</div>
+        <div style={{ ...adminUi.cardSub, marginBottom: 0 }}>
+          When workers earn most (e.g. lunch and dinner peaks). Helps spot hours where claims cluster.
         </div>
+        <div style={{ marginTop: 16 }}>
         {earningsDnaAnalyticsQuery.isLoading ? (
           <div style={styles.empty}>Loading fleet hourly pattern…</div>
         ) : earningsDnaAnalyticsQuery.error ? (
@@ -382,36 +399,35 @@ export default function Dashboard() {
             </ResponsiveContainer>
           </div>
         )}
+        </div>
       </div>
 
-      <div style={styles.mainGrid}>
-        <div style={styles.card}>
-          <div style={styles.cardHeader}>
-            <div style={styles.cardTitle}>Live Claim Feed</div>
-            <div style={styles.cardSub}>
-              {mergedFeed.length} rows
-              {feedUpdatedAt ? (
-                <span style={{ marginLeft: 8, fontWeight: 600 }}>
-                  · Last updated {new Date(feedUpdatedAt).toLocaleTimeString()}
-                </span>
-              ) : null}
-            </div>
+      <div className="admin-responsive-2col">
+        <div style={adminUi.card}>
+          <div style={adminUi.cardTitle}>Live claim feed</div>
+          <div style={{ ...adminUi.cardSub, marginBottom: 12 }}>
+            {mergedFeed.length} rows
+            {feedUpdatedAt ? (
+              <span style={{ marginLeft: 8, fontWeight: 600 }}>
+                · Last updated {new Date(feedUpdatedAt).toLocaleTimeString()}
+              </span>
+            ) : null}
           </div>
 
           {mergedFeed.length === 0 ? (
-            <div style={styles.empty}>No simulations yet. WebSocket + 30s refresh will populate this list.</div>
+            <div style={adminUi.empty}>No rows yet. Connect the WebSocket and wait for simulations or API refresh.</div>
           ) : (
-            <div style={styles.tableWrap}>
-              <table style={styles.table}>
+            <div style={adminUi.tableScroll}>
+              <table style={{ ...adminUi.table, minWidth: 820 }}>
                 <thead>
                   <tr>
-                    <th style={styles.th}>Worker ID</th>
-                    <th style={styles.th}>Zone</th>
-                    <th style={styles.th}>Disruption</th>
-                    <th style={styles.th}>Confidence</th>
-                    <th style={styles.th}>Fraud Score</th>
-                    <th style={styles.th}>Status</th>
-                    <th style={styles.th}>Time</th>
+                    <th style={adminUi.th}>Worker ID</th>
+                    <th style={adminUi.th}>Zone</th>
+                    <th style={adminUi.th}>Disruption</th>
+                    <th style={adminUi.th}>Confidence</th>
+                    <th style={adminUi.th}>Fraud score</th>
+                    <th style={adminUi.th}>Status</th>
+                    <th style={adminUi.th}>Time</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -423,20 +439,26 @@ export default function Dashboard() {
                       <tr
                         key={rowId}
                         style={{
-                          ...styles.tr,
+                          ...adminUi.trHover,
                           animation: animate ? 'claimRowEnter 0.3s ease' : undefined,
+                        }}
+                        onMouseEnter={(e) => {
+                          e.currentTarget.style.background = 'var(--admin-bg-subtle)';
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.background = 'transparent';
                         }}
                         onClick={() => openDrawerForClaim(c)}
                       >
-                        <td style={styles.td}>{c.worker_id ?? '—'}</td>
-                        <td style={styles.td}>{c.zone_id ?? '—'}</td>
-                        <td style={styles.td}>{c.disruption_type ?? '—'}</td>
-                        <td style={styles.td}>{c.confidence_level ?? '—'}</td>
-                        <td style={styles.td}>{typeof c.fraud_score === 'number' ? c.fraud_score.toFixed(2) : '—'}</td>
-                        <td style={styles.td}>
+                        <td style={adminUi.td}>{c.worker_id ?? '—'}</td>
+                        <td style={adminUi.td}>{c.zone_id ?? '—'}</td>
+                        <td style={adminUi.td}>{c.disruption_type ?? '—'}</td>
+                        <td style={adminUi.td}>{c.confidence_level ?? '—'}</td>
+                        <td style={adminUi.td}>{typeof c.fraud_score === 'number' ? c.fraud_score.toFixed(2) : '—'}</td>
+                        <td style={adminUi.td}>
                           <span style={{ ...styles.chip, backgroundColor: chip.bg, color: chip.fg }}>{chip.label}</span>
                         </td>
-                        <td style={styles.td}>{new Date(c.timestamp).toLocaleTimeString()}</td>
+                        <td style={adminUi.td}>{new Date(c.timestamp).toLocaleTimeString()}</td>
                       </tr>
                     );
                   })}
@@ -446,12 +468,10 @@ export default function Dashboard() {
           )}
         </div>
 
-        <div style={styles.sideColumn}>
-          <div style={styles.card}>
-            <div style={styles.cardHeader}>
-              <div style={styles.cardTitle}>Loss Ratio Gauge</div>
-              <div style={styles.cardSub}>Target 60-75% band</div>
-            </div>
+        <div style={{ display: 'grid', gap: 16 }}>
+          <div style={adminUi.card}>
+            <div style={adminUi.cardTitle}>Loss ratio</div>
+            <div style={{ ...adminUi.cardSub, marginBottom: 8 }}>Target band 60–75%</div>
             <div style={{ height: 260 }}>
               <ResponsiveContainer width="100%" height="100%">
                 <RadialBarChart data={[{ name: 'loss', value: lossRatioChartData.actual }]} cx="50%" cy="50%" innerRadius="80%" outerRadius="100%" barSize={18}>
@@ -469,27 +489,22 @@ export default function Dashboard() {
             </div>
           </div>
 
-          <div style={styles.card}>
-            <div style={styles.cardHeader}>
-              <div style={styles.cardTitle}>Weekly Earnings Summary</div>
-              <div style={styles.cardSub}>Tap to expand</div>
-            </div>
+          <div style={adminUi.card}>
+            <div style={adminUi.cardTitle}>Weekly earnings</div>
+            <div style={{ ...adminUi.cardSub, marginBottom: 8 }}>Tap to expand breakdown</div>
             <WeeklyEarningsDrawer />
           </div>
         </div>
       </div>
 
-      <div style={styles.card} />
-      <div style={styles.card}>
-        <div style={styles.cardHeader}>
-          <div style={styles.cardTitle}>Zone Health Grid</div>
-          <div style={styles.cardSub}>Based on pool health snapshots</div>
-        </div>
+      <div style={{ ...adminUi.card, marginTop: 20 }}>
+        <div style={adminUi.cardTitle}>Zone health</div>
+        <div style={{ ...adminUi.cardSub, marginBottom: 0 }}>From latest pool health snapshots</div>
 
         {zones.length === 0 ? (
-          <div style={styles.empty}>No pool health data yet.</div>
+          <div style={{ ...adminUi.empty, marginTop: 12 }}>No pool health data yet.</div>
         ) : (
-          <div style={styles.zoneGrid}>
+          <div style={{ ...styles.zoneGrid, marginTop: 16 }}>
             {zones.map((z) => {
               const risk = String(z.risk_level ?? 'MEDIUM').toUpperCase();
               const bg = risk === 'HIGH' ? '#fee2e2' : risk === 'LOW' ? '#dcfce7' : '#fef3c7';
@@ -636,29 +651,13 @@ const styles: Record<string, React.CSSProperties> = {
     border: '1px solid #fdba74',
   },
   poolWarnLine: { fontSize: 13, fontWeight: 800, color: '#9a3412', marginBottom: 4 },
-  header: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: 16 },
-  title: { fontSize: 24, fontWeight: 900, margin: 0, color: '#0f172a' },
-  sub: { color: '#6b7280', margin: 0, fontSize: 13, marginTop: 6 },
-  loading: { textAlign: 'center', padding: 60, color: '#888' },
-  kpiGrid: { display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 14, marginBottom: 16 },
-  kpiCard: { backgroundColor: '#fff', borderRadius: 12, padding: 16, boxShadow: '0 2px 8px rgba(0,0,0,0.06)' },
-  kpiTitle: { fontSize: 12, color: '#6b7280', fontWeight: 700, marginBottom: 8, textTransform: 'uppercase' },
-  kpiValue: { fontSize: 22, fontWeight: 900, color: '#0f172a', marginBottom: 6 },
-  kpiDelta: { fontSize: 12, fontWeight: 800 },
+  loading: { textAlign: 'center', padding: 60, color: 'var(--admin-muted)' },
+  kpiTitle: { fontSize: 11, color: 'var(--admin-muted)', fontWeight: 800, marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.06em' },
+  kpiValue: { fontSize: 'clamp(1.25rem, 2.5vw, 1.5rem)', fontWeight: 800, color: 'var(--admin-text)', marginBottom: 6, letterSpacing: '-0.02em' },
+  kpiDelta: { fontSize: 12, fontWeight: 700 },
   kpiDeltaPlaceholder: { height: 16 },
-  mainGrid: { display: 'grid', gridTemplateColumns: '1fr 430px', gap: 14 },
-  sideColumn: { display: 'grid', gap: 14 },
-  card: { backgroundColor: '#fff', borderRadius: 12, padding: 18, boxShadow: '0 2px 8px rgba(0,0,0,0.06)' },
-  cardHeader: { display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 10 },
-  cardTitle: { fontSize: 14, fontWeight: 900, color: '#0f172a' },
-  cardSub: { fontSize: 12, color: '#6b7280', fontWeight: 700 },
-  tableWrap: { overflowX: 'auto', borderRadius: 10 },
-  table: { width: '100%', borderCollapse: 'collapse', minWidth: 820 },
-  th: { textAlign: 'left', padding: '10px 10px', fontSize: 12, color: '#6b7280', fontWeight: 900, borderBottom: '1px solid #f1f5f9' },
-  tr: { cursor: 'pointer' },
-  td: { padding: '10px 10px', fontSize: 13, color: '#0f172a', borderBottom: '1px solid #f1f5f9' },
-  chip: { padding: '3px 10px', borderRadius: 9999, fontSize: 12, fontWeight: 900 },
-  empty: { padding: 18, color: '#6b7280', fontSize: 13 },
+  chip: { padding: '4px 10px', borderRadius: 9999, fontSize: 11, fontWeight: 800 },
+  empty: { padding: 18, color: 'var(--admin-muted)', fontSize: 13, fontWeight: 600 },
   dnaPeakChip: {
     fontSize: 12,
     fontWeight: 800,
@@ -686,8 +685,8 @@ const styles: Record<string, React.CSSProperties> = {
   weeklyDay: { fontSize: 12, fontWeight: 900, color: '#334155' },
   weeklyAmount: { fontSize: 13, fontWeight: 900, color: '#0f172a' },
   weeklyReason: { fontSize: 12, color: '#6b7280', fontWeight: 700 },
-  zoneGrid: { display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginTop: 12 },
-  zoneCard: { borderRadius: 12, padding: 14, border: '2px solid transparent', backgroundColor: '#f8fafc' },
+  zoneGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 14 },
+  zoneCard: { borderRadius: 12, padding: 16, border: '2px solid transparent', backgroundColor: 'var(--admin-bg-subtle)' },
   zoneTitle: { fontSize: 13, fontWeight: 900, marginBottom: 6, color: '#0f172a' },
   zoneMetric: { fontSize: 12, color: '#334155', fontWeight: 800, marginBottom: 4 },
   drawerOverlay: {
@@ -698,14 +697,20 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     justifyContent: 'flex-end',
   },
-  drawer: { width: 520, height: '100%', backgroundColor: '#fff', padding: 18, boxShadow: '-8px 0 24px rgba(0,0,0,0.2)' },
+  drawer: {
+    width: 'min(520px, 100vw)',
+    height: '100%',
+    backgroundColor: 'var(--admin-surface)',
+    padding: 22,
+    boxShadow: '-8px 0 32px rgba(15,23,42,0.12)',
+    borderLeft: '1px solid var(--admin-border)',
+  },
   drawerHeader: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 },
   drawerTitle: { fontSize: 16, fontWeight: 900, color: '#0f172a' },
   drawerClose: { border: '1px solid #e5e7eb', backgroundColor: '#fff', borderRadius: 10, padding: '8px 12px', cursor: 'pointer', fontWeight: 900, color: '#0f172a' },
   drawerBody: { display: 'grid', gap: 10 },
   detailRow: { display: 'flex', justifyContent: 'space-between', gap: 12, borderBottom: '1px solid #f1f5f9', paddingBottom: 8 },
   detailKey: { color: '#6b7280', fontWeight: 900, fontSize: 12 },
-  detailVal: { color: '#0f172a', fontWeight: 800, fontSize: 13, textAlign: 'right' },
-  // Unused fields reserved for future UI refinements
+  detailVal: { color: 'var(--admin-text)', fontWeight: 700, fontSize: 13, textAlign: 'right' },
 };
 

@@ -1,10 +1,11 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useState, type CSSProperties } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { GeoJSON, MapContainer, Popup, TileLayer } from 'react-leaflet';
 import type { FeatureCollection } from 'geojson';
 import 'leaflet/dist/leaflet.css';
 
 import api from '../api';
+import { adminUi } from '../theme/adminUi';
 import { useZoneEventsStore } from '../stores/zoneEvents';
 
 type ZoneSummary = {
@@ -40,48 +41,83 @@ export default function ZoneHeatmap() {
     return by;
   }, [summaryQuery.data]);
 
-  /** GeoJSON includes risk_level + claim_count from API. */
-  const fillForFeature = (feature: any) => {
+  const fillForFeature = (feature: { properties?: Record<string, unknown> }) => {
     const p = feature?.properties ?? {};
     const risk = String(p.risk_level ?? '').toUpperCase();
     if (risk === 'HIGH') return '#dc2626';
-    if (risk === 'MEDIUM') return '#f59e0b';
+    if (risk === 'MEDIUM') return '#d97706';
     if (risk === 'LOW') return '#16a34a';
     const cc = Number(p.claim_count ?? summaryByZone[String(p.zone_id)]?.claim_density_per_hr ?? 0);
     if (cc > 15) return '#dc2626';
-    if (cc >= 5) return '#f59e0b';
+    if (cc >= 5) return '#d97706';
     return '#16a34a';
   };
 
-  if (geoQuery.isLoading || summaryQuery.isLoading) return <div style={styles.loading}>Loading map...</div>;
-  if (geoQuery.error || summaryQuery.error || !geoQuery.data) return <div style={styles.loading}>Failed to load heatmap.</div>;
+  if (geoQuery.isLoading || summaryQuery.isLoading) {
+    return (
+      <div style={{ ...adminUi.page, ...adminUi.empty, minHeight: 320 }}>
+        Loading map and zone summaries…
+      </div>
+    );
+  }
+  if (geoQuery.error || summaryQuery.error || !geoQuery.data) {
+    return (
+      <div style={{ ...adminUi.page, ...adminUi.empty, color: '#b91c1c' }}>
+        Could not load heatmap. Check API and try again.
+      </div>
+    );
+  }
 
   return (
-    <div>
-      <h1 style={styles.title}>Zone Heatmap</h1>
-      <p style={styles.sub}>Hyderabad-centered live operational map</p>
+    <div style={adminUi.page}>
+      <header style={adminUi.pageHeader}>
+        <h1 style={adminUi.h1}>Zone heatmap</h1>
+        <p style={adminUi.sub}>Hyderabad-centered zones. Color reflects risk / claim density. Popups show live summary; toggles reserve future layers.</p>
+      </header>
 
-      <div style={styles.toggles}>
-        <Toggle label="Weather layer" checked={showWeather} onChange={setShowWeather} />
-        <Toggle label="AQI layer" checked={showAqi} onChange={setShowAqi} />
-        <Toggle label="Fraud ring clusters" checked={showFraudClusters} onChange={setShowFraudClusters} />
+      <div style={{ ...adminUi.card, marginBottom: 16 }}>
+        <div style={adminUi.cardTitle}>Map layers</div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, marginTop: 12 }}>
+          <label style={toggleLabel}>
+            <input type="checkbox" checked={showWeather} onChange={(e) => setShowWeather(e.target.checked)} />
+            <span>Weather layer (reserved)</span>
+          </label>
+          <label style={toggleLabel}>
+            <input type="checkbox" checked={showAqi} onChange={(e) => setShowAqi(e.target.checked)} />
+            <span>AQI layer (reserved)</span>
+          </label>
+          <label style={toggleLabel}>
+            <input type="checkbox" checked={showFraudClusters} onChange={(e) => setShowFraudClusters(e.target.checked)} />
+            <span>Fraud clusters (reserved)</span>
+          </label>
+        </div>
+        <p style={{ fontSize: 12, color: 'var(--admin-muted)', margin: '12px 0 0', fontWeight: 600 }}>
+          Toggles are placeholders for upcoming overlays; the base zone polygons always render.
+        </p>
       </div>
 
-      <div style={styles.mapWrap}>
-        <MapContainer center={[17.385, 78.4867]} zoom={10} style={{ height: '100%', width: '100%' }}>
-          <TileLayer attribution='&copy; OpenStreetMap contributors' url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+      <div
+        style={{
+          height: 'min(70vh, 640px)',
+          minHeight: 360,
+          borderRadius: 14,
+          overflow: 'hidden',
+          border: '1px solid var(--admin-border)',
+          boxShadow: 'var(--admin-shadow-sm)',
+        }}
+      >
+        <MapContainer center={[17.385, 78.4867]} zoom={10} style={{ height: '100%', width: '100%' }} scrollWheelZoom>
+          <TileLayer attribution="&copy; OpenStreetMap contributors" url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
           <GeoJSON
-            data={geoQuery.data as any}
-            style={(feature: any) => {
-              return {
-                color: '#1e293b',
-                weight: 1.5,
-                fillColor: fillForFeature(feature),
-                fillOpacity: 0.45,
-              };
-            }}
-            onEachFeature={(feature: any, layer: any) => {
-              const p = feature?.properties ?? {};
+            data={geoQuery.data as object}
+            style={(feature) => ({
+              color: '#1e293b',
+              weight: 1.5,
+              fillColor: fillForFeature(feature as { properties?: Record<string, unknown> }),
+              fillOpacity: 0.42,
+            })}
+            onEachFeature={(feature, layer) => {
+              const p = (feature as { properties?: Record<string, unknown> }).properties ?? {};
               const zoneId = String(p.zone_id ?? '');
               const zname = String(p.zone_name ?? zoneId);
               const workers = p.active_workers ?? summaryByZone[zoneId]?.active_workers ?? '—';
@@ -90,13 +126,13 @@ export default function ZoneHeatmap() {
               const cc = p.claim_count ?? '—';
               const liveEvent = zoneEvents[zoneId];
               layer.bindPopup(
-                `<div style="font-family:system-ui;font-size:13px;line-height:1.45;">
-                  <b>${zname}</b> <span style="color:#64748b">(${zoneId})</span><br/>
-                  Claims (zone): <b>${cc}</b><br/>
-                  Active workers: <b>${workers}</b><br/>
-                  Pool balance: <b>₹${Number(bal).toFixed(0)}</b><br/>
-                  Last disruption: <b>${last}</b><br/>
-                  Live event: ${liveEvent?.event_type ?? 'none'}
+                `<div style="font-family:Inter,system-ui,sans-serif;font-size:13px;line-height:1.5;color:#0f172a;">
+                  <div style="font-weight:800;margin-bottom:6px">${zname} <span style="color:#64748b;font-weight:600">(${zoneId})</span></div>
+                  <div>Claims: <b>${cc}</b></div>
+                  <div>Active workers: <b>${workers}</b></div>
+                  <div>Pool balance: <b>₹${Number(bal).toFixed(0)}</b></div>
+                  <div>Last disruption: <b>${last}</b></div>
+                  <div>Live event: <b>${liveEvent?.event_type ?? 'none'}</b></div>
                 </div>`
               );
             }}
@@ -107,21 +143,16 @@ export default function ZoneHeatmap() {
   );
 }
 
-function Toggle({ label, checked, onChange }: { label: string; checked: boolean; onChange: (value: boolean) => void }) {
-  return (
-    <label style={styles.toggle}>
-      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
-      <span>{label}</span>
-    </label>
-  );
-}
-
-const styles: Record<string, React.CSSProperties> = {
-  title: { fontSize: 24, fontWeight: 800, color: '#0f172a', margin: 0 },
-  sub: { color: '#6b7280', marginTop: 6, marginBottom: 14 },
-  toggles: { display: 'flex', gap: 16, marginBottom: 12, flexWrap: 'wrap' },
-  toggle: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#334155', fontWeight: 700 },
-  mapWrap: { height: '70vh', borderRadius: 12, overflow: 'hidden', border: '1px solid #e2e8f0' },
-  loading: { textAlign: 'center', padding: 60, color: '#888' },
+const toggleLabel: CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 10,
+  fontSize: '0.875rem',
+  fontWeight: 600,
+  color: 'var(--admin-text)',
+  padding: '10px 14px',
+  borderRadius: 10,
+  border: '1px solid var(--admin-border)',
+  background: 'var(--admin-bg-subtle)',
+  cursor: 'pointer',
 };
-

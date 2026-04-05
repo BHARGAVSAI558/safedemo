@@ -1,35 +1,40 @@
 {
   "expo": {
     "name": "SafeNet",
-    "slug": "safenet",
+    "slug": "safenet-devtrails-2026",
     "version": "1.0.0",
-    "extra": {
-      "BACKEND_URL": "https://devtrails2026-alphanexus-phase2-2.onrender.com",
-      "BACKEND_URL_DEV": "https://devtrails2026-alphanexus-phase2-2.onrender.com"
-    },
     "orientation": "portrait",
+    "scheme": "safenet",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#1a73e8"
-    },
-    "ios": {
-      "supportsTablet": true
+      "backgroundColor": "#1A56DB"
     },
     "android": {
+      "package": "com.alphanexus.safenet",
+      "versionCode": 1,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#1a73e8"
+        "backgroundColor": "#1A56DB"
+      },
+      "usesCleartextTraffic": true
+    },
+    "ios": {
+      "bundleIdentifier": "com.alphanexus.safenet",
+      "supportsTablet": false
+    },
+    "extra": {
+      "BACKEND_URL": "https://devtrails2026-alphanexus-phase2-2.onrender.com",
+      "BACKEND_URL_DEV": "remote",
+      "DEMO_MODE": true,
+      "eas": {
+        "projectId": "safenet-devtrails-2026"
       }
     },
-    "web": {
-      "favicon": "./assets/favicon.png"
-    },
     "plugins": [
-      "expo-secure-store",
-      "expo-sqlite"
+      "expo-secure-store"
     ]
   }
 }

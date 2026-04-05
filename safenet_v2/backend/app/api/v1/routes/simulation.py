@@ -5,6 +5,7 @@ import json
 import traceback
 import uuid
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -21,6 +22,7 @@ from app.models.payout import PayoutRecord
 from app.models.policy import Policy
 from app.models.worker import Profile, User
 from app.services.forecast_shield_service import payout_message_suffix
+from app.services.onboarding_pricing import TIER_MAX_DAILY as ONBOARDING_TIER_MAX_DAILY
 from app.services.realtime_service import publish_claim_update
 from app.utils.logger import get_logger
 
@@ -28,21 +30,19 @@ log = get_logger(__name__)
 
 router = APIRouter()
 
-TIER_MAX_DAILY: dict[str, float] = {
-    "Basic": 500.0,
-    "Standard": 1000.0,
-    "Pro": 2000.0,
-}
+TIER_MAX_DAILY: dict[str, float] = dict(ONBOARDING_TIER_MAX_DAILY)
 
 
 def _product_to_tier(product_code: str | None) -> str:
     if not product_code:
         return "Standard"
     low = str(product_code).lower()
-    if "pro" in low and "standard" not in low:
-        return "Pro"
     if "basic" in low:
         return "Basic"
+    if "standard" in low:
+        return "Standard"
+    if "pro" in low:
+        return "Pro"
     return "Standard"
 
 
@@ -80,7 +80,7 @@ def _approved_message(scenario: str, payout: float) -> str:
 
 class SimulationRunRequest(BaseModel):
     scenario: Literal["HEAVY_RAIN", "EXTREME_HEAT", "AQI_SPIKE", "CURFEW"]
-    zone_id: str = Field(..., min_length=1)
+    zone_id: str = Field(default="", max_length=128)
     worker_id: int | None = None
     fast_mode: bool = True
     fraud_mode: Literal["NONE", "GPS_SPOOF", "RING_FRAUD_5"] = "NONE"
@@ -99,16 +99,25 @@ async def _demo_claim_pipeline(
 ) -> None:
     redis = getattr(app.state, "redis", None)
     step_delay = 1.5 if body.fast_mode else 3.0
-    zone_id = body.zone_id.strip()
-    zone_label = _zone_label(zone_id)
 
     try:
         async with AsyncSessionLocal() as db:
-            prof_row = await db.execute(select(Profile).where(Profile.user_id == worker_id))
-            profile = prof_row.scalar_one_or_none()
-            if not profile:
-                log.warning("demo_sim_no_profile", worker_id=worker_id)
-                return
+            prof_row = (
+                await db.execute(select(Profile).where(Profile.user_id == worker_id))
+            ).scalar_one_or_none()
+            zone_id = (body.zone_id or "").strip()
+            if not zone_id and prof_row and (prof_row.zone_id or "").strip():
+                zone_id = prof_row.zone_id.strip()
+            if not zone_id:
+                zone_id = "hyd_central"
+            zone_label = _zone_label(zone_id)
+
+            profile = prof_row or SimpleNamespace(
+                city="Hyderabad",
+                avg_daily_income=650.0,
+                total_claims=0,
+                total_payouts=0.0,
+            )
 
             pol = (
                 await db.execute(
@@ -237,8 +246,9 @@ async def _demo_claim_pipeline(
                 daily_coverage=daily_cap,
             )
 
-            profile.total_claims = int(profile.total_claims or 0) + 1
-            profile.total_payouts = float(profile.total_payouts or 0.0) + float(payout)
+            if prof_row is not None:
+                prof_row.total_claims = int(prof_row.total_claims or 0) + 1
+                prof_row.total_payouts = float(prof_row.total_payouts or 0.0) + float(payout)
             db.add(PayoutRecord(simulation_id=cid, amount=payout, currency="INR", status="completed"))
             db.add(
                 FraudSignal(

@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel, Field, field_validator
@@ -16,13 +17,16 @@ from app.models.worker import OccupationType as OrmOccupation
 from app.models.worker import Profile, RiskProfile as OrmRisk, User
 from app.schemas.earnings_dna import EarningsDnaOut
 from app.schemas.worker import PolicyWeekHistoryItem, ProfileCreate, ProfileResponse, ProfileUpdate, WorkerProfileOut
+from app.services.simulation_labels import disruption_from_simulation
 from app.services.cache_service import cache_invalidate
 from app.services.earnings_dna_service import build_worker_earnings_dna
+from app.services.onboarding_pricing import TIER_MAX_DAILY
 from app.services.zone_resolver import resolve_city_to_zone
 from app.utils.logger import get_logger
 
 log = get_logger(__name__)
 router = APIRouter()
+IST = ZoneInfo("Asia/Kolkata")
 
 MAX_WEEKLY_COVERAGE_BY_PRODUCT = {
     "income_shield_basic": 2450.0,
@@ -48,6 +52,23 @@ def _week_bounds_utc(now: datetime | None = None) -> tuple[datetime, datetime]:
     start = (now - timedelta(days=weekday)).replace(hour=0, minute=0, second=0, microsecond=0)
     end = start + timedelta(days=7)
     return start, end
+
+
+def _week_monday_00_ist_to_now_utc() -> tuple[datetime, datetime]:
+    """Current ISO week: Monday 00:00 Asia/Kolkata through now (UTC-aware end)."""
+    now_utc = datetime.now(timezone.utc)
+    now_ist = now_utc.astimezone(IST)
+    d = now_ist.date()
+    monday = d - timedelta(days=d.weekday())
+    start_ist = datetime.combine(monday, datetime.min.time()).replace(tzinfo=IST)
+    return start_ist.astimezone(timezone.utc), now_utc
+
+
+def _mask_phone(phone: str | None) -> str:
+    if not phone or len(str(phone)) < 4:
+        return "****"
+    p = str(phone)
+    return f"****{p[-4:]}"
 
 
 def _enum_or_str(v: Any, default: str) -> str:
@@ -77,6 +98,8 @@ def _profile_response_from_orm(profile: Profile) -> ProfileResponse:
         zone_id=profile.zone_id,
         working_hours_preset=profile.working_hours_preset,
         coverage_tier=profile.coverage_tier,
+        risk_score=float(profile.risk_score) if getattr(profile, "risk_score", None) is not None else None,
+        weekly_premium=float(profile.weekly_premium) if getattr(profile, "weekly_premium", None) is not None else None,
         created_at=profile.created_at,
     )
 
@@ -153,12 +176,71 @@ async def _worker_profile_payload(profile: Profile, current_user: User, db: Asyn
     # includes zone_id from the profile row — duplicate kwargs raise TypeError → HTTP 500.
     payload = base.model_dump()
     payload.pop("zone_id", None)
+    complete = bool(str(profile.zone_id or "").strip()) and bool(str(profile.platform or "").strip())
     return WorkerProfileOut(
         **payload,
         zone_id=zone_id,
         earnings_protected_this_week=weekly_protected,
         max_weekly_coverage=max_weekly,
         policy_history=policy_history,
+        is_profile_complete=complete,
+        phone_number=_mask_phone(current_user.phone),
+    )
+
+
+async def _default_worker_profile_out(current_user: User, db: AsyncSession) -> WorkerProfileOut:
+    start, end = _week_bounds_utc()
+    weekly_protected = 0.0
+    try:
+        weekly_sum = (
+            await db.execute(
+                select(func.coalesce(func.sum(Simulation.payout), 0.0)).where(
+                    Simulation.user_id == current_user.id,
+                    Simulation.decision == DecisionType.APPROVED,
+                    Simulation.created_at.isnot(None),
+                    Simulation.created_at >= start,
+                    Simulation.created_at < end,
+                )
+            )
+        ).scalar_one()
+        weekly_protected = float(weekly_sum or 0.0)
+    except Exception as exc:
+        log.warning(
+            "default_worker_weekly_sum_failed",
+            engine_name="workers_route",
+            worker_id=current_user.id,
+            error=str(exc),
+        )
+    zone_id, _lat, _lon = resolve_city_to_zone("")
+    base = ProfileResponse(
+        id=0,
+        user_id=current_user.id,
+        name="",
+        city="",
+        occupation="delivery",
+        avg_daily_income=650.0,
+        risk_profile="medium",
+        trust_score=50.0,
+        total_claims=0,
+        total_payouts=0.0,
+        platform=None,
+        zone_id=None,
+        working_hours_preset=None,
+        coverage_tier=None,
+        risk_score=None,
+        weekly_premium=None,
+        created_at=None,
+    )
+    payload = base.model_dump()
+    payload.pop("zone_id", None)
+    return WorkerProfileOut(
+        **payload,
+        zone_id=zone_id,
+        earnings_protected_this_week=weekly_protected,
+        max_weekly_coverage=2450.0,
+        policy_history=[],
+        is_profile_complete=False,
+        phone_number=_mask_phone(current_user.phone),
     )
 
 INDIA_LAT_MIN = 6.5
@@ -295,65 +377,51 @@ async def get_weekly_breakdown(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Per-day payout breakdown for the current Mon–Sun week (IST-anchored, UTC stored)."""
-    start, end = _week_bounds_utc()
+    """Per-day payout breakdown: Monday 00:00 IST through now, full Mon–Sun row (future days ₹0)."""
+    start_utc, end_utc = _week_monday_00_ist_to_now_utc()
 
     rows = (
         await db.execute(
             select(Simulation).where(
                 Simulation.user_id == current_user.id,
                 Simulation.decision == DecisionType.APPROVED,
-                Simulation.created_at >= start,
-                Simulation.created_at < end,
+                Simulation.created_at.isnot(None),
+                Simulation.created_at >= start_utc,
+                Simulation.created_at <= end_utc,
             )
         )
     ).scalars().all()
 
-    # Aggregate by ISO weekday (0=Mon … 6=Sun)
-    day_amount: dict[int, float] = {i: 0.0 for i in range(7)}
-    day_disruption: dict[int, str | None] = {i: None for i in range(7)}
-
-    for sim in rows:
+    rows_sorted = sorted(
+        rows,
+        key=lambda s: s.created_at or datetime.min.replace(tzinfo=timezone.utc),
+    )
+    day_amount: dict[Any, float] = {}
+    day_disruption: dict[Any, str] = {}
+    for sim in rows_sorted:
         ca = sim.created_at
         if ca is None:
             continue
         if ca.tzinfo is None:
             ca = ca.replace(tzinfo=timezone.utc)
-        dow = ca.weekday()  # 0=Mon
-        day_amount[dow] += float(sim.payout or 0.0)
-        if day_disruption[dow] is None:
-            # Infer disruption label from boolean flags then reason text
-            if sim.weather_disruption:
-                label = "Heavy Rain"
-            elif sim.traffic_disruption:
-                label = "Traffic Disruption"
-            elif sim.event_disruption:
-                label = "Zone Event"
-            elif sim.final_disruption:
-                label = "Disruption"
-            else:
-                reason = str(sim.reason or "").upper()
-                if "RAIN" in reason or "WEATHER" in reason:
-                    label = "Heavy Rain"
-                elif "HEAT" in reason or "HOT" in reason:
-                    label = "Extreme Heat"
-                elif "AQI" in reason or "AIR" in reason:
-                    label = "AQI Spike"
-                elif "CURFEW" in reason:
-                    label = "Curfew"
-                else:
-                    label = "Disruption"
-            day_disruption[dow] = label
+        di = ca.astimezone(IST).date()
+        day_amount[di] = day_amount.get(di, 0.0) + float(sim.payout or 0.0)
+        lab, _ = disruption_from_simulation(sim)
+        day_disruption[di] = lab
 
+    now_ist = end_utc.astimezone(IST)
+    monday = now_ist.date() - timedelta(days=now_ist.weekday())
     day_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-    breakdown = [
-        {
-            "day": day_labels[i],
-            "amount": round(day_amount[i], 2),
-            "disruption": day_disruption[i] if day_amount[i] > 0 else None,
-        }
-        for i in range(7)
-    ]
+    days: list[dict[str, Any]] = []
+    weekly_breakdown: list[dict[str, Any]] = []
+    for i in range(7):
+        dd = monday + timedelta(days=i)
+        amt = round(day_amount.get(dd, 0.0), 2)
+        dis = day_disruption.get(dd) if amt > 0 else None
+        date_str = f"{dd.strftime('%b')} {dd.day}"
+        days.append({"day": day_labels[i], "date": date_str, "amount": amt, "disruption": dis})
+        weekly_breakdown.append({"day": day_labels[i], "amount": amt, "disruption": dis})
+
     total = round(sum(day_amount.values()), 2)
 
     pol_row = (
@@ -364,11 +432,13 @@ async def get_weekly_breakdown(
             .limit(1)
         )
     ).scalar_one_or_none()
-    product_code = (pol_row.product_code if pol_row else None) or "income_shield_basic"
-    max_coverage = MAX_WEEKLY_COVERAGE_BY_PRODUCT.get(product_code, 2450.0)
+    tier = _product_plan_label((pol_row.product_code if pol_row else "") or "income_shield_basic")
+    daily_cap = float(TIER_MAX_DAILY.get(tier, 500.0))
+    max_coverage = round(daily_cap * 7.0, 2)
 
     return {
-        "weekly_breakdown": breakdown,
+        "days": days,
+        "weekly_breakdown": weekly_breakdown,
         "total_protected": total,
         "max_coverage": max_coverage,
     }
@@ -382,7 +452,7 @@ async def get_profile(
     result = await db.execute(select(Profile).where(Profile.user_id == current_user.id))
     profile = result.scalar_one_or_none()
     if not profile:
-        raise HTTPException(status_code=404, detail="Profile not found. Please create one first.")
+        return await _default_worker_profile_out(current_user, db)
     return await _worker_profile_payload(profile, current_user, db)
 
 
@@ -394,7 +464,7 @@ async def get_profile_alias(
     result = await db.execute(select(Profile).where(Profile.user_id == current_user.id))
     profile = result.scalar_one_or_none()
     if not profile:
-        raise HTTPException(status_code=404, detail="Profile not found. Please create one first.")
+        return await _default_worker_profile_out(current_user, db)
     return await _worker_profile_payload(profile, current_user, db)
 
 
@@ -434,8 +504,7 @@ async def update_profile(
 async def _earnings_dna_payload(worker_id: int, db: AsyncSession) -> EarningsDnaOut:
     pr = await db.execute(select(Profile).where(Profile.user_id == worker_id))
     profile = pr.scalar_one_or_none()
-    if not profile:
-        raise HTTPException(status_code=404, detail="Profile not found")
+    avg_income = 650.0 if profile is None else max(50.0, float(profile.avg_daily_income or 600.0))
 
     since = datetime.now(timezone.utc) - timedelta(days=30)
     approved = (
@@ -469,7 +538,7 @@ async def _earnings_dna_payload(worker_id: int, db: AsyncSession) -> EarningsDna
 
     payload = build_worker_earnings_dna(
         approved,
-        float(profile.avg_daily_income or 600.0),
+        avg_income,
         weekly_f,
     )
     return EarningsDnaOut.model_validate(payload)

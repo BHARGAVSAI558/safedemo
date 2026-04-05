@@ -62,7 +62,7 @@ def _is_jti_active(token_id: str) -> bool:
 def create_access_token(data: Dict[str, Any], expires_delta: Optional[timedelta] = None) -> str:
     to_encode = dict(data)
     expire = datetime.now(timezone.utc) + (
-        expires_delta or timedelta(hours=settings.ACCESS_TOKEN_EXPIRE_HOURS)
+        expires_delta or timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     )
     jti = str(uuid4())
     to_encode.update({"exp": expire, "type": "access", "jti": jti})

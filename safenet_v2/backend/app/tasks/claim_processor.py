@@ -29,13 +29,17 @@ from app.utils.logger import get_logger
 log = get_logger(__name__)
 
 
-def _redis_url_for_celery(url: str, db: int = 0) -> str:
+def _redis_url_for_celery(url: Optional[str], db: int = 0) -> str:
+    # Local dev without Redis: in-memory broker (no worker process required for API startup).
+    if not url or not str(url).strip():
+        return "memory://"
+    u = str(url).strip()
     # Celery expects explicit /<db>. `settings.REDIS_URL` might be redis://host:6379
-    if "/"+str(db) in url:
-        return url
-    if url.endswith("/"):
-        return url + str(db)
-    return url + f"/{db}"
+    if "/" + str(db) in u:
+        return u
+    if u.endswith("/"):
+        return u + str(db)
+    return u + f"/{db}"
 
 
 celery_broker = _redis_url_for_celery(settings.REDIS_URL, 0)

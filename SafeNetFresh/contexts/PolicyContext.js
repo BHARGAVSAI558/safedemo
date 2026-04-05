@@ -19,6 +19,8 @@ function reducer(state, action) {
       return { ...state, policy: action.policy, coverageStatus: action.coverageStatus ?? state.coverageStatus };
     case 'SET_POOL_HEALTH':
       return { ...state, poolHealth: action.poolHealth };
+    case 'RESET':
+      return initialState;
     default:
       return state;
   }
@@ -35,7 +37,14 @@ export function PolicyProvider({ children }) {
     dispatch({ type: 'SET_POOL_HEALTH', poolHealth });
   }, []);
 
-  const value = useMemo(() => ({ ...state, setPolicy, setPoolHealth }), [state, setPolicy, setPoolHealth]);
+  const resetPolicy = useCallback(() => {
+    dispatch({ type: 'RESET' });
+  }, []);
+
+  const value = useMemo(
+    () => ({ ...state, setPolicy, setPoolHealth, resetPolicy }),
+    [state, setPolicy, setPoolHealth, resetPolicy]
+  );
 
   return <PolicyContext.Provider value={value}>{children}</PolicyContext.Provider>;
 }

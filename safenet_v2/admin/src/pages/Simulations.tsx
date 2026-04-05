@@ -1,20 +1,7 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { useVirtualizer } from '@tanstack/react-virtual';
 import api from '../api';
-
-const SimulationRow = React.memo(function SimulationRow({ s }: { s: any }) {
-  return (
-    <>
-      <td style={styles.td}>{s.id}</td>
-      <td style={styles.td}>{s.user_id}</td>
-      <td style={styles.td}>{s.decision}</td>
-      <td style={styles.td}>₹{Number(s.payout).toFixed(0)}</td>
-      <td style={styles.td}>{Number(s.fraud_score).toFixed(2)}</td>
-      <td style={styles.td}>{new Date(s.created_at).toLocaleString()}</td>
-    </>
-  );
-});
+import { adminUi } from '../theme/adminUi';
 
 export default function Simulations() {
   const [zoneId, setZoneId] = useState('hyd_central');
@@ -45,75 +32,100 @@ export default function Simulations() {
   };
 
   const sims = useMemo(() => simulationsQuery.data ?? [], [simulationsQuery.data]);
-  const parentRef = useRef<HTMLDivElement | null>(null);
-  const virtualizer = useVirtualizer({
-    count: sims.length,
-    getScrollElement: () => parentRef.current,
-    estimateSize: () => 46,
-    overscan: 8,
-  });
 
   return (
-    <div>
-      <h1 style={styles.title}>Simulations</h1>
-      <p style={styles.sub}>Run scenario simulations and track outcomes</p>
+    <div style={adminUi.page}>
+      <header style={adminUi.pageHeader}>
+        <h1 style={adminUi.h1}>Simulations</h1>
+        <p style={adminUi.sub}>Run scenario batches and inspect recent outcomes. List auto-refreshes.</p>
+      </header>
 
-      <div style={styles.form}>
-        <input style={styles.input} value={zoneId} onChange={(e) => setZoneId(e.target.value)} placeholder="Zone ID" />
-        <select style={styles.input} value={disruptionType} onChange={(e) => setDisruptionType(e.target.value)}>
-          <option>Heavy Rain</option>
-          <option>Extreme Heat</option>
-          <option>AQI Spike</option>
-          <option>Curfew</option>
-          <option>Platform Outage</option>
-        </select>
-        <select style={styles.input} value={fraudScenario} onChange={(e) => setFraudScenario(e.target.value)}>
-          <option value="none">none</option>
-          <option value="gps_spoof">GPS spoof</option>
-          <option value="ring_fraud">ring fraud</option>
-        </select>
-        <input style={styles.input} type="number" min={1} max={100} value={workers} onChange={(e) => setWorkers(Number(e.target.value))} />
-        <button style={styles.btn} disabled={running} onClick={runSimulation}>{running ? 'Running...' : 'Run Simulation'}</button>
+      <div style={{ ...adminUi.card, marginBottom: 20 }}>
+        <div style={adminUi.cardTitle}>Run scenario</div>
+        <div style={{ ...adminUi.cardSub, marginBottom: 12 }}>Zone, disruption, fraud pattern, worker count.</div>
+        <div className="admin-sim-form">
+          <input
+            style={{ ...adminUi.input, flex: '1 1 160px', minWidth: 0 }}
+            value={zoneId}
+            onChange={(e) => setZoneId(e.target.value)}
+            placeholder="Zone ID"
+            aria-label="Zone ID"
+          />
+          <select style={adminUi.select} value={disruptionType} onChange={(e) => setDisruptionType(e.target.value)}>
+            <option>Heavy Rain</option>
+            <option>Extreme Heat</option>
+            <option>AQI Spike</option>
+            <option>Curfew</option>
+            <option>Platform Outage</option>
+          </select>
+          <select style={adminUi.select} value={fraudScenario} onChange={(e) => setFraudScenario(e.target.value)}>
+            <option value="none">No fraud scenario</option>
+            <option value="gps_spoof">GPS spoof</option>
+            <option value="ring_fraud">Ring fraud</option>
+          </select>
+          <input
+            style={{ ...adminUi.input, flex: '0 0 100px', minWidth: 80 }}
+            type="number"
+            min={1}
+            max={100}
+            value={workers}
+            onChange={(e) => setWorkers(Number(e.target.value))}
+            aria-label="Worker count"
+          />
+          <button type="button" style={adminUi.btnPrimary} disabled={running} onClick={() => void runSimulation()}>
+            {running ? 'Running…' : 'Run simulation'}
+          </button>
+        </div>
       </div>
 
-      <div style={{ ...styles.tableWrap, height: 460, overflow: 'auto' }} ref={parentRef}>
-        <table style={styles.table}>
+      <div style={adminUi.cardTitle}>Recent simulations</div>
+      <p style={{ ...adminUi.cardSub, marginTop: 4, marginBottom: 12 }}>Latest 100 from API.</p>
+
+      <div style={adminUi.tableScroll}>
+        <table style={{ ...adminUi.table, minWidth: 720 }}>
           <thead>
             <tr>
-              <th style={styles.th}>ID</th>
-              <th style={styles.th}>User ID</th>
-              <th style={styles.th}>Decision</th>
-              <th style={styles.th}>Payout</th>
-              <th style={styles.th}>Fraud Score</th>
-              <th style={styles.th}>Created</th>
+              <th style={adminUi.th}>ID</th>
+              <th style={adminUi.th}>User</th>
+              <th style={adminUi.th}>Decision</th>
+              <th style={adminUi.th}>Payout</th>
+              <th style={adminUi.th}>Fraud</th>
+              <th style={adminUi.th}>Created</th>
             </tr>
           </thead>
-          <tbody style={{ position: 'relative', height: virtualizer.getTotalSize() }}>
-            {virtualizer.getVirtualItems().map((vi) => {
-              const s = sims[vi.index];
-              if (!s) return null;
-              return (
-                <tr key={s.id} style={{ position: 'absolute', transform: `translateY(${vi.start}px)`, width: '100%' }}>
-                  <SimulationRow s={s} />
-                </tr>
-              );
-            })}
+          <tbody>
+            {sims.map((s: { id: number; user_id: number; decision: string; payout: number; fraud_score: number; created_at: string }) => (
+              <tr key={s.id}>
+                <td style={adminUi.td}>{s.id}</td>
+                <td style={adminUi.td}>{s.user_id}</td>
+                <td style={adminUi.td}>
+                  <span
+                    style={{
+                      fontSize: '0.75rem',
+                      fontWeight: 700,
+                      padding: '4px 8px',
+                      borderRadius: 6,
+                      background: 'var(--admin-bg-subtle)',
+                    }}
+                  >
+                    {s.decision}
+                  </span>
+                </td>
+                <td style={adminUi.td}>₹{Number(s.payout).toFixed(0)}</td>
+                <td style={adminUi.td}>{Number(s.fraud_score).toFixed(2)}</td>
+                <td style={{ ...adminUi.td, whiteSpace: 'nowrap' }}>{new Date(s.created_at).toLocaleString()}</td>
+              </tr>
+            ))}
+            {sims.length === 0 ? (
+              <tr>
+                <td colSpan={6} style={adminUi.td}>
+                  <div style={adminUi.empty}>No simulations yet.</div>
+                </td>
+              </tr>
+            ) : null}
           </tbody>
         </table>
       </div>
     </div>
   );
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  title: { fontSize: 24, fontWeight: 800, color: '#0f172a', margin: 0 },
-  sub: { color: '#6b7280', marginTop: 6, marginBottom: 14 },
-  form: { display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 120px auto', gap: 10, marginBottom: 12 },
-  input: { border: '1px solid #cbd5e1', borderRadius: 8, padding: '9px 12px' },
-  btn: { border: '1px solid #cbd5e1', borderRadius: 8, background: '#fff', padding: '8px 12px', cursor: 'pointer', fontWeight: 700 },
-  tableWrap: { border: '1px solid #e2e8f0', borderRadius: 10, overflow: 'hidden' },
-  table: { width: '100%', borderCollapse: 'collapse' },
-  th: { textAlign: 'left', padding: 10, background: '#f8fafc', fontSize: 12, color: '#475569' },
-  td: { padding: 10, borderTop: '1px solid #f1f5f9', fontSize: 13, color: '#0f172a' },
-};
-

@@ -60,6 +60,8 @@ class Profile(Base):
     zone_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     working_hours_preset: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     coverage_tier: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    risk_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    weekly_premium: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     created_at: Mapped[Optional[DateTime]] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[Optional[DateTime]] = mapped_column(DateTime(timezone=True), onupdate=func.now())
 

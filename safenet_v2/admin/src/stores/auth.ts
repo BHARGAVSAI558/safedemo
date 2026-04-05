@@ -1,5 +1,9 @@
 import { create } from 'zustand';
 
+const JWT_LS_KEY = 'safenet_admin_access_jwt';
+const REFRESH_LS_KEY = 'admin_refresh_token';
+const REFRESH_EXP_LS_KEY = 'admin_refresh_expires_at_ms';
+
 type AuthState = {
   jwt: string | null;
   expiresAtMs: number | null;
@@ -21,22 +25,34 @@ function decodeJwtExpMs(token: string): number | null {
   }
 }
 
-const REFRESH_LS_KEY = 'admin_refresh_token';
-const REFRESH_EXP_LS_KEY = 'admin_refresh_expires_at_ms';
+function readPersistedJwt(): { jwt: string | null; expiresAtMs: number | null } {
+  try {
+    const jwt = localStorage.getItem(JWT_LS_KEY);
+    if (!jwt) return { jwt: null, expiresAtMs: null };
+    const exp = decodeJwtExpMs(jwt);
+    if (exp != null && exp <= Date.now()) {
+      localStorage.removeItem(JWT_LS_KEY);
+      return { jwt: null, expiresAtMs: null };
+    }
+    return { jwt, expiresAtMs: exp };
+  } catch {
+    return { jwt: null, expiresAtMs: null };
+  }
+}
+
+const persisted = readPersistedJwt();
 
 export const useAuthStore = create<AuthState>((set) => ({
-  jwt: null,
-  expiresAtMs: null,
+  jwt: persisted.jwt,
+  expiresAtMs: persisted.expiresAtMs,
 
   signIn: (accessToken, refreshToken) => {
     const accessExp = decodeJwtExpMs(accessToken);
+    localStorage.setItem(JWT_LS_KEY, accessToken);
 
-    // Simulate an httpOnly cookie with a short local TTL on the client.
-    // We still store the refresh token itself, but we treat it as expired quickly.
     const now = Date.now();
     const shortTtlMs = 15 * 60 * 1000;
     const refreshExpiresAtMs = now + shortTtlMs;
-
     localStorage.setItem(REFRESH_LS_KEY, refreshToken);
     localStorage.setItem(REFRESH_EXP_LS_KEY, String(refreshExpiresAtMs));
 
@@ -44,9 +60,9 @@ export const useAuthStore = create<AuthState>((set) => ({
   },
 
   signOut: () => {
+    localStorage.removeItem(JWT_LS_KEY);
     localStorage.removeItem(REFRESH_LS_KEY);
     localStorage.removeItem(REFRESH_EXP_LS_KEY);
     set({ jwt: null, expiresAtMs: null });
   },
 }));
-

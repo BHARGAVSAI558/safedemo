@@ -174,10 +174,12 @@ def _coverage_tier_from_product(product_code: str | None) -> str:
     if not product_code:
         return "Standard"
     pc = product_code.lower()
-    if "pro" in pc:
-        return "Pro"
     if "basic" in pc:
         return "Basic"
+    if "standard" in pc:
+        return "Standard"
+    if "pro" in pc:
+        return "Pro"
     return "Standard"
 
 
@@ -541,13 +543,8 @@ async def list_workers(
     fraud_count_sq = (
         select(FraudSignal.user_id.label("uid"), func.count(FraudSignal.id).label("fraud_cnt")).group_by(FraudSignal.user_id)
     ).subquery()
-    latest_active_policy_sq = (
-        select(
-            Policy.user_id.label("puid"),
-            func.max(Policy.id).label("max_policy_id"),
-        )
-        .where(Policy.status == "active")
-        .group_by(Policy.user_id)
+    latest_policy_sq = (
+        select(Policy.user_id.label("puid"), func.max(Policy.id).label("max_policy_id")).group_by(Policy.user_id)
     ).subquery()
 
     stmt = (
@@ -556,11 +553,23 @@ async def list_workers(
         .join(Profile, User.id == Profile.user_id)
         .outerjoin(sim_count_sq, User.id == sim_count_sq.c.uid)
         .outerjoin(fraud_count_sq, User.id == fraud_count_sq.c.uid)
-        .outerjoin(latest_active_policy_sq, User.id == latest_active_policy_sq.c.puid)
-        .outerjoin(Policy, Policy.id == latest_active_policy_sq.c.max_policy_id)
+        .outerjoin(latest_policy_sq, User.id == latest_policy_sq.c.puid)
+        .outerjoin(Policy, Policy.id == latest_policy_sq.c.max_policy_id)
     )
     result = await db.execute(stmt)
     raw_rows = result.all()
+
+    def _coverage_state(pol: Policy | None) -> str:
+        if pol is None:
+            return "NO_COVERAGE"
+        now = datetime.now(timezone.utc)
+        st = str(pol.status or "").lower()
+        vu = getattr(pol, "valid_until", None)
+        if vu is not None and getattr(vu, "tzinfo", None) is None:
+            vu = vu.replace(tzinfo=timezone.utc)
+        if st == "active" and (vu is None or vu > now):
+            return "ACTIVE"
+        return "EXPIRED"
 
     rows: List[Dict[str, Any]] = []
     for u, prof, sim_cnt, fraud_cnt, pol in raw_rows:
@@ -568,10 +577,7 @@ async def list_workers(
         fraud_flags = int(fraud_cnt or 0)
         weekly = float(getattr(pol, "weekly_premium", 0.0) or 0.0) if pol else 0.0
         tier = _coverage_tier_from_product(getattr(pol, "product_code", None) if pol else None)
-        if pol and pol.status == "active":
-            status = "ACTIVE"
-        else:
-            status = "NO_COVERAGE"
+        status = _coverage_state(pol)
         row = {
             "worker_id": u.id,
             "phone": u.phone,

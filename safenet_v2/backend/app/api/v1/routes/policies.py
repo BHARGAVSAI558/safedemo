@@ -16,9 +16,19 @@ from app.models.pool_balance import ZonePoolBalance
 from app.models.worker import Profile, User
 from app.schemas.policy import (
     PolicyActivateRequest,
+    PolicyActivatedFullResponse,
     PolicyCreate,
     PolicyCurrentResponse,
     PolicyResponse,
+)
+from app.services.onboarding_pricing import (
+    TIER_MAX_DAILY,
+    TIER_TO_PRODUCT,
+    ZONE_LABEL,
+    ZONE_RISK_LABEL,
+    compute_risk_score,
+    compute_weekly_premium,
+    normalize_zone,
 )
 from app.services.cache_service import cache_invalidate
 from app.services.zone_resolver import resolve_city_to_zone
@@ -26,18 +36,6 @@ from app.utils.logger import get_logger
 
 log = get_logger(__name__)
 router = APIRouter()
-
-TIER_TO_PRODUCT: Dict[str, str] = {
-    "Basic": "income_shield_basic",
-    "Standard": "income_shield_standard",
-    "Pro": "income_shield_pro",
-}
-
-TIER_MAX_DAILY: Dict[str, float] = {
-    "Basic": 500.0,
-    "Standard": 1000.0,
-    "Pro": 2000.0,
-}
 
 TIER_MULT: Dict[str, float] = {
     "Basic": 0.92,
@@ -50,14 +48,21 @@ def _product_to_tier(product_code: str | None) -> str:
     if not product_code:
         return "Standard"
     pc = product_code.lower()
-    if "pro" in pc:
-        return "Pro"
     if "basic" in pc:
         return "Basic"
+    if "standard" in pc:
+        return "Standard"
+    if "pro" in pc:
+        return "Pro"
     return "Standard"
 
 
 def _policy_period_end(policy: Policy) -> datetime:
+    vu = getattr(policy, "valid_until", None)
+    if vu is not None:
+        if vu.tzinfo is None:
+            vu = vu.replace(tzinfo=timezone.utc)
+        return vu
     base = policy.updated_at or policy.created_at
     if base is None:
         base = datetime.now(timezone.utc)
@@ -93,7 +98,20 @@ async def build_policy_current(
 ) -> PolicyCurrentResponse:
     prof = (await db.execute(select(Profile).where(Profile.user_id == current_user.id))).scalar_one_or_none()
     if not prof:
-        raise HTTPException(status_code=400, detail="Create a worker profile first")
+        return PolicyCurrentResponse(
+            status="inactive",
+            message="No active coverage",
+            tier=None,
+            weekly_premium=0.0,
+            valid_until=None,
+            days_remaining=0,
+            max_coverage_per_day=0.0,
+            risk_score=0.0,
+            zone="",
+            pool_balance=0.0,
+            pool_utilization_pct=0.0,
+            policy_id=None,
+        )
 
     zone_id, _lat, _lon = resolve_city_to_zone(prof.city)
     pool_balance, pool_util = await _fetch_latest_pool(zone_id, db)
@@ -106,12 +124,13 @@ async def build_policy_current(
     )
     pol = result.scalar_one_or_none()
 
-    risk = _risk_score_0_100(prof)
+    risk = float(prof.risk_score) if getattr(prof, "risk_score", None) is not None else _risk_score_0_100(prof)
     now = datetime.now(timezone.utc)
 
     if not pol:
         return PolicyCurrentResponse(
             status="inactive",
+            message="No active coverage",
             tier=None,
             weekly_premium=0.0,
             valid_until=None,
@@ -184,7 +203,7 @@ async def list_policies(
     return rows
 
 
-@router.post("/activate", response_model=PolicyCurrentResponse, status_code=201)
+@router.post("/activate", response_model=PolicyActivatedFullResponse, status_code=201)
 async def activate_policy(
     request: Request,
     body: PolicyActivateRequest,
@@ -200,22 +219,21 @@ async def activate_policy(
     if not product_code:
         raise HTTPException(status_code=422, detail="Invalid tier")
 
-    try:
-        calc = await PremiumEngine.calculate(current_user.id, db=db, profile=prof, user=current_user)
-    except Exception as exc:
-        log.warning(
-            "premium_calculate_failed",
-            engine_name="policies_route",
-            worker_id=current_user.id,
-            error=str(exc),
-        )
-        calc = {"weekly_premium": 35.0}
-    base_weekly = float(calc.get("weekly_premium") or 35.0)
-    mult = TIER_MULT.get(tier, 1.0)
-    weekly = int(max(35, min(85, round(base_weekly * mult))))
+    zone_key = normalize_zone(prof.zone_id or "other")
+    hours = (prof.working_hours_preset or "flexible").strip()
+    platform = (prof.platform or "other").strip()
+    risk_score = compute_risk_score(zone_key, hours, platform)
+    weekly = float(compute_weekly_premium(zone_key, hours, tier))
     monthly = round(weekly * 4.33, 2)
+    max_day = TIER_MAX_DAILY.get(tier, 500.0)
 
     now = datetime.now(timezone.utc)
+    valid_until_dt = now + timedelta(days=7)
+
+    prof.coverage_tier = tier
+    prof.risk_score = float(risk_score)
+    prof.weekly_premium = weekly
+
     existing = (
         await db.execute(
             select(Policy)
@@ -227,23 +245,30 @@ async def activate_policy(
 
     if existing:
         existing.product_code = product_code
-        existing.weekly_premium = float(weekly)
+        existing.weekly_premium = weekly
         existing.monthly_premium = monthly
         existing.status = "active"
+        existing.valid_from = now
+        existing.valid_until = valid_until_dt
         existing.updated_at = now
+        pol = existing
     else:
         pol = Policy(
             user_id=current_user.id,
             product_code=product_code,
             status="active",
             monthly_premium=monthly,
-            weekly_premium=float(weekly),
+            weekly_premium=weekly,
+            valid_from=now,
+            valid_until=valid_until_dt,
             updated_at=now,
         )
         db.add(pol)
 
     await db.commit()
+    await db.refresh(pol)
     await cache_invalidate(getattr(request.app.state, "redis", None), f"policy_active:{current_user.id}")
+    await cache_invalidate(getattr(request.app.state, "redis", None), f"trust:{current_user.id}")
 
     log.info(
         "policy_activated",
@@ -252,9 +277,29 @@ async def activate_policy(
         reason_code="POLICY_ACTIVATE",
         worker_id=current_user.id,
         weekly_premium=weekly,
+        risk_score=risk_score,
     )
 
-    return await build_policy_current(current_user, db)
+    zid = (prof.zone_id or zone_key).strip()
+    return PolicyActivatedFullResponse(
+        id=pol.id,
+        user_id=pol.user_id,
+        product_code=pol.product_code,
+        status=pol.status,
+        tier=tier,
+        monthly_premium=float(pol.monthly_premium or monthly),
+        weekly_premium=float(pol.weekly_premium or weekly),
+        valid_from=now.isoformat(),
+        valid_until=valid_until_dt.isoformat(),
+        max_coverage_per_day=max_day,
+        risk_score=risk_score,
+        zone_id=zid,
+        zone_label=ZONE_LABEL.get(zone_key, zid),
+        zone_risk_level=ZONE_RISK_LABEL.get(zone_key, "Medium Risk"),
+        city=(prof.city or "Hyderabad").strip(),
+        name=(prof.name or "Worker").strip(),
+        trust_level="Newcomer",
+    )
 
 
 @router.post("", response_model=PolicyResponse, status_code=201)

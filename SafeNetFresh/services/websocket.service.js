@@ -1,11 +1,10 @@
-import Constants from 'expo-constants';
-import { BACKEND_URL } from './api';
+import { BASE_URL } from './api';
 
-const toWsUrl = (baseUrl) => {
-  if (!baseUrl) return '';
-  if (baseUrl.startsWith('https://')) return baseUrl.replace('https://', 'wss://');
-  if (baseUrl.startsWith('http://')) return baseUrl.replace('http://', 'ws://');
-  return baseUrl;
+const getWSURL = (workerId, token) => {
+  const base = BASE_URL;
+  const wsBase = base.replace('https://', 'wss://').replace('http://', 'ws://');
+  const origin = wsBase.replace(/\/$/, '');
+  return `${origin}/ws/claims/${encodeURIComponent(workerId)}?token=${encodeURIComponent(token)}`;
 };
 
 /**
@@ -13,10 +12,8 @@ const toWsUrl = (baseUrl) => {
  * Server sends {"type":"PING"} every 30s; client must reply {"type":"PONG"} within 10s.
  */
 export function createClaimsWebSocket({ workerId, token, onMessage, onDisconnect, onStatusChange }) {
-  const backendUrl = BACKEND_URL;
-  const wsBase = backendUrl || '';
-  const wsUrl = toWsUrl(wsBase).replace(/\/$/, '');
-  const fullUrl = `${wsUrl}/ws/claims/${encodeURIComponent(workerId)}?token=${encodeURIComponent(token)}`;
+  const wsUrl = (BASE_URL || '').replace(/\/$/, '');
+  const fullUrl = getWSURL(workerId, token);
 
   let socket = null;
   let isStopped = false;

@@ -20,3 +20,32 @@ class GigProfileUpsert(BaseModel):
         if re.search(r"<\s*script|<\s*\/", s, flags=re.IGNORECASE):
             raise ValueError("Invalid text value")
         return s
+
+
+class GigProfileResponse(BaseModel):
+    success: bool
+    profile_id: int
+    risk_score: float
+    weekly_premium: int
+    coverage_tier: str
+    zone_id: str
+    zone_risk_level: str
+    max_coverage_per_day: float
+    platform: str
+    working_hours_preset: str
+    name: str
+    city: str
+
+
+class ProfileBootstrapResponse(BaseModel):
+    """GET /api/v1/profile — default row before onboarding completes."""
+
+    id: int
+    phone_number: str
+    name: str | None = None
+    city: str | None = None
+    zone_id: str | None = None
+    platform: str | None = None
+    avg_daily_income: float = 650.0
+    trust_score: float = 50.0
+    is_profile_complete: bool = False

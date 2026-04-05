@@ -22,25 +22,34 @@ export default function OnboardingScreen({ navigation }) {
   const insets = useSafeAreaInsets();
   const [phone, setPhone] = useState('');
   const [loading, setLoading] = useState(false);
+  const [sentNotice, setSentNotice] = useState('');
 
   const handleSendOtp = async () => {
     Keyboard.dismiss();
     const cleaned = phone.replace(/\D/g, '');
     if (cleaned.length !== 10) {
-      Alert.alert('Error', 'Enter a valid 10-digit phone number');
+      Alert.alert(
+        'Almost there',
+        'Please enter your full 10-digit mobile number so we can send your code.'
+      );
       return;
     }
 
     setLoading(true);
+    setSentNotice('');
     try {
       await auth.sendOTP(cleaned);
-      // Small delay to simulate real SMS sending
+      setSentNotice('Code sent — check your SMS');
       await new Promise((r) => setTimeout(r, 1000));
       navigation.navigate('OTPVerify', { phone: cleaned });
     } catch (e) {
-      Alert.alert('Error', e?.message || e?.response?.data?.detail || 'Failed to send OTP');
+      Alert.alert(
+        'Could not send code',
+        e?.message || e?.response?.data?.detail || 'Check your connection and try again.'
+      );
     } finally {
       setLoading(false);
+      setSentNotice('');
     }
   };
 
@@ -55,13 +64,14 @@ export default function OnboardingScreen({ navigation }) {
           <View style={[styles.top, { paddingTop: insets.top + 24 }]}>
             <Text style={styles.logo}>🛡️</Text>
             <Text style={styles.title}>SafeNet</Text>
-            <Text style={styles.tagline}>Income protection for Zomato & Swiggy partners</Text>
+            <Text style={styles.tagline}>Income protection when work stops</Text>
           </View>
 
           <View style={[styles.sheet, { paddingBottom: Math.max(insets.bottom, 20) }]}>
-            <Text style={styles.sheetTitle}>Enter your mobile number</Text>
-            <Text style={styles.sheetSub}>We will send a verification code. No spam, ever.</Text>
+            <Text style={styles.sheetTitle}>Sign in or create account</Text>
+            <Text style={styles.sheetSub}>We’ll text you a one-time code to continue.</Text>
 
+            <Text style={styles.fieldLabel}>Enter phone number</Text>
             <View style={styles.phoneRow}>
               <View style={styles.ccPill}>
                 <Text style={styles.flag}>🇮🇳</Text>
@@ -69,7 +79,7 @@ export default function OnboardingScreen({ navigation }) {
               </View>
               <TextInput
                 style={styles.phoneInput}
-                placeholder="9876543210"
+                placeholder="10-digit mobile number"
                 placeholderTextColor="#9ca3af"
                 keyboardType="phone-pad"
                 maxLength={10}
@@ -82,15 +92,17 @@ export default function OnboardingScreen({ navigation }) {
             </View>
 
             <TouchableOpacity style={styles.cta} onPress={handleSendOtp} disabled={loading} activeOpacity={0.85}>
-              {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.ctaText}>Get OTP</Text>}
+              {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.ctaText}>Send OTP</Text>}
             </TouchableOpacity>
 
-            <Text style={styles.terms}>By continuing, you agree to our Terms of Service</Text>
+            {sentNotice ? <Text style={styles.sentNotice}>{sentNotice}</Text> : null}
+
+            <Text style={styles.terms}>By continuing, you agree to our Terms and Privacy Policy</Text>
 
             <View style={styles.trustRow}>
               <Text style={styles.trustItem}>🔒 Secure</Text>
-              <Text style={styles.trustItem}>⚡ Instant payouts</Text>
-              <Text style={styles.trustItem}>🛡️ RBI compliant model</Text>
+              <Text style={styles.trustItem}>⚡ Fast support</Text>
+              <Text style={styles.trustItem}>🛡️ Built for gig workers</Text>
             </View>
           </View>
         </View>
@@ -124,7 +136,8 @@ const styles = StyleSheet.create({
     elevation: 8,
   },
   sheetTitle: { fontSize: 20, fontWeight: '800', color: '#111827' },
-  sheetSub: { fontSize: 14, color: '#6b7280', marginTop: 6, marginBottom: 20 },
+  sheetSub: { fontSize: 14, color: '#6b7280', marginTop: 8, marginBottom: 16, lineHeight: 20 },
+  fieldLabel: { fontSize: 13, fontWeight: '700', color: '#374151', marginBottom: 8 },
   phoneRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   ccPill: {
     flexDirection: 'row',
@@ -157,6 +170,13 @@ const styles = StyleSheet.create({
     marginTop: 18,
   },
   ctaText: { color: '#fff', fontSize: 17, fontWeight: '800' },
+  sentNotice: {
+    marginTop: 14,
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#059669',
+    textAlign: 'center',
+  },
   terms: { fontSize: 12, color: '#9ca3af', textAlign: 'center', marginTop: 14 },
   trustRow: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', marginTop: 22, gap: 8 },
   trustItem: { fontSize: 12, color: '#4b5563', fontWeight: '600' },
