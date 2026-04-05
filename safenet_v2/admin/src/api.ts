@@ -2,7 +2,7 @@ import axios from 'axios';
 
 import { useAuthStore } from './stores/auth';
 
-const RENDER_BACKEND = 'https://devtrails2026-alphanexus-phase2-2.onrender.com';
+const RENDER_BACKEND = 'https://safenet-api-y4se.onrender.com';
 
 const BASE_URL = (
   (import.meta.env.VITE_BACKEND_URL as string | undefined) ||

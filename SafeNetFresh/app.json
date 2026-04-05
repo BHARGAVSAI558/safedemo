@@ -26,7 +26,7 @@
       "supportsTablet": false
     },
     "extra": {
-      "BACKEND_URL": "https://devtrails2026-alphanexus-phase2-2.onrender.com",
+      "BACKEND_URL": "https://safenet-api-y4se.onrender.com",
       "BACKEND_URL_DEV": "remote",
       "DEMO_MODE": true,
       "eas": {

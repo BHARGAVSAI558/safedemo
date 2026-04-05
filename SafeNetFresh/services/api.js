@@ -18,7 +18,7 @@ const getBackendURL = () => {
   const devMode = Constants.expoConfig?.extra?.BACKEND_URL_DEV;
   const prodURL =
     Constants.expoConfig?.extra?.BACKEND_URL ||
-    'https://devtrails2026-alphanexus-phase2-2.onrender.com';
+    'https://safenet-api-y4se.onrender.com';
 
   if (__DEV__ && devMode === 'local') {
     return 'http://192.168.1.100:8000';

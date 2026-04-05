@@ -9,8 +9,8 @@
 | What | URL |
 |------|-----|
 | 🌐 **Admin Dashboard** | [https://devtrails-2026-alphanexus-phase-scale.vercel.app](https://devtrails-2026-alphanexus-phase-scale.vercel.app) |
-| ⚙️ **Backend API** | [https://devtrails2026-alphanexus-phase2-2.onrender.com](https://devtrails2026-alphanexus-phase2-2.onrender.com) |
-| ❤️ **Health Check** | [https://devtrails2026-alphanexus-phase2-2.onrender.com/health](https://devtrails2026-alphanexus-phase2-2.onrender.com/health) |
+| ⚙️ **Backend API** | [https://safenet-api-y4se.onrender.com](https://safenet-api-y4se.onrender.com) |
+| ❤️ **Health Check** | [https://safenet-api-y4se.onrender.com/health](https://safenet-api-y4se.onrender.com/health) |
 | 📱 **Mobile App** | Scan QR below with Expo Go |
 | 💻 **GitHub** | [https://github.com/BHARGAVSAI558/devtrails-2026-alphanexus-phase-scale](https://github.com/BHARGAVSAI558/devtrails-2026-alphanexus-phase-scale) |
 

@@ -30,7 +30,7 @@ let isStopped = true;
 
 const BACKEND = (
   (import.meta.env.VITE_BACKEND_URL as string | undefined) ||
-  'https://devtrails2026-alphanexus-phase2-2.onrender.com'
+  'https://safenet-api-y4se.onrender.com'
 ).replace(/\/$/, '');
 
 export function connectAdminWebSocket(jwt: string) {

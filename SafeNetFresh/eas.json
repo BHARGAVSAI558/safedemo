@@ -10,7 +10,7 @@
         "gradleCommand": ":app:assembleRelease"
       },
       "env": {
-        "EXPO_PUBLIC_BACKEND_URL": "https://devtrails2026-alphanexus-phase2-2.onrender.com"
+        "EXPO_PUBLIC_BACKEND_URL": "https://safenet-api-y4se.onrender.com"
       }
     }
   }
