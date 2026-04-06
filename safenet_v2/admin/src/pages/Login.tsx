@@ -4,7 +4,6 @@ import { useNavigate } from 'react-router-dom';
 export default function Login() {
   const navigate = useNavigate();
   const workerAppUrl = 'https://safenet-sage.vercel.app';
-  const adminDashboardUrl = 'https://safenet-admin-wine.vercel.app';
   const goToAdminLogin = () => {
     navigate('/admin-login', {
       state: { username: 'admin', password: 'admin123' },
@@ -13,7 +12,7 @@ export default function Login() {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
-      <section className="w-full bg-gradient-to-r from-blue-600 to-purple-600 py-16 text-center text-white shadow-lg">
+      <section className="w-full bg-gradient-to-r from-blue-600 to-purple-600 py-6 text-center text-white shadow-lg">
         <div className="mx-auto max-w-5xl">
           <img src="/favicon.svg" alt="SafeNet logo" className="mx-auto h-14 w-14 rounded-xl bg-white/15 p-1.5" />
           <h1 className="mt-5 text-4xl font-extrabold leading-tight md:text-6xl">SafeNet</h1>
@@ -21,31 +20,6 @@ export default function Login() {
           <p className="mx-auto mt-3 max-w-2xl text-sm text-blue-100 md:text-base">
             Parametric insurance that pays workers exactly what they lose.
           </p>
-          <div className="mt-8 flex flex-wrap items-center justify-center gap-4">
-            <a
-              href={workerAppUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center rounded-lg bg-white px-6 py-3 text-base font-bold text-blue-700 shadow-md transition hover:bg-blue-50"
-            >
-              🚀 Try Worker App (Web)
-            </a>
-            <button
-              type="button"
-              onClick={goToAdminLogin}
-              className="inline-flex items-center rounded-lg bg-blue-900 px-6 py-3 text-base font-bold text-white shadow-md transition hover:bg-blue-950"
-            >
-              🖥 Admin Dashboard
-            </button>
-          </div>
-          <div className="mt-5 flex flex-col items-center gap-1 text-sm">
-            <a href={workerAppUrl} target="_blank" rel="noreferrer" className="font-medium text-blue-100 underline hover:text-white">
-              Worker App: {workerAppUrl}
-            </a>
-            <a href={adminDashboardUrl} target="_blank" rel="noreferrer" className="font-medium text-blue-100 underline hover:text-white">
-              Admin Dashboard: {adminDashboardUrl}
-            </a>
-          </div>
           <div className="mt-6 flex flex-wrap items-center justify-center gap-3 text-xs font-semibold md:text-sm">
             <span className="rounded-full bg-white/15 px-4 py-2 ring-1 ring-white/30">🔴 Live Backend</span>
             <span className="rounded-full bg-white/15 px-4 py-2 ring-1 ring-white/30">⚡ Real-time WebSockets</span>
@@ -54,7 +28,7 @@ export default function Login() {
         </div>
       </section>
 
-      <main className="py-10">
+      <main className="py-6">
         <section className="mx-auto grid max-w-6xl gap-6 px-4 md:grid-cols-2">
           <article className="rounded-2xl bg-white p-6 shadow-lg transition-shadow hover:shadow-xl">
             <h2 className="text-xl font-semibold text-slate-900">📱 Try the Worker App</h2>
