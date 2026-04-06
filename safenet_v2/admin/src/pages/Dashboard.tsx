@@ -58,6 +58,11 @@ function statusToChip(status: string) {
   return { bg: '#e5e7eb', fg: '#374151', label: status || '—' };
 }
 
+function formatUpdated(ts?: number | null) {
+  if (!ts) return '—';
+  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
 function KpiCard({
   title,
   value,
@@ -93,6 +98,7 @@ export default function Dashboard() {
   const [feedUpdatedAt, setFeedUpdatedAt] = useState<number | null>(null);
   const [flashRowId, setFlashRowId] = useState<string | null>(null);
   const [fraudToast, setFraudToast] = useState<AdminFraudAlert | null>(null);
+  const [isMobile, setIsMobile] = useState(() => window.innerWidth <= 768);
   const prevWsTopRef = useRef<string | undefined>(undefined);
   const lastFraudClusterRef = useRef<string | null>(null);
 
@@ -119,6 +125,12 @@ export default function Dashboard() {
     const t = window.setTimeout(() => setFraudToast(null), 7000);
     return () => window.clearTimeout(t);
   }, [fraudItems]);
+
+  useEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth <= 768);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
 
   const kpiQuery = useQuery({
     queryKey: ['admin', 'kpis'],
@@ -292,7 +304,7 @@ export default function Dashboard() {
 
       {fraudToast ? (
         <div style={styles.fraudToast} role="status">
-          ⚠️ Fraud ring detected in {fraudToast.zone_id} — {fraudToast.worker_ids?.length ?? 0} workers frozen
+          Fraud ring detected in {fraudToast.zone_id} — {fraudToast.worker_ids?.length ?? 0} workers frozen
         </div>
       ) : null}
 
@@ -303,7 +315,7 @@ export default function Dashboard() {
             const health = Math.max(0, 100 - pct);
             return (
               <div key={String(z.zone_id)} style={styles.poolWarnLine}>
-                ⚠️ {z.zone_id} pool health at {health.toFixed(0)}% (utilization {pct.toFixed(0)}%) — reinsurance may
+                {z.zone_id} pool health at {health.toFixed(0)}% (utilization {pct.toFixed(0)}%) — reinsurance may
                 trigger
               </div>
             );
@@ -311,11 +323,19 @@ export default function Dashboard() {
         </div>
       ) : null}
 
-      <header style={adminUi.pageHeader}>
-        <h1 style={adminUi.h1}>Dashboard</h1>
-        <p style={adminUi.sub}>
-          Live KPIs, claim feed, pool health, and earnings DNA. Real-time rows update over the WebSocket; numbers refresh on a short interval.
-        </p>
+      <header style={{ ...adminUi.pageHeader, display: 'flex', justifyContent: 'space-between', gap: 20, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+        <div>
+          <h1 style={adminUi.h1}>Dashboard</h1>
+          <p style={adminUi.sub}>
+            Live KPIs, claim feed, pool health, and earnings DNA. Real-time rows update over the WebSocket.
+          </p>
+        </div>
+        <div style={styles.systemMeta}>
+          <span style={styles.liveDot} />
+          <span style={styles.systemLive}>Live</span>
+          <span style={styles.systemDivider}>•</span>
+          <span style={styles.systemTime}>Updated {formatUpdated(Math.max(kpiQuery.dataUpdatedAt || 0, simulationsFeedQuery.dataUpdatedAt || 0))}</span>
+        </div>
       </header>
 
       {kpiCards}
@@ -383,7 +403,7 @@ export default function Dashboard() {
           <div style={{ height: 320, width: '100%' }}>
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={fleetDnaBarData} margin={{ top: 8, right: 12, left: 4, bottom: 8 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" vertical={false} />
                 <XAxis dataKey="hourLabel" tick={{ fontSize: 11, fill: '#64748b', fontWeight: 700 }} />
                 <YAxis
                   tick={{ fontSize: 11, fill: '#64748b' }}
@@ -418,7 +438,7 @@ export default function Dashboard() {
             <div style={adminUi.empty}>No rows yet. Connect the WebSocket and wait for simulations or API refresh.</div>
           ) : (
             <div style={adminUi.tableScroll}>
-              <table style={{ ...adminUi.table, minWidth: 820 }}>
+              <table style={{ ...adminUi.table, minWidth: isMobile ? 680 : 820 }}>
                 <thead>
                   <tr>
                     <th style={adminUi.th}>Worker ID</th>
@@ -472,12 +492,11 @@ export default function Dashboard() {
           <div style={adminUi.card}>
             <div style={adminUi.cardTitle}>Loss ratio</div>
             <div style={{ ...adminUi.cardSub, marginBottom: 8 }}>Target band 60–75%</div>
-            <div style={{ height: 260 }}>
+            <div style={{ height: isMobile ? 220 : 260 }}>
               <ResponsiveContainer width="100%" height="100%">
-                <RadialBarChart data={[{ name: 'loss', value: lossRatioChartData.actual }]} cx="50%" cy="50%" innerRadius="80%" outerRadius="100%" barSize={18}>
+              <RadialBarChart data={[{ name: 'loss', value: lossRatioChartData.actual }]} cx="50%" cy="50%" innerRadius="80%" outerRadius="100%" barSize={18}>
                   <RadialBar dataKey="value" minAngle={15} background={{ fill: '#e5e7eb' }} />
                   <Tooltip />
-                  <Legend />
                 </RadialBarChart>
               </ResponsiveContainer>
             </div>
@@ -609,7 +628,7 @@ export default function Dashboard() {
             ) : (
               <div style={{ display: 'grid', gap: 8 }}>
                 {(weeklyQuery.data?.breakdown ?? []).map((row: any) => (
-                  <div key={String(row.day)} style={styles.weeklyRow}>
+                  <div key={String(row.day)} style={{ ...styles.weeklyRow, ...(isMobile ? styles.weeklyRowMobile : null) }}>
                     <div style={styles.weeklyDay}>{row.day}</div>
                     <div style={styles.weeklyAmount}>₹{Number(row.protected_amount ?? 0).toFixed(0)}</div>
                     <div style={styles.weeklyReason}>{row.reason ?? ''}</div>
@@ -652,8 +671,8 @@ const styles: Record<string, React.CSSProperties> = {
   },
   poolWarnLine: { fontSize: 13, fontWeight: 800, color: '#9a3412', marginBottom: 4 },
   loading: { textAlign: 'center', padding: 60, color: 'var(--admin-muted)' },
-  kpiTitle: { fontSize: 11, color: 'var(--admin-muted)', fontWeight: 800, marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.06em' },
-  kpiValue: { fontSize: 'clamp(1.25rem, 2.5vw, 1.5rem)', fontWeight: 800, color: 'var(--admin-text)', marginBottom: 6, letterSpacing: '-0.02em' },
+  kpiTitle: { fontSize: 12, color: 'var(--admin-muted)', fontWeight: 500, marginBottom: 8 },
+  kpiValue: { fontSize: 'clamp(1.35rem, 2.5vw, 1.75rem)', fontWeight: 700, color: 'var(--admin-text)', marginBottom: 6, letterSpacing: '-0.02em' },
   kpiDelta: { fontSize: 12, fontWeight: 700 },
   kpiDeltaPlaceholder: { height: 16 },
   chip: { padding: '4px 10px', borderRadius: 9999, fontSize: 11, fontWeight: 800 },
@@ -667,6 +686,19 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#0369a1',
   },
   lossText: { marginTop: 6, fontSize: 13, color: '#0f172a', fontWeight: 700 },
+  systemMeta: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 8,
+    padding: '8px 12px',
+    borderRadius: 999,
+    border: '1px solid var(--admin-border)',
+    backgroundColor: '#ffffff',
+  },
+  liveDot: { width: 8, height: 8, borderRadius: 999, backgroundColor: '#22c55e' },
+  systemLive: { fontSize: 12, fontWeight: 700, color: '#0f172a' },
+  systemDivider: { color: '#cbd5e1', fontSize: 12 },
+  systemTime: { fontSize: 12, fontWeight: 500, color: '#64748b' },
   weeklyButton: {
     width: '100%',
     border: '1px solid #e5e7eb',
@@ -681,7 +713,8 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#0f172a',
   },
   weeklyExpanded: { marginTop: 10, paddingTop: 10, borderTop: '1px solid #e5e7eb' },
-  weeklyRow: { display: 'grid', gridTemplateColumns: '100px 1fr 1fr', gap: 10, alignItems: 'center', padding: '8px 0' },
+  weeklyRow: { display: 'grid', gridTemplateColumns: 'minmax(78px, 90px) minmax(80px, 1fr) minmax(120px, 1.2fr)', gap: 10, alignItems: 'center', padding: '8px 0' },
+  weeklyRowMobile: { gridTemplateColumns: '1fr', gap: 4, padding: '10px 0' },
   weeklyDay: { fontSize: 12, fontWeight: 900, color: '#334155' },
   weeklyAmount: { fontSize: 13, fontWeight: 900, color: '#0f172a' },
   weeklyReason: { fontSize: 12, color: '#6b7280', fontWeight: 700 },
