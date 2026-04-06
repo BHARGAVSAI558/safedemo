@@ -99,11 +99,7 @@ export default function Login() {
             <h2 className="text-2xl font-bold text-slate-900">📱 Try the Worker App</h2>
             <p className="mt-2 text-sm text-slate-600">Experience SafeNet as a Zomato delivery partner</p>
             <div className="mt-4 flex flex-col items-start gap-3">
-              <img
-                src="https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=https://safenet-sage.vercel.app/"
-                alt="Worker app QR code"
-                className="h-[150px] w-[150px] rounded-lg border border-slate-200 bg-white p-2"
-              />
+              <img src="/worker-app-qr.png" alt="Worker app QR code" className="h-[150px] w-[150px] rounded-lg border border-slate-200 bg-white p-2" />
               <p className="text-xs text-slate-500">Scan with your phone camera</p>
               <a
                 href="https://safenet-sage.vercel.app/"
