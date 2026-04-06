@@ -257,7 +257,7 @@ flowchart TB
 
 > **Note:** `node_modules/`, `.expo/`, `dist/`, `__pycache__/`, and `.venv/` are build/cache folders and are omitted below.
 
-```
+``` 
 ALPHA/
 ├── README.md                          ← this file
 ├── package-lock.json                  ← root lockfile (if present)
@@ -688,5 +688,3 @@ Get-ChildItem -Path . -Recurse -File -ErrorAction SilentlyContinue |
 ```
 
 ---
-
- 
