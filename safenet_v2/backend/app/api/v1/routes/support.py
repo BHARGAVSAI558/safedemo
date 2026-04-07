@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import random
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -40,6 +41,19 @@ def _fallback_system_reply(msg: str) -> str:
     return "Thanks for reaching out. We logged your query and our team can reply here shortly."
 
 
+def _norm_lang(lang: str | None) -> str:
+    v = str(lang or "en").lower()
+    if v.startswith("hi"):
+        return "hi"
+    if v.startswith("te"):
+        return "te"
+    return "en"
+
+
+def _pick(*items: str) -> str:
+    return random.choice([x for x in items if x])
+
+
 def _support_values(life: ClaimLifecycle | None, sim: Simulation | None) -> dict[str, str]:
     disruption_signal = "Moderate"
     activity_change = "Normal"
@@ -79,7 +93,7 @@ def _support_values(life: ClaimLifecycle | None, sim: Simulation | None) -> dict
 
 
 def _predefined_reply(lang: str, key: str, vals: dict[str, str]) -> str | None:
-    l = "hi" if str(lang).lower().startswith("hi") else "te" if str(lang).lower().startswith("te") else "en"
+    l = _norm_lang(lang)
     m: dict[str, dict[str, str]] = {
         "en": {
             "no_payout": "We checked your situation carefully.\n\n• Disruption in your zone: Not strong enough\n• Your activity: Still within normal range\n\nSince both conditions were not met together, payout was not triggered.",
@@ -110,7 +124,75 @@ def _predefined_reply(lang: str, key: str, vals: dict[str, str]) -> str | None:
     return tpl.format(**vals) if tpl else None
 
 
-async def _auto_system_reply(db: AsyncSession, user_id: int, msg: str) -> str:
+def _fallback_localized(lang: str, msg: str) -> str:
+    t = msg.lower()
+    l = _norm_lang(lang)
+    if "payout" in t or "payment" in t or "भुगतान" in t or "చెల్లింపు" in t:
+        if l == "hi":
+            return _pick(
+                "भुगतान निर्णय व्यवधान सत्यापन, धोखाधड़ी जांच और आपके अर्निंग पैटर्न पर आधारित है।",
+                "पAYOUT तभी ट्रिगर होता है जब व्यवधान + गतिविधि संकेत + सुरक्षा जांच एक साथ पास हों।",
+            )
+        if l == "te":
+            return _pick(
+                "చెల్లింపు నిర్ణయం అంతరాయం ధృవీకరణ, మోసం తనిఖీలు మరియు మీ earning pattern ఆధారంగా ఉంటుంది.",
+                "అంతరాయం + కార్యకలాప మార్పు + భద్రతా తనిఖీలు పాస్ అయితేనే payout వస్తుంది.",
+            )
+        return _pick(
+            "Payout is based on disruption verification, fraud checks, and your earning pattern for that slot.",
+            "Payout triggers only when disruption + activity shift + safety checks pass together.",
+        )
+    if "claim" in t or "क्लेम" in t or "క్లెయిమ్" in t:
+        if l == "hi":
+            return _pick(
+                "क्लेम फ्लो: व्यवधान पहचान → सत्यापन → धोखाधड़ी जांच → अंतिम निर्णय।",
+                "आपका क्लेम स्टेप-बाय-स्टेप वेरिफिकेशन में जाता है, फिर अंतिम निर्णय होता है।",
+            )
+        if l == "te":
+            return _pick(
+                "క్లెయిమ్ ఫ్లో: అంతరాయం గుర్తింపు → ధృవీకరణ → మోసం తనిఖీ → తుది నిర్ణయం.",
+                "మీ క్లెయిమ్ దశలవారీగా పరిశీలించి తర్వాత నిర్ణయం ఇస్తాము.",
+            )
+        return _pick(
+            "Claim flow: disruption detected → verification → fraud checks → final decision.",
+            "Your claim is processed step-by-step through verification and fraud safety checks.",
+        )
+    if l == "hi":
+        return _pick(
+            "हमने आपका संदेश दर्ज कर लिया है। आवश्यकता होने पर एडमिन यहीं जवाब देंगे।",
+            "धन्यवाद, आपका प्रश्न लॉग हो गया है। टीम यहीं अपडेट देगी।",
+        )
+    if l == "te":
+        return _pick(
+            "మీ సందేశాన్ని నమోదు చేసాము. అవసరమైతే అడ్మిన్ ఇక్కడే సమాధానం ఇస్తారు.",
+            "ధన్యవాదాలు, మీ ప్రశ్న రికార్డ్ అయింది. టీమ్ ఇక్కడే అప్డేట్ ఇస్తుంది.",
+        )
+    return _pick(
+        "Thanks, we logged your query. Admin can reply here if needed.",
+        "Your query is recorded. The team can respond here shortly.",
+    )
+
+
+def _status_reply_localized(lang: str, dis: str, status: str) -> str:
+    st = status.replace("_", " ").title()
+    l = _norm_lang(lang)
+    if l == "hi":
+        return _pick(
+            f"आपका नवीनतम {dis} क्लेम अभी {st} में है। सत्यापन जारी है।",
+            f"लेटेस्ट {dis} क्लेम स्थिति: {st}. सुरक्षा जांच चल रही है।",
+        )
+    if l == "te":
+        return _pick(
+            f"మీ తాజా {dis} క్లెయిమ్ ప్రస్తుతం {st} లో ఉంది. ధృవీకరణ కొనసాగుతోంది.",
+            f"తాజా {dis} క్లెయిమ్ స్థితి: {st}. భద్రతా తనిఖీలు జరుగుతున్నాయి.",
+        )
+    return _pick(
+        f"Your latest {dis} claim is currently {st}. Verification is in progress.",
+        f"Latest {dis} claim status: {st}. Safety checks are running.",
+    )
+
+
+async def _auto_system_reply(db: AsyncSession, user_id: int, msg: str, lang: str = "en") -> str:
     t = msg.lower()
     life = (
         await db.execute(
@@ -125,14 +207,22 @@ async def _auto_system_reply(db: AsyncSession, user_id: int, msg: str) -> str:
         dis = str(life.disruption_type or "disruption").replace("_", " ").title()
         if "under review" in t or "review" in t or "claim" in t:
             if st in {"INITIATED", "VERIFYING", "BEHAVIORAL_CHECK", "FRAUD_CHECK", "REVALIDATING"}:
-                return f"Your latest {dis} claim is currently {st.replace('_', ' ').title()}. We are still verifying signals and fraud safety."
+                return _status_reply_localized(lang, dis, st)
             if st in {"APPROVED", "PAYOUT_DONE", "PAYOUT_CREDITED"}:
-                return f"Your latest {dis} claim is approved. Payout update should be visible shortly in Home and Claims."
+                if _norm_lang(lang) == "hi":
+                    return _pick("आपका नवीनतम क्लेम स्वीकृत है। भुगतान अपडेट जल्द दिखेगा।", "क्लेम Approved है। Home और Claims में payout जल्द दिखेगा।")
+                if _norm_lang(lang) == "te":
+                    return _pick("మీ తాజా క్లెయిమ్ ఆమోదించబడింది. payout త్వరలో కనిపిస్తుంది.", "క్లెయిమ్ Approved అయింది. Home/Claims లో చెల్లింపు అప్డేట్ త్వరలో వస్తుంది.")
+                return _pick("Your latest claim is approved. Payout update should appear shortly.", "Claim approved. Payout update will reflect shortly in Home and Claims.")
             if st in {"BLOCKED", "REJECTED", "CLAIM_REJECTED"}:
-                return "Your latest claim was not approved after verification checks. You can ask for manual review and an admin can respond here."
+                if _norm_lang(lang) == "hi":
+                    return _pick("सत्यापन के बाद आपका क्लेम स्वीकृत नहीं हुआ। चाहें तो मैनुअल रिव्यू मांग सकते हैं।", "आपका नवीनतम क्लेम रिजेक्ट हुआ है। जरूरत हो तो एडमिन रिव्यू कर सकते हैं।")
+                if _norm_lang(lang) == "te":
+                    return _pick("పరిశీలన తర్వాత మీ క్లెయిమ్ ఆమోదం పొందలేదు. కావాలంటే manual review కోరండి.", "మీ తాజా క్లెయిమ్ తిరస్కరించబడింది. అవసరమైతే అడ్మిన్ రివ్యూ చేస్తారు.")
+                return _pick("Your latest claim was not approved after verification checks. You can request a manual review.", "Latest claim is rejected after checks. You can ask for manual review.")
         if "disruption" in t or "real time" in t:
             if st in {"INITIATED", "VERIFYING", "BEHAVIORAL_CHECK", "FRAUD_CHECK", "REVALIDATING"}:
-                return f"Live disruption workflow is active for {dis}. Status is {st.replace('_', ' ').title()} right now."
+                return _status_reply_localized(lang, dis, st)
 
     sim = (
         await db.execute(
@@ -145,13 +235,26 @@ async def _auto_system_reply(db: AsyncSession, user_id: int, msg: str) -> str:
     if sim is not None and ("payout" in t or "no payout" in t):
         dec = str(sim.decision.value if hasattr(sim.decision, "value") else sim.decision).upper()
         if dec == DecisionType.APPROVED.value:
-            return f"Your most recent claim is approved with payout ₹{int(round(float(sim.payout or 0.0)))}."
+            amt = int(round(float(sim.payout or 0.0)))
+            if _norm_lang(lang) == "hi":
+                return _pick(f"आपका हालिया क्लेम स्वीकृत है। भुगतान ₹{amt} है।", f"लेटेस्ट क्लेम Approved. क्रेडिट राशि ₹{amt}.")
+            if _norm_lang(lang) == "te":
+                return _pick(f"మీ తాజా క్లెయిమ్ ఆమోదించబడింది. చెల్లింపు ₹{amt}.", f"లేటెస్ట్ క్లెయిమ్ Approved. క్రెడిట్ మొత్తం ₹{amt}.")
+            return _pick(f"Your most recent claim is approved with payout ₹{amt}.", f"Latest claim is approved. Credited amount: ₹{amt}.")
         if dec == DecisionType.FRAUD.value:
-            return "Your latest claim was blocked due to fraud-risk checks. If you think this is incorrect, ask for manual review."
+            if _norm_lang(lang) == "hi":
+                return _pick("धोखाधड़ी जोखिम जांच के कारण आपका क्लेम रोका गया। गलत लगे तो मैनुअल रिव्यू मांगें।", "फ्रॉड-रिस्क फ्लैग के कारण क्लेम ब्लॉक हुआ। आवश्यकता हो तो रिव्यू अनुरोध करें।")
+            if _norm_lang(lang) == "te":
+                return _pick("మోసం-ప్రమాద తనిఖీల వల్ల మీ క్లెయిమ్ నిరోధించబడింది. అవసరమైతే మాన్యువల్ రివ్యూ కోరండి.", "Fraud-risk flag కారణంగా క్లెయిమ్ బ్లాక్ అయింది. తప్పు అనిపిస్తే రివ్యూ అడగండి.")
+            return _pick("Your latest claim was blocked due to fraud-risk checks. You can ask for manual review.", "Latest claim is blocked by fraud-risk checks. Request manual review if needed.")
         if dec == DecisionType.REJECTED.value:
-            return "Your latest claim was rejected because disruption or activity checks did not meet payout rules."
+            if _norm_lang(lang) == "hi":
+                return _pick("व्यवधान/गतिविधि शर्तें पूरी न होने से आपका क्लेम रिजेक्ट हुआ।", "क्लेम भुगतान नियमों से मेल नहीं खाया, इसलिए अस्वीकृत हुआ।")
+            if _norm_lang(lang) == "te":
+                return _pick("అంతరాయం/కార్యకలాప షరతులు సరిపోక మీ క్లెయిమ్ తిరస్కరించబడింది.", "చెల్లింపు నియమాలకు సరిపోక క్లెయిమ్ reject అయింది.")
+            return _pick("Your latest claim was rejected because checks did not meet payout rules.", "Claim rejected as disruption/activity checks did not satisfy payout rules.")
 
-    return _fallback_system_reply(msg)
+    return _fallback_localized(lang, msg)
 
 
 def _as_utc_iso(dt: Any) -> str:
@@ -193,7 +296,7 @@ async def create_support_query(
     ).scalar_one_or_none()
     sys_reply = _predefined_reply(body.language, str(body.query_key or ""), _support_values(life, sim))
     if not sys_reply:
-        sys_reply = await _auto_system_reply(db, uid, body.message)
+        sys_reply = await _auto_system_reply(db, uid, body.message, body.language)
     row = SupportQuery(
         user_id=uid,
         message=body.message.strip(),

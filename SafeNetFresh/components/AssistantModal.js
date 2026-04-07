@@ -76,6 +76,23 @@ export default function AssistantModal({ visible, onClose }) {
   });
 
   const items = useMemo(() => (Array.isArray(historyQuery.data) ? historyQuery.data : []), [historyQuery.data]);
+  const dateFmt = useMemo(
+    () =>
+      new Intl.DateTimeFormat('en-IN', {
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+      }),
+    []
+  );
+  const timeFmt = useMemo(
+    () =>
+      new Intl.DateTimeFormat('en-IN', {
+        hour: '2-digit',
+        minute: '2-digit',
+      }),
+    []
+  );
 
   const send = (text, type = 'custom', queryKey = null) => {
     const trimmed = String(text || '').trim();
@@ -128,23 +145,39 @@ export default function AssistantModal({ visible, onClose }) {
             ) : items.length === 0 ? (
               <Text style={styles.empty}>Ask a question. Support and admin replies will appear here.</Text>
             ) : (
-              items.map((row) => (
-                <View key={String(row.id)} style={{ marginBottom: 12 }}>
-                  <View style={[styles.bubble, styles.userBubble]}>
-                    <Text style={styles.userText}>{row.message}</Text>
-                  </View>
-                  <View style={[styles.bubble, styles.systemBubble]}>
-                    <Text style={styles.sysLabel}>System</Text>
-                    <Text style={styles.sysText}>{row.reply}</Text>
-                  </View>
-                  {row.admin_reply ? (
-                    <View style={[styles.bubble, styles.adminBubble]}>
-                      <Text style={styles.adminLabel}>Admin</Text>
-                      <Text style={styles.adminText}>{row.admin_reply}</Text>
+              items.map((row, idx) => {
+                const created = new Date(row?.created_at || Date.now());
+                const dayKey = Number.isNaN(created.getTime()) ? `d-${idx}` : created.toDateString();
+                const prev = idx > 0 ? new Date(items[idx - 1]?.created_at || Date.now()) : null;
+                const showDay = !prev || prev.toDateString() !== dayKey;
+                const dayText = Number.isNaN(created.getTime()) ? 'Today' : dateFmt.format(created);
+                const timeText = Number.isNaN(created.getTime()) ? '--:--' : timeFmt.format(created);
+                return (
+                  <View key={String(row.id)} style={{ marginBottom: 12 }}>
+                    {showDay ? (
+                      <View style={styles.dayPillWrap}>
+                        <Text style={styles.dayPillText}>{dayText}</Text>
+                      </View>
+                    ) : null}
+                    <View style={[styles.bubble, styles.userBubble]}>
+                      <Text style={styles.userText}>{row.message}</Text>
+                      <Text style={styles.userTime}>{timeText}</Text>
                     </View>
-                  ) : null}
-                </View>
-              ))
+                    <View style={[styles.bubble, styles.systemBubble]}>
+                      <Text style={styles.sysLabel}>System</Text>
+                      <Text style={styles.sysText}>{row.reply}</Text>
+                      <Text style={styles.msgTime}>{timeText}</Text>
+                    </View>
+                    {row.admin_reply ? (
+                      <View style={[styles.bubble, styles.adminBubble]}>
+                        <Text style={styles.adminLabel}>Admin</Text>
+                        <Text style={styles.adminText}>{row.admin_reply}</Text>
+                        <Text style={styles.msgTime}>{timeText}</Text>
+                      </View>
+                    ) : null}
+                  </View>
+                );
+              })
             )}
           </ScrollView>
 
@@ -197,16 +230,28 @@ const styles = StyleSheet.create({
   close: { color: '#1a73e8', fontWeight: '700' },
   history: { marginTop: 10, maxHeight: 380 },
   historyContent: { paddingBottom: 8 },
+  dayPillWrap: { alignItems: 'center', marginVertical: 4 },
+  dayPillText: {
+    fontSize: 11,
+    color: '#475569',
+    backgroundColor: '#e2e8f0',
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    fontWeight: '700',
+  },
   empty: { color: '#64748b', fontSize: 13 },
   bubble: { borderRadius: 12, padding: 10, marginTop: 6, maxWidth: '90%' },
   userBubble: { alignSelf: 'flex-end', backgroundColor: '#1a73e8' },
   userText: { color: '#fff', fontWeight: '700' },
+  userTime: { color: 'rgba(255,255,255,0.8)', fontSize: 10, marginTop: 6, textAlign: 'right' },
   systemBubble: { alignSelf: 'flex-start', backgroundColor: '#f1f5f9', borderWidth: 1, borderColor: '#e2e8f0' },
   sysLabel: { fontSize: 10, fontWeight: '900', color: '#475569', marginBottom: 4, textTransform: 'uppercase' },
   sysText: { color: '#0f172a', fontSize: 13 },
   adminBubble: { alignSelf: 'flex-start', backgroundColor: '#ecfeff', borderWidth: 1, borderColor: '#bae6fd' },
   adminLabel: { fontSize: 10, fontWeight: '900', color: '#0c4a6e', marginBottom: 4, textTransform: 'uppercase' },
   adminText: { color: '#0f172a', fontSize: 13, fontWeight: '700' },
+  msgTime: { color: '#64748b', fontSize: 10, marginTop: 6, textAlign: 'right' },
   quickRow: { gap: 8, paddingVertical: 8 },
   quickBtn: { borderRadius: 999, borderWidth: 1, borderColor: '#dbeafe', backgroundColor: '#eff6ff', paddingVertical: 6, paddingHorizontal: 10 },
   quickText: { color: '#1d4ed8', fontSize: 12, fontWeight: '700' },

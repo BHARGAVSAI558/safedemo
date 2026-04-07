@@ -1,117 +1,93 @@
 # 🛡️ SafeNet — AI Income Protection for Gig Workers
 
-> Built for **DevTrails 2026 — Scale (Phase 2)** | Team AlphaNexus
+> **Guidewire DevTrails 2026 — Phase 2 (Scale)** | Team AlphaNexus  
+> *"SafeNet doesn't ask you to prove anything. It proves it for you."*
 
 ---
 
-## 🚀 Live Links
+## 🚀 Try It Now — Everything is Live
 
-| What | URL |
-|------|-----|
-| 📱 **Mobile App** | Scan QR below with Expo Go or ([https://safenet-sage.vercel.app/](https://safenet-sage.vercel.app/))|
-| 🌐 **Admin Dashboard** | [https://safenet-admin-wine.vercel.app/login](https://safenet-admin-wine.vercel.app/login) |
-| ⚙️ **Backend API** | [https://safenet-api-y4se.onrender.com](https://safenet-api-y4se.onrender.com) |
-| ❤️ **Health Check** | [https://safenet-api-y4se.onrender.com/health](https://safenet-api-y4se.onrender.com/health) |
-| 💻 **GitHub** | [https://github.com/BHARGAVSAI558/devtrails-2026-alphanexus-phase2](https://github.com/BHARGAVSAI558/devtrails-2026-alphanexus-phase2) |
-
----
-
-## 🆕 Latest Updates (Apr 2026)
-
-- **Assistant localization (EN/HI/TE):** Added in-app language switch (`🌐`) in support chat for English, Hindi, and Telugu quick queries and responses.
-- **Smarter support routing:** Predefined assistant queries now get mapped responses; only custom user-typed queries are sent to admin support queue.
-- **Earnings DNA simplified:** Reduced to quick snapshot format (live status, heatmap, next peak, today potential, and week progress) for 2–3 second readability.
-- **Payout realism improved:** Demo flow now follows a realistic cadence (e.g., 2 paid runs then 1 no-disruption) with deterministic payout values instead of random jumps.
-- **User/Admin consistency:** Claim decision and payout behavior was aligned so worker and admin panels stay in sync with stored outcomes.
-- **Admin KPI upgrade:** Dashboard now includes pooled-vs-paid visibility for weekly pool monitoring.
+| | URL | Notes |
+|--|--|--|
+| 📱 **Worker App** | **[https://safenet-sage.vercel.app](https://safenet-sage.vercel.app)** | Open on any phone browser |
+| 🖥️ **Admin Dashboard** | **[https://safenet-admin-wine.vercel.app](https://safenet-admin-wine.vercel.app)** | Login: `admin` / `admin123` |
+| ⚙️ **Backend API** | [https://safenet-api-y4se.onrender.com](https://safenet-api-y4se.onrender.com) | FastAPI on Render |
+| ❤️ **Health Check** | [https://safenet-api-y4se.onrender.com/health](https://safenet-api-y4se.onrender.com/health) | Should return `{"status":"ok"}` |
+| 🎬 **Demo Video** | [Watch on YouTube](https://youtube.com/shorts/KdsrN05xIyM) | 2-minute walkthrough |
+| 💻 **GitHub** | [devtrails-2026-alphanexus-phase2](https://github.com/BHARGAVSAI558/devtrails-2026-alphanexus-phase2) | Full source code |
 
 ---
 
-## 📱 Try the Mobile App — 3 Steps
+## ⚡ 60-Second Judge Demo
 
-### Step 1 — Install Expo Go on your phone
+**On your phone — right now:**
 
-| Platform | Link |
-|----------|------|
-| 🍎 iPhone | [App Store → search "Expo Go"](https://apps.apple.com/app/expo-go/id982107779) |
-| 🤖 Android | [Play Store → search "Expo Go"](https://play.google.com/store/apps/details?id=host.exp.exponent) |
+1. Open **[https://safenet-sage.vercel.app](https://safenet-sage.vercel.app)**
+2. Enter any 10-digit number → OTP appears on screen → enter it
+3. Select **Zomato** → **Kukatpally** → **Evening 6–10 PM** → **Standard ₹49/week**
+4. Dashboard loads with **live weather**, **real AQI**, and your **Earnings DNA heatmap**
+5. Tap **"Simulate Disruption"** → choose **Heavy Rain**
+6. Watch: Detected → Verifying → Fraud Check → Decision in real time
+
+**On laptop (same time):**
+- Open [https://safenet-admin-wine.vercel.app](https://safenet-admin-wine.vercel.app)
+- Login with `admin` / `admin123`
+- See the same claim in the **live admin feed**
 
 ---
 
-### Step 2 — Scan this QR code
+## 📱 Mobile App — 3 Ways to Access
 
-Open **Expo Go** on your phone → tap **"Scan QR Code"** → scan below:
+### Option 1 — Browser (fastest, no install)
+👉 **[https://safenet-sage.vercel.app](https://safenet-sage.vercel.app)**
+
+### Option 2 — Expo Go
+Install Expo Go and scan this QR:
 
 ![SafeNet Worker App QR](safenet_v2/admin/public/worker-app-qr.png)
 
-Fallback link: `exp://u.expo.dev/2d45889e-9415-4966-be7f-ba2711a57f13/group/b2d4e11e-ec7a-421f-b60e-75132863e7be`
+Fallback:
+`exp://u.expo.dev/2d45889e-9415-4966-be7f-ba2711a57f13/group/b2d4e11e-ec7a-421f-b60e-75132863e7be`
 
-> **OR** — run it yourself in 30 seconds:
-> ```bash
-> git clone https://github.com/BHARGAVSAI558/devtrails-2026-alphanexus-phase2
-> cd devtrails-2026-alphanexus-phase2/SafeNetFresh
-> npm install
-> npm start
-> ```
-> (`npm start` runs `expo start --lan` so your phone uses the correct LAN URL.) Then scan the QR with Expo Go.
-
----
-
-### Step 3 — App loads instantly
-
-- Enter your phone number → receive OTP → verify
-- Set up your gig worker profile (platform, zone, coverage tier)
-- Dashboard shows live zone status, coverage, and earnings protection
-- Tap **"Simulate Disruption"** to watch a live claim flow end-to-end (verification → fraud checks → decision)
+### Option 3 — Run locally
+```bash
+git clone https://github.com/BHARGAVSAI558/devtrails-2026-alphanexus-phase2
+cd devtrails-2026-alphanexus-phase2/SafeNetFresh
+npm install && npm start
+```
 
 ---
 
-## 🌐 Try the Admin Dashboard
+## 🎯 What Makes SafeNet Different
 
-1. Open [https://safenet-admin-wine.vercel.app/login](https://safenet-admin-wine.vercel.app/login) (or run `safenet_v2/admin` locally — see [Local development](#local-development)).
-2. Sign in with **username** `admin` and **password** `admin123` (web admin only; workers still use OTP in the mobile app). Override in production with API env vars `ADMIN_DASHBOARD_USERNAME` / `ADMIN_DASHBOARD_PASSWORD`.
-3. Explore live claims feed, fraud queue, zone heatmap, workers, and simulations.
-
----
-
-## 💡 What is SafeNet?
-
-SafeNet protects gig workers (Zomato/Swiggy delivery riders) from income loss caused by disruptions — heavy rain, extreme heat, curfew, or AQI spikes.
-
-When a disruption hits:
-1. 🔍 **Detected** — weather/AQI/event signals trigger automatically
-2. ✅ **Verified** — 4-layer fraud engine checks GPS, behavior, cluster, enrollment
-3. 💰 **Paid** — payout credited to worker wallet in seconds
+- **Earnings DNA**: personalized hour/day earning fingerprint (not flat payouts)
+- **Forecast Shield**: proactive cover upgrades before forecasted risk windows
+- **Zero-touch claims**: disruption detect → verify → fraud checks → decision
+- **4-layer fraud engine**: GPS integrity, cross-signal checks, cluster/ring checks, enrollment anomalies
+- **In-app multilingual assistant**: English, Hindi, Telugu with admin reply loop
 
 ---
 
-## 🏗️ Architecture
+## 🆕 Recent Product Updates
 
-```mermaid
-flowchart TB
-  subgraph Mobile["📱 SafeNetFresh (Expo)"]
-    RN[React Native UI]
-    API_JS[services/api.js]
-    WS_M[WebSocket Client]
-  end
+- Assistant now supports **language switch** (`🌐`) for EN/HI/TE
+- Predefined queries return **correct mapped responses** per language
+- Only **custom typed support messages** go to admin queue (predefined excluded)
+- Earnings DNA simplified to quick snapshot: live status, heatmap, next peak, today potential, week progress
+- Demo payouts follow realistic cadence and deterministic amounts
+- Admin KPIs include pooled vs paid weekly visibility
 
-  subgraph Admin["🖥️ Admin Dashboard (Vite + React)"]
-    ADM_UI[Live Feed + Analytics]
-    WS_A[WebSocket Client]
-  end
+---
 
-  subgraph Backend["⚙️ FastAPI Backend (Render)"]
-    REST[REST /api/v1/*]
-    WSS[WebSockets /ws/*]
-    ENG[ML Engines: fraud, premium, payout]
-    PG[(PostgreSQL)]
-  end
+## 🏗️ System Architecture (Overview)
 
-  RN --> API_JS --> REST
-  WS_M --> WSS
-  WS_A --> WSS
-  ADM_UI --> REST
-  REST --> ENG --> PG
+```text
+Worker App (Expo/Web) + Admin (React)
+            │ REST + WebSocket
+            ▼
+     FastAPI Backend (Render)
+            │
+   PostgreSQL + Redis + External APIs
 ```
 
 ---
@@ -120,24 +96,12 @@ flowchart TB
 
 | Layer | Technology |
 |-------|-----------|
-| Mobile | React Native, Expo, Zustand, TanStack Query |
-| Admin | React, Vite, TypeScript, TailwindCSS, Recharts |
-| Backend | FastAPI, SQLAlchemy, PostgreSQL, Alembic |
-| ML | scikit-learn, XGBoost, joblib |
+| Worker App | React Native, Expo, Expo Web |
+| Admin | React, Vite, TypeScript, Tailwind, Recharts |
+| Backend | FastAPI, SQLAlchemy, Alembic |
+| ML | XGBoost, scikit-learn |
 | Real-time | WebSockets, Redis pub/sub |
-| Deployment | Render (backend), Vercel (admin) |
-
----
-
-## 📁 Project Structure
-
-```
-/
-├── safenet_v2/
-│   ├── backend/        ← FastAPI backend (deployed on Render)
-│   └── admin/          ← React admin dashboard (deployed on Vercel)
-└── SafeNetFresh/       ← Expo mobile app
-```
+| Deployment | Render (backend), Vercel (frontend) |
 
 ---
 
