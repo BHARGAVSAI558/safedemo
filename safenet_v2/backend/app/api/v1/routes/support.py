@@ -20,6 +20,8 @@ class SupportQueryBody(BaseModel):
     user_id: str | None = None
     message: str = Field(..., min_length=2, max_length=2000)
     type: str = Field(default="custom")
+    language: str = Field(default="en")
+    query_key: str | None = None
 
 
 class SupportReplyBody(BaseModel):
@@ -36,6 +38,76 @@ def _fallback_system_reply(msg: str) -> str:
     if "weather" in t or "rain" in t:
         return "Weather risk is monitored for your zone continuously. If disruption is verified, SafeNet evaluates payout automatically."
     return "Thanks for reaching out. We logged your query and our team can reply here shortly."
+
+
+def _support_values(life: ClaimLifecycle | None, sim: Simulation | None) -> dict[str, str]:
+    disruption_signal = "Moderate"
+    activity_change = "Normal"
+    fraud_check = "Clear"
+    final_status = "Under review"
+    disruption_level = "Low"
+    fraud_signals = "No major signals"
+    decision = "Pending"
+    if life is not None:
+        st = str(life.status or "").upper()
+        if st in {"VERIFYING", "BEHAVIORAL_CHECK", "FRAUD_CHECK", "REVALIDATING"}:
+            disruption_signal, activity_change, final_status = "Detected", "Shifted", "Under review"
+            disruption_level = "Moderate"
+        elif st in {"APPROVED", "PAYOUT_DONE", "PAYOUT_CREDITED"}:
+            disruption_signal, activity_change, final_status = "Strong", "Significant drop", "Approved"
+            disruption_level, decision = "High", "Approved"
+        elif st in {"REJECTED", "CLAIM_REJECTED", "BLOCKED"}:
+            disruption_signal, activity_change, final_status = "Weak", "Near normal", "Rejected"
+            disruption_level, decision = "Low", "Rejected"
+    if sim is not None:
+        dec = str(sim.decision.value if hasattr(sim.decision, "value") else sim.decision).upper()
+        if dec == DecisionType.FRAUD.value:
+            fraud_check, fraud_signals, decision = "Flagged", "Pattern mismatch", "Fraud blocked"
+        elif dec == DecisionType.APPROVED.value:
+            fraud_check, fraud_signals, decision = "Clear", "No major signals", "Approved"
+        elif dec == DecisionType.REJECTED.value:
+            decision = "Rejected"
+    return {
+        "disruption_signal": disruption_signal,
+        "activity_change": activity_change,
+        "fraud_check": fraud_check,
+        "final_status": final_status,
+        "disruption_level": disruption_level,
+        "fraud_signals": fraud_signals,
+        "decision": decision,
+    }
+
+
+def _predefined_reply(lang: str, key: str, vals: dict[str, str]) -> str | None:
+    l = "hi" if str(lang).lower().startswith("hi") else "te" if str(lang).lower().startswith("te") else "en"
+    m: dict[str, dict[str, str]] = {
+        "en": {
+            "no_payout": "We checked your situation carefully.\n\n• Disruption in your zone: Not strong enough\n• Your activity: Still within normal range\n\nSince both conditions were not met together, payout was not triggered.",
+            "claim_status": "Here’s your current claim status:\n\n• Disruption signal: {disruption_signal}\n• Activity change: {activity_change}\n• Fraud check: {fraud_check}\n\nFinal status: {final_status}",
+            "disruption_active": "Current zone status:\n\n• Signal strength: {disruption_signal}\n• Disruption level: {disruption_level}",
+            "payment_delayed": "Your claim is under verification. This may take up to 30 minutes.",
+            "explain_claim": "Here’s how your claim was evaluated:\n\n• Disruption detected: {disruption_signal}\n• Activity drop: {activity_change}\n• Fraud signals: {fraud_signals}\n\nDecision: {decision}",
+            "coverage": "Your coverage is active.",
+        },
+        "hi": {
+            "no_payout": "हमने आपकी स्थिति की जांच की।\n\n• आपके क्षेत्र में व्यवधान: पर्याप्त नहीं\n• आपकी गतिविधि: सामान्य स्तर पर\n\nदोनों शर्तें पूरी नहीं होने के कारण भुगतान नहीं हुआ।",
+            "claim_status": "यह आपके क्लेम की स्थिति है:\n\n• व्यवधान संकेत: {disruption_signal}\n• गतिविधि में बदलाव: {activity_change}\n• धोखाधड़ी जांच: {fraud_check}\n\nअंतिम स्थिति: {final_status}",
+            "disruption_active": "वर्तमान स्थिति:\n\n• संकेत स्तर: {disruption_signal}\n• व्यवधान स्तर: {disruption_level}",
+            "payment_delayed": "आपका क्लेम सत्यापन में है। इसमें 30 मिनट तक लग सकते हैं।",
+            "explain_claim": "आपके क्लेम का मूल्यांकन:\n\n• व्यवधान: {disruption_signal}\n• गतिविधि में गिरावट: {activity_change}\n• धोखाधड़ी संकेत: {fraud_signals}\n\nनिर्णय: {decision}",
+            "coverage": "आपकी कवरेज सक्रिय है।",
+        },
+        "te": {
+            "no_payout": "మీ పరిస్థితిని పరిశీలించాము।\n\n• మీ ప్రాంతంలో అంతరాయం: తక్కువ\n• మీ కార్యకలాపం: సాధారణ స్థాయిలో ఉంది\n\nఈ రెండు షరతులు కలిసిరాకపోవడంతో చెల్లింపు జరగలేదు।",
+            "claim_status": "మీ క్లెయిమ్ స్థితి:\n\n• అంతరాయం స్థాయి: {disruption_signal}\n• కార్యకలాప మార్పు: {activity_change}\n• మోసం తనిఖీ: {fraud_check}\n\nచివరి స్థితి: {final_status}",
+            "disruption_active": "ప్రస్తుత స్థితి:\n\n• సంకేత బలం: {disruption_signal}\n• అంతరాయం స్థాయి: {disruption_level}",
+            "payment_delayed": "మీ క్లెయిమ్ పరిశీలనలో ఉంది। ఇది 30 నిమిషాల వరకు పట్టవచ్చు।",
+            "explain_claim": "మీ క్లెయిమ్ విశ్లేషణ:\n\n• అంతరాయం: {disruption_signal}\n• కార్యకలాపం తగ్గుదల: {activity_change}\n• మోసం సంకేతాలు: {fraud_signals}\n\nతీర్మానం: {decision}",
+            "coverage": "మీ కవరేజ్ సక్రియంగా ఉంది।",
+        },
+    }
+    tpl = m.get(l, m["en"]).get(key)
+    return tpl.format(**vals) if tpl else None
 
 
 async def _auto_system_reply(db: AsyncSession, user_id: int, msg: str) -> str:
@@ -103,7 +175,25 @@ async def create_support_query(
         asked = int(str(body.user_id).strip())
         if asked == current_user.id:
             uid = asked
-    sys_reply = await _auto_system_reply(db, uid, body.message)
+    life = (
+        await db.execute(
+            select(ClaimLifecycle)
+            .where(ClaimLifecycle.user_id == uid)
+            .order_by(ClaimLifecycle.created_at.desc(), ClaimLifecycle.id.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    sim = (
+        await db.execute(
+            select(Simulation)
+            .where(Simulation.user_id == uid)
+            .order_by(Simulation.created_at.desc(), Simulation.id.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    sys_reply = _predefined_reply(body.language, str(body.query_key or ""), _support_values(life, sim))
+    if not sys_reply:
+        sys_reply = await _auto_system_reply(db, uid, body.message)
     row = SupportQuery(
         user_id=uid,
         message=body.message.strip(),

@@ -319,8 +319,8 @@ export const zones = {
 };
 
 export const support = {
-  query: async ({ user_id, message, type = 'custom' }) =>
-    unwrap(await api.post('/support/query', { user_id, message, type })),
+  query: async ({ user_id, message, type = 'custom', language = 'en', query_key = null }) =>
+    unwrap(await api.post('/support/query', { user_id, message, type, language, query_key })),
   history: async (userId) =>
     unwrap(await api.get('/support/history', { params: { user_id: userId } })),
 };

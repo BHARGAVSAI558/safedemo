@@ -903,7 +903,12 @@ async def list_support_queries(
     admin: User = Depends(get_admin_user),
     db: AsyncSession = Depends(get_db),
 ):
-    stmt = select(SupportQuery).order_by(SupportQuery.created_at.desc(), SupportQuery.id.desc()).limit(500)
+    stmt = (
+        select(SupportQuery)
+        .where(SupportQuery.query_type == "custom")
+        .order_by(SupportQuery.created_at.desc(), SupportQuery.id.desc())
+        .limit(500)
+    )
     if status in {"open", "resolved"}:
         stmt = stmt.where(SupportQuery.status == status)
     rows = (await db.execute(stmt)).scalars().all()

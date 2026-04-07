@@ -682,30 +682,11 @@ export default function DashboardScreen({ navigation }) {
     const high = Math.round(total * 1.12);
     return { low: Math.max(250, low), high: Math.max(350, high) };
   }, [dnaData?.dna]);
-  const weeklyTrend = useMemo(() => {
-    const exp = Number(dnaData?.weekly_expected || 0);
-    const act = Number(dnaData?.weekly_actual || 0);
-    if (exp <= 0) return 0;
-    return Math.round(((act - exp * 0.75) / Math.max(1, exp * 0.75)) * 100);
-  }, [dnaData?.weekly_expected, dnaData?.weekly_actual]);
-  const smartInsight = useMemo(() => {
-    const pk = dnaData?.peak_window;
-    if (!pk) return '💡 Keep running demo claims to unlock smarter earning insights.';
-    const boost = Math.max(10, Math.round((Number(pk.avg_earnings || 0) / Math.max(1, liveBand.min) - 1) * 100));
-    return `💡 You earn about ${boost}% more during ${pk.day_name} ${formatDnaHour12Long(pk.hour_start)}-${formatDnaHour12Long(
-      pk.hour_end
-    )}.`;
-  }, [dnaData?.peak_window, liveBand.min]);
   const nextBestLabel = useMemo(() => {
     const pk = dnaData?.peak_window;
     if (!pk) return '⏳ Next peak: loading…';
     return `⏳ Next peak: ${pk.day_name} ${formatDnaHour12Long(pk.hour_start)}-${formatDnaHour12Long(pk.hour_end)}`;
   }, [dnaData?.peak_window]);
-  const expectedRange = useMemo(() => {
-    const exp = Number(dnaData?.weekly_expected || 0);
-    if (!exp) return { low: 850, high: 1200 };
-    return { low: Math.round(exp * 0.8), high: Math.round(exp * 1.12) };
-  }, [dnaData?.weekly_expected]);
 
   const istDnaRow = getIstWeekdayMon0();
   const istDnaHour = getIstHour();
@@ -1121,23 +1102,9 @@ export default function DashboardScreen({ navigation }) {
         >
           <View style={{ flex: 1 }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-              <Text style={[styles.sectionTitle, { color: colors.text }]}>AI Earnings DNA</Text>
-              <Text style={{ fontSize: 16 }} accessibilityLabel="About Earnings DNA">
-                ℹ️
-              </Text>
+              <Text style={[styles.sectionTitle, { color: colors.text }]}>Earnings DNA</Text>
             </View>
-            <Text style={[styles.cardSub, { color: colors.muted }]}>
-              {dnaUpdatedText ? `${dnaUpdatedText} · ` : ''}
-              {istTodayLine} (IST). Rows Mon–Sun match this week.
-            </Text>
-            <Text style={[styles.dnaAiLabel, { color: colors.primary }]}>AI-powered Earnings Intelligence</Text>
-            <Text style={[styles.cardSub, { color: colors.muted, marginTop: 4 }]}>
-              {dnaExpanded
-                ? 'Tap to collapse · darker green = busier hours (typical ₹/hr)'
-                : dnaQuery.data?.peak_window?.label
-                  ? `${dnaQuery.data.peak_window.label} · tap to expand`
-                  : 'Your ride-time earning pattern · tap to expand'}
-            </Text>
+            <Text style={[styles.cardSub, { color: colors.muted }]}>🟢 Live • updated just now</Text>
           </View>
           <Text style={[styles.dnaChevron, { color: colors.primary }]}>{dnaExpanded ? '▲' : '▼'}</Text>
         </TouchableOpacity>
@@ -1240,35 +1207,11 @@ export default function DashboardScreen({ navigation }) {
                 </View>
               </View>
             </View>
-            {dnaQuery.data.peak_window?.label ? (
-              <View style={styles.dnaPeakBadge}>
-                <Text style={[styles.dnaPeakBadgeText, { color: colors.primary }]}>{dnaQuery.data.peak_window.label}</Text>
-              </View>
-            ) : null}
-            <Text style={[styles.dnaInsightLine, { color: colors.text }]}>📊 Today’s potential: ₹{todayPotential.low}–₹{todayPotential.high}</Text>
-            <Text style={[styles.dnaInsightLine, { color: colors.text }]}>{smartInsight}</Text>
             <Text style={[styles.dnaInsightLine, { color: colors.text }]}>{nextBestLabel}</Text>
+            <Text style={[styles.dnaTodayPotential, { color: colors.text }]}>₹{todayPotential.low}–₹{todayPotential.high} today</Text>
             <Text style={[styles.dnaInsightLine, { color: colors.text }]}>
-              📈 Weekly trend {weeklyTrend >= 0 ? 'improving' : 'cooling'} ({weeklyTrend >= 0 ? '+' : ''}
-              {weeklyTrend}% vs baseline)
+              ₹{Math.round(Number(dnaQuery.data.weekly_actual || 0))} / ₹{Math.round(Number(dnaQuery.data.weekly_expected || 0))} expected
             </Text>
-            <Text style={[styles.dnaInsightLine, { color: colors.text }]}>
-              🌧️ Weather + demand: rain windows usually increase evening payout chance.
-            </Text>
-            <View style={styles.dnaMetricsRow}>
-              <View style={{ flex: 1 }}>
-                <Text style={[styles.dnaSummaryLabel, { color: colors.muted }]}>Expected this week</Text>
-                <Text style={[styles.dnaSummaryVal, { color: colors.text }]}>
-                  ₹{expectedRange.low}–₹{expectedRange.high}
-                </Text>
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={[styles.dnaSummaryLabel, { color: colors.muted }]}>Actual</Text>
-                <Text style={[styles.dnaSummaryVal, { color: colors.text }]}>
-                  ₹{Math.round(Number(dnaQuery.data.weekly_actual || 0))}
-                </Text>
-              </View>
-            </View>
             <View style={[styles.dnaProgressTrack, { backgroundColor: colors.border }]}>
               <View
                 style={[
@@ -1285,25 +1228,7 @@ export default function DashboardScreen({ navigation }) {
                 ]}
               />
             </View>
-            <Text style={[styles.dnaConfNote, { color: colors.muted }]}>
-              ⚠️ Demo data — values will adjust with real usage.
-            </Text>
-            <Text style={[styles.dnaConfNote, { color: colors.muted }]}>
-              {(dnaQuery.data.simulation_count ?? 0) >= 14
-                ? `Based on about ${Number(dnaQuery.data.data_weeks_equivalent ?? (dnaQuery.data.simulation_count || 0) / 14).toFixed(1)} weeks of ride patterns`
-                : 'Pattern fills in as you complete more shifts and demos'}
-            </Text>
-            <TouchableOpacity
-              style={[styles.optimizeBtn, { backgroundColor: `${colors.primary}15`, borderColor: `${colors.primary}33` }]}
-              onPress={() =>
-                Alert.alert(
-                  'Optimize my earnings',
-                  `${nextBestLabel}\nPotential gain tonight: ~₹${Math.max(80, Math.round((todayPotential.high - todayPotential.low) * 0.45))}`
-                )
-              }
-            >
-              <Text style={[styles.optimizeBtnText, { color: colors.primary }]}>Optimize my earnings</Text>
-            </TouchableOpacity>
+            <Text style={[styles.dnaConfNote, { color: colors.muted }]}>This week earnings snapshot</Text>
           </>
         ) : null}
       </View>

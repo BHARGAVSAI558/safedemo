@@ -6,17 +6,51 @@ import AppModal from './AppModal';
 import { support } from '../services/api';
 import { useAuth } from '../contexts/AuthContext';
 
-const QUICK_ACTIONS = [
-  'Why no payout?',
-  'Claim still under review',
-  'Need help with coverage plan',
-  'How is payout calculated?',
-];
+const assistantContent = {
+  en: {
+    label: 'English',
+    queries: [
+      { key: 'no_payout', text: "Why didn’t I get payout?" },
+      { key: 'claim_status', text: 'Check my claim status' },
+      { key: 'disruption_active', text: 'Is disruption active?' },
+      { key: 'payment_delayed', text: 'Payment delayed?' },
+      { key: 'explain_claim', text: 'Explain my claim' },
+      { key: 'coverage', text: 'Am I covered?' },
+    ],
+    placeholder: 'Type your message...',
+  },
+  hi: {
+    label: 'हिन्दी',
+    queries: [
+      { key: 'no_payout', text: 'मुझे भुगतान क्यों नहीं मिला?' },
+      { key: 'claim_status', text: 'मेरे क्लेम की स्थिति क्या है?' },
+      { key: 'disruption_active', text: 'क्या अभी व्यवधान सक्रिय है?' },
+      { key: 'payment_delayed', text: 'भुगतान में देरी क्यों है?' },
+      { key: 'explain_claim', text: 'मेरे क्लेम की जानकारी बताएं' },
+      { key: 'coverage', text: 'क्या मैं अभी कवर में हूँ?' },
+    ],
+    placeholder: 'अपना संदेश लिखें...',
+  },
+  te: {
+    label: 'తెలుగు',
+    queries: [
+      { key: 'no_payout', text: 'నాకు చెల్లింపు ఎందుకు రాలేదు?' },
+      { key: 'claim_status', text: 'నా క్లెయిమ్ స్థితి ఏమిటి?' },
+      { key: 'disruption_active', text: 'ప్రస్తుతం అంతరాయం ఉందా?' },
+      { key: 'payment_delayed', text: 'చెల్లింపు ఆలస్యం ఎందుకు?' },
+      { key: 'explain_claim', text: 'నా క్లెయిమ్ వివరాలు చెప్పండి' },
+      { key: 'coverage', text: 'నేను ప్రస్తుతం కవర్లో ఉన్నానా?' },
+    ],
+    placeholder: 'మీ సందేశాన్ని టైప్ చేయండి...',
+  },
+};
 
 export default function AssistantModal({ visible, onClose }) {
   const { userId } = useAuth();
   const qc = useQueryClient();
   const [message, setMessage] = useState('');
+  const [selectedLanguage, setSelectedLanguage] = useState('en');
+  const [languageOpen, setLanguageOpen] = useState(false);
 
   const historyQuery = useQuery({
     queryKey: ['supportHistory', userId],
@@ -27,8 +61,14 @@ export default function AssistantModal({ visible, onClose }) {
   });
 
   const sendMutation = useMutation({
-    mutationFn: ({ text, type }) =>
-      support.query({ user_id: String(userId || ''), message: text, type }),
+    mutationFn: ({ text, type, queryKey }) =>
+      support.query({
+        user_id: String(userId || ''),
+        message: text,
+        type,
+        language: selectedLanguage,
+        query_key: queryKey || null,
+      }),
     onSuccess: () => {
       setMessage('');
       void qc.invalidateQueries({ queryKey: ['supportHistory', userId] });
@@ -37,11 +77,12 @@ export default function AssistantModal({ visible, onClose }) {
 
   const items = useMemo(() => (Array.isArray(historyQuery.data) ? historyQuery.data : []), [historyQuery.data]);
 
-  const send = (text, type = 'custom') => {
+  const send = (text, type = 'custom', queryKey = null) => {
     const trimmed = String(text || '').trim();
     if (!trimmed || sendMutation.isPending) return;
-    sendMutation.mutate({ text: trimmed, type });
+    sendMutation.mutate({ text: trimmed, type, queryKey });
   };
+  const languagePack = assistantContent[selectedLanguage] || assistantContent.en;
 
   return (
     <AppModal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
@@ -49,10 +90,37 @@ export default function AssistantModal({ visible, onClose }) {
         <View style={styles.card}>
           <View style={styles.head}>
             <Text style={styles.title}>Support Assistant</Text>
-            <TouchableOpacity onPress={onClose}>
-              <Text style={styles.close}>Close</Text>
-            </TouchableOpacity>
+            <View style={styles.headActions}>
+              <TouchableOpacity style={styles.langBtn} onPress={() => setLanguageOpen((v) => !v)}>
+                <Text style={styles.langBtnText}>🌐 {languagePack.label}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={onClose}>
+                <Text style={styles.close}>Close</Text>
+              </TouchableOpacity>
+            </View>
           </View>
+          {languageOpen ? (
+            <View style={styles.langMenu}>
+              {[
+                { id: 'en', label: 'English' },
+                { id: 'hi', label: 'हिन्दी' },
+                { id: 'te', label: 'తెలుగు' },
+              ].map((row) => (
+                <TouchableOpacity
+                  key={row.id}
+                  style={[styles.langItem, selectedLanguage === row.id && styles.langItemActive]}
+                  onPress={() => {
+                    setSelectedLanguage(row.id);
+                    setLanguageOpen(false);
+                  }}
+                >
+                  <Text style={[styles.langItemText, selectedLanguage === row.id && styles.langItemTextActive]}>
+                    {row.label}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          ) : null}
 
           <ScrollView style={styles.history} contentContainerStyle={styles.historyContent}>
             {historyQuery.isLoading ? (
@@ -81,9 +149,9 @@ export default function AssistantModal({ visible, onClose }) {
           </ScrollView>
 
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.quickRow}>
-            {QUICK_ACTIONS.map((q) => (
-              <TouchableOpacity key={q} style={styles.quickBtn} onPress={() => send(q, 'predefined')}>
-                <Text style={styles.quickText}>{q}</Text>
+            {languagePack.queries.map((q) => (
+              <TouchableOpacity key={`${selectedLanguage}-${q.key}`} style={styles.quickBtn} onPress={() => send(q.text, 'predefined', q.key)}>
+                <Text style={styles.quickText}>{q.text}</Text>
               </TouchableOpacity>
             ))}
           </ScrollView>
@@ -91,7 +159,7 @@ export default function AssistantModal({ visible, onClose }) {
           <View style={styles.inputRow}>
             <TextInput
               style={styles.input}
-              placeholder="Type your message..."
+              placeholder={languagePack.placeholder}
               value={message}
               onChangeText={setMessage}
             />
@@ -109,6 +177,22 @@ const styles = StyleSheet.create({
   wrap: { flex: 1, backgroundColor: 'rgba(0,0,0,0.35)', justifyContent: 'flex-end' },
   card: { backgroundColor: '#fff', borderTopLeftRadius: 18, borderTopRightRadius: 18, maxHeight: '86%', padding: 14 },
   head: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  headActions: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  langBtn: { borderWidth: 1, borderColor: '#cbd5e1', borderRadius: 999, paddingHorizontal: 8, paddingVertical: 5 },
+  langBtnText: { fontSize: 12, color: '#334155', fontWeight: '700' },
+  langMenu: {
+    alignSelf: 'flex-end',
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    borderRadius: 10,
+    backgroundColor: '#fff',
+    overflow: 'hidden',
+  },
+  langItem: { paddingHorizontal: 12, paddingVertical: 8 },
+  langItemActive: { backgroundColor: '#eff6ff' },
+  langItemText: { color: '#334155', fontWeight: '600' },
+  langItemTextActive: { color: '#1d4ed8', fontWeight: '800' },
   title: { fontSize: 18, fontWeight: '900', color: '#0f172a' },
   close: { color: '#1a73e8', fontWeight: '700' },
   history: { marginTop: 10, maxHeight: 380 },
