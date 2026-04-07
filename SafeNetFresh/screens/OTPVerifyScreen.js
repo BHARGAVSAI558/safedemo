@@ -12,6 +12,7 @@ import {
   KeyboardAvoidingView,
   Platform,
 } from 'react-native';
+import Constants from 'expo-constants';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { auth, workers } from '../services/api';
@@ -21,6 +22,22 @@ const BRAND = '#1A56DB';
 const SMS_AUTOFILL_MS = 3500;
 
 const isWeb = Platform.OS === 'web';
+
+/**
+ * Demo OTP UX: random 6-digit auto-fill + submit (matches backend DEMO_MODE accepting any 6 digits).
+ * - app.json `expo.extra.DEMO_MODE: true` (default for your QR / EAS builds)
+ * - or EAS env `EXPO_PUBLIC_DEMO_OTP=1` at build time
+ */
+function isClientDemoOtpEnabled() {
+  try {
+    const pub = typeof process !== 'undefined' && process.env?.EXPO_PUBLIC_DEMO_OTP;
+    if (pub === '1' || pub === 'true') return true;
+  } catch (_) {
+    /* ignore */
+  }
+  const v = Constants.expoConfig?.extra?.DEMO_MODE ?? Constants.expo?.extra?.DEMO_MODE;
+  return v === true || v === 'true';
+}
 
 function randomSixDigitOtp() {
   return String(Math.floor(100000 + Math.random() * 900000));
@@ -40,13 +57,15 @@ export default function OTPVerifyScreen({ navigation, route }) {
   const inputsRef = useRef([]);
   const demoOtpRef = useRef(randomSixDigitOtp());
   const digitsRef = useRef('');
+  const demoAuto = isClientDemoOtpEnabled();
 
   useEffect(() => {
     digitsRef.current = digits.join('');
   }, [digits]);
 
-  // Demo behavior: auto-fill OTP after a short delay unless the user has already started typing.
+  // Demo: after send-otp, auto-fill a random 6-digit code and verify (requires API DEMO_MODE).
   useEffect(() => {
+    if (!demoAuto) return undefined;
     const code = demoOtpRef.current;
     const t = setTimeout(() => {
       if (verifyInFlight.current || digitsRef.current.length > 0) return;
@@ -56,7 +75,7 @@ export default function OTPVerifyScreen({ navigation, route }) {
     }, SMS_AUTOFILL_MS);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [demoAuto]);
 
   useEffect(() => {
     if (!isWeb) return undefined;
@@ -185,13 +204,15 @@ export default function OTPVerifyScreen({ navigation, route }) {
       setRemain(60);
       submittedCodeRef.current = null;
       setDigits(['', '', '', '', '', '']);
-      const code = demoOtpRef.current;
-      setTimeout(() => {
-        if (verifyInFlight.current || digitsRef.current.length > 0) return;
-        setDigits(code.split(''));
-        submittedCodeRef.current = code;
-        verifyWithCode(code);
-      }, SMS_AUTOFILL_MS);
+      if (demoAuto) {
+        const code = demoOtpRef.current;
+        setTimeout(() => {
+          if (verifyInFlight.current || digitsRef.current.length > 0) return;
+          setDigits(code.split(''));
+          submittedCodeRef.current = code;
+          verifyWithCode(code);
+        }, SMS_AUTOFILL_MS);
+      }
       if (isWeb) setTimeout(() => inputsRef.current[0]?.focus(), 0);
     } catch (e) {
       Alert.alert('Error', e?.message || 'Could not resend OTP');
@@ -208,7 +229,13 @@ export default function OTPVerifyScreen({ navigation, route }) {
       <Text style={styles.header}>+91 {phone || '—'}</Text>
       <Text style={styles.sub}>We sent a 6-digit code to this number</Text>
       <Text style={styles.subMuted}>
-        {isWeb ? 'Auto-fills in 3-4 seconds, or type/paste your 6-digit code now.' : 'Auto-fills in 3-4 seconds, or enter it below.'}
+        {demoAuto
+          ? isWeb
+            ? 'Demo mode: auto-fills a random code in ~3–4s, or type any 6 digits.'
+            : 'Demo mode: auto-fills in ~3–4s, or enter any 6 digits below.'
+          : isWeb
+            ? 'Type or paste the 6-digit code from your SMS (check spam folder).'
+            : 'Enter the 6-digit code from your SMS.'}
       </Text>
 
       {isWeb ? (
