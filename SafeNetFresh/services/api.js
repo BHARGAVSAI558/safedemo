@@ -318,4 +318,18 @@ export const zones = {
     unwrap(await api.get(`/zones/${encodeURIComponent(zoneId)}/forecast-shield`)),
 };
 
+export const support = {
+  query: async ({ user_id, message, type = 'custom' }) =>
+    unwrap(await api.post('/support/query', { user_id, message, type })),
+  history: async (userId) =>
+    unwrap(await api.get('/support/history', { params: { user_id: userId } })),
+};
+
+export const notifications = {
+  list: async (userId) =>
+    unwrap(await api.get('/notifications', { params: { user_id: userId } })),
+  markRead: async (id) => unwrap(await api.post(`/notifications/mark-read/${id}`)),
+  markAllRead: async () => unwrap(await api.post('/notifications/mark-all-read')),
+};
+
 export default api;

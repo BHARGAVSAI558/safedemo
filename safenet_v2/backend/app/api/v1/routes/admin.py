@@ -15,9 +15,11 @@ from app.db.session import get_db
 from app.models.claim import DecisionType, Log, Simulation
 from app.models.device_fingerprint import DeviceFingerprint
 from app.models.fraud import FraudSignal
+from app.models.support import SupportQuery
 from app.models.pool_balance import ZonePoolBalance
 from app.models.policy import Policy
 from app.models.worker import Profile, User
+from app.services.notification_service import create_notification
 from app.schemas.admin import AnalyticsResponse, UserAdminResponse, ZoneAlertsInjectBody
 from app.services.earnings_dna_service import admin_aggregate_earnings_analytics
 from app.services.event_service import government_alert_store
@@ -885,3 +887,53 @@ async def get_weekly_earnings(days: int = 7, admin: User = Depends(get_admin_use
         total += amt
         breakdown.append({"day": d.isoformat(), "protected_amount": amt, "reason": random.choice(reasons)})
     return {"protected_this_week": round(total, 2), "breakdown": list(reversed(breakdown))}
+
+
+@router.get("/support/queries")
+async def list_support_queries(
+    status: str | None = None,
+    admin: User = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    stmt = select(SupportQuery).order_by(SupportQuery.created_at.desc(), SupportQuery.id.desc()).limit(500)
+    if status in {"open", "resolved"}:
+        stmt = stmt.where(SupportQuery.status == status)
+    rows = (await db.execute(stmt)).scalars().all()
+    return [
+        {
+            "id": r.id,
+            "user_id": r.user_id,
+            "message": r.message,
+            "reply": r.system_response,
+            "admin_reply": r.admin_reply,
+            "status": r.status,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        }
+        for r in rows
+    ]
+
+
+@router.post("/support/reply")
+async def admin_support_reply(
+    body: Dict[str, Any],
+    admin: User = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    qid = int(body.get("query_id") or 0)
+    text = str(body.get("admin_reply") or "").strip()
+    if qid <= 0 or not text:
+        raise HTTPException(status_code=400, detail="query_id and admin_reply are required")
+    row = (await db.execute(select(SupportQuery).where(SupportQuery.id == qid))).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Support query not found")
+    row.admin_reply = text
+    row.status = "resolved"
+    await create_notification(
+        db,
+        user_id=row.user_id,
+        ntype="admin_reply",
+        title="Admin replied",
+        message=text,
+    )
+    await db.commit()
+    return {"ok": True, "query_id": row.id, "status": row.status}

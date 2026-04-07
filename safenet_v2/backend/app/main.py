@@ -13,7 +13,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.routes import admin, auth, claims, notifications, policies, pools, profile, simulation, websockets, workers, zones
+from app.api.v1.routes import admin, auth, claims, notifications, policies, pools, profile, simulation, support, websockets, workers, zones
 from app.api.v1.routes.admin import HYDERABAD_ZONES_GEO
 from app.core.config import settings
 from app.core.exceptions import SafeNetBaseException
@@ -216,6 +216,7 @@ app.include_router(policies.router, prefix="/api/v1/policies", tags=["Policies"]
 app.include_router(pools.router, prefix="/api/v1/pools", tags=["Pools"])
 app.include_router(claims.router, prefix="/api/v1/claims", tags=["Claims"])
 app.include_router(simulation.router, prefix="/api/v1/simulation", tags=["Simulation"])
+app.include_router(support.router, prefix="/api/v1/support", tags=["Support"])
 app.include_router(admin.router, prefix="/api/v1/admin", tags=["Admin"])
 app.include_router(websockets.router, tags=["WebSockets"])
 

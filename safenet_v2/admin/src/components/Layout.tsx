@@ -10,6 +10,7 @@ const links: { to: string; label: string; icon: string }[] = [
   { to: '/fraud', label: 'Fraud insights', icon: 'F' },
   { to: '/workers', label: 'Workers', icon: 'W' },
   { to: '/simulations', label: 'Simulations', icon: 'S' },
+  { to: '/support', label: 'Support', icon: '?' },
 ];
 
 export default function Layout() {

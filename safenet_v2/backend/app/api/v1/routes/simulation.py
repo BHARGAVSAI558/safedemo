@@ -22,6 +22,7 @@ from app.models.payout import PayoutRecord
 from app.models.policy import Policy
 from app.models.worker import Profile, User
 from app.services.forecast_shield_service import payout_message_suffix
+from app.services.notification_service import create_notification
 from app.services.onboarding_pricing import TIER_MAX_DAILY as ONBOARDING_TIER_MAX_DAILY
 from app.services.realtime_service import publish_claim_update
 from app.utils.logger import get_logger
@@ -187,6 +188,13 @@ async def _demo_claim_pipeline(
                 correlation_id=run_id,
             )
             await asyncio.sleep(step_delay)
+            await create_notification(
+                db,
+                user_id=worker_id,
+                ntype="system",
+                title="Claim under review",
+                message="Your disruption claim entered verification.",
+            )
 
             await publish_claim_update(
                 redis=redis,
@@ -265,6 +273,13 @@ async def _demo_claim_pipeline(
                     event_type="simulation_run",
                     detail=f"decision=APPROVED payout={payout} run={run_id}",
                 )
+            )
+            await create_notification(
+                db,
+                user_id=worker_id,
+                ntype="payout",
+                title=f"₹{int(round(payout))} credited",
+                message="Disruption verified. Payout added to your wallet.",
             )
             await db.commit()
 

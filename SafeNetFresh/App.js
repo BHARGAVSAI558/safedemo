@@ -28,6 +28,7 @@ import DashboardScreen from './screens/DashboardScreen';
 import PolicyScreen from './screens/PolicyScreen';
 import ClaimsScreen from './screens/ClaimsScreen';
 import ProfileScreen from './screens/ProfileScreen';
+import NotificationsScreen from './screens/NotificationsScreen';
 import { navigationRef } from './services/navigationService';
 
 const Stack = createNativeStackNavigator();
@@ -211,7 +212,10 @@ function RootNavigator() {
             <Stack.Screen name="ProfileSetup" component={ProfileSetupScreen} options={{ headerShown: false }} />
           </>
         ) : (
-          <Stack.Screen name="MainTabs" component={ProtectedMainTabs} options={{ headerShown: false }} />
+          <>
+            <Stack.Screen name="MainTabs" component={ProtectedMainTabs} options={{ headerShown: false }} />
+            <Stack.Screen name="Notifications" component={NotificationsScreen} options={{ title: 'Notifications' }} />
+          </>
         )}
       </Stack.Navigator>
     </NavigationContainer>

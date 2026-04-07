@@ -1,3 +1,27 @@
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.notification import Notification
+
+
+async def create_notification(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    ntype: str,
+    title: str,
+    message: str,
+) -> Notification:
+    row = Notification(
+        user_id=int(user_id),
+        type=str(ntype or "system"),
+        title=str(title or "SafeNet update")[:160],
+        message=str(message or ""),
+        is_read=False,
+    )
+    db.add(row)
+    await db.flush()
+    return row
+
 import json
 import os
 from typing import Any, Dict, Optional

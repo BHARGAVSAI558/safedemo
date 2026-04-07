@@ -19,7 +19,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import * as Haptics from 'expo-haptics';
 import Svg, { Circle, Rect } from 'react-native-svg';
 
-import api, { simulation, workers as workersApi, zones as zonesApi } from '../services/api';
+import api, { notifications, simulation, workers as workersApi, zones as zonesApi } from '../services/api';
 import { useAuth } from '../contexts/AuthContext';
 import { useClaims } from '../contexts/ClaimContext';
 import { useWsConnection } from '../contexts/WsConnectionContext';
@@ -27,6 +27,9 @@ import { usePolicy } from '../contexts/PolicyContext';
 import { useWorkerProfile } from '../hooks/useWorkerProfile';
 import { usePayoutHistory } from '../hooks/usePayoutHistory';
 import AppModal from '../components/AppModal';
+import AssistantModal from '../components/AssistantModal';
+import AssistantWidget from '../components/AssistantWidget';
+import NotificationBell from '../components/NotificationBell';
 import { logButtonTap, logClaimStatusView } from '../services/device_fingerprint.service';
 import { trustBadge } from '../utils/trustBadge';
 import { canonicalTierLabel } from '../utils/tierDisplay';
@@ -413,6 +416,13 @@ export default function DashboardScreen({ navigation }) {
   const profile = profileQueryData ?? workerProfile ?? null;
   const profileLoading = Boolean(profileQueryLoading && !workerProfile);
   const payoutsQuery = usePayoutHistory();
+  const [assistantOpen, setAssistantOpen] = useState(false);
+  const notificationsQuery = useQuery({
+    queryKey: ['notifications', userId],
+    queryFn: () => notifications.list(String(userId || '')),
+    enabled: Boolean(userId),
+    refetchInterval: 12000,
+  });
 
   const trust = profile?.trust_score;
   const tb = trustBadge(trust);
@@ -894,6 +904,10 @@ export default function DashboardScreen({ navigation }) {
           {greetingName}
         </Text>
         <View style={styles.headerBadgeRow}>
+          <NotificationBell
+            unread={Number(notificationsQuery.data?.unread_count || 0)}
+            onPress={() => navigation.navigate('Notifications')}
+          />
           <View style={[styles.wsLiveDot, { backgroundColor: wsDotColor }]} accessibilityLabel="WebSocket live status" />
           <TouchableOpacity
             onPress={() => navigation.navigate('Coverage')}
@@ -1522,6 +1536,8 @@ export default function DashboardScreen({ navigation }) {
         </>
       ) : null}
     </View>
+    <AssistantWidget onPress={() => setAssistantOpen(true)} />
+    <AssistantModal visible={assistantOpen} onClose={() => setAssistantOpen(false)} />
   );
 }
 

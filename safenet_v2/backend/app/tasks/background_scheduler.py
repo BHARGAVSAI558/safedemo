@@ -31,6 +31,7 @@ from app.services.realtime_service import publish_claim_update, publish_pool_hea
 from app.tasks.claim_processor import process_claim
 from app.services.zone_resolver import resolve_city_to_zone
 from app.services.forecast_shield_service import refresh_forecast_shields
+from app.services.notification_service import create_notification
 from app.utils.logger import logger as struct_logger
 
 from app.utils.logger import get_logger
@@ -528,6 +529,36 @@ async def forecast_shield_job(app: Any) -> None:
     await refresh_forecast_shields(app)
 
 
+async def weather_alert_notifier(app: Any) -> None:
+    """
+    Daily notifier: if forecast shield indicates rain risk in worker's zone,
+    enqueue a lightweight proactive alert notification.
+    """
+    shields = getattr(app.state, "forecast_shields", None) or {}
+    if not isinstance(shields, dict) or not shields:
+        return
+    async with AsyncSessionLocal() as session:
+        rows = (await session.execute(select(Profile))).scalars().all()
+        for p in rows:
+            zone = str(getattr(p, "zone_id", "") or "").strip().lower()
+            if not zone:
+                continue
+            sh = shields.get(zone) or shields.get(zone.replace("-", "_"))
+            if not sh:
+                continue
+            text = str((sh.get("subtitle") or sh.get("coverage_line") or "")).lower()
+            if "rain" not in text:
+                continue
+            await create_notification(
+                session,
+                user_id=int(p.user_id),
+                ntype="alert",
+                title="Weather Alert",
+                message="Heavy rain expected tomorrow. Stay prepared.",
+            )
+        await session.commit()
+
+
 async def stale_claim_resolver(app: Any) -> None:
     """
     stale_claim_resolver: every 5 minutes
@@ -667,6 +698,12 @@ def start_background_scheduler(app: Any) -> AsyncIOScheduler:
             trigger=IntervalTrigger(hours=6, timezone=str(IST)),
             func=lambda: forecast_shield_job(app),
             lock_ttl_seconds=25 * 60,
+        ),
+        JobDef(
+            job_id="weather_alert_notifier",
+            trigger=CronTrigger(hour=7, minute=10, timezone=str(IST)),
+            func=lambda: weather_alert_notifier(app),
+            lock_ttl_seconds=30 * 60,
         ),
     ]
 

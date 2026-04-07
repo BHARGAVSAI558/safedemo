@@ -13,6 +13,7 @@ from app.models.claim import DecisionType, Simulation
 from app.models.worker import User
 from app.schemas.claim import SimulationRequest, SimulationResponse
 from app.services.simulation_labels import disruption_from_simulation
+from app.services.notification_service import create_notification
 from app.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -114,7 +115,7 @@ async def run_claim(
 ):
     try:
         fs = getattr(request.app.state, "forecast_shields", None)
-        return await DecisionEngine.run(
+        out = await DecisionEngine.run(
             current_user.id,
             body,
             db,
@@ -122,6 +123,25 @@ async def run_claim(
             mongo_db=getattr(request.app.state, "mongo_db", None),
             forecast_shields=fs if isinstance(fs, dict) else None,
         )
+        decision = str(getattr(out, "decision", "")).upper()
+        if decision == "APPROVED":
+            await create_notification(
+                db,
+                user_id=current_user.id,
+                ntype="payout",
+                title=f"₹{int(round(float(getattr(out, 'payout', 0.0) or 0.0)))} credited",
+                message="Your claim was approved and payout has been processed.",
+            )
+        else:
+            await create_notification(
+                db,
+                user_id=current_user.id,
+                ntype="system",
+                title="Claim update",
+                message=str(getattr(out, "reason", "Your claim status changed.")),
+            )
+        await db.commit()
+        return out
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
