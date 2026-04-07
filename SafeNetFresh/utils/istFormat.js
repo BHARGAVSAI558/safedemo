@@ -4,10 +4,35 @@
 
 const IST_OPTS = { timeZone: 'Asia/Kolkata' };
 
+/**
+ * Backend stores claim/simulation times in UTC. Python often serializes without `Z`, and
+ * `new Date("2025-04-07T23:08:38")` is interpreted as *local* time in JS — wrong vs Home
+ * (which uses server-side IST). Treat timezone-less ISO datetimes as UTC.
+ */
+function parseServerTimestamp(isoOrDate) {
+  if (isoOrDate instanceof Date) return isoOrDate;
+  const s = String(isoOrDate ?? '').trim();
+  if (!s) return new Date(NaN);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    return new Date(`${s}T12:00:00.000Z`);
+  }
+  const isoLike = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(s);
+  if (!isoLike) {
+    return new Date(s);
+  }
+  const normalized = s.includes('T') ? s.replace(' ', 'T') : s.replace(/^(\d{4}-\d{2}-\d{2}) /, '$1T');
+  const hasTz =
+    /Z$/i.test(normalized) ||
+    /[+-]\d{2}:\d{2}$/.test(normalized) ||
+    /[+-]\d{2}\d{2}$/.test(normalized);
+  if (hasTz) return new Date(normalized);
+  return new Date(`${normalized}Z`);
+}
+
 export function formatIstDateTime(isoOrDate) {
   if (isoOrDate == null || isoOrDate === '') return '—';
   try {
-    const d = isoOrDate instanceof Date ? isoOrDate : new Date(isoOrDate);
+    const d = parseServerTimestamp(isoOrDate);
     if (Number.isNaN(d.getTime())) return '—';
     return d.toLocaleString('en-IN', {
       ...IST_OPTS,
@@ -45,7 +70,7 @@ export function formatPayoutWhen(row) {
     }
   }
   try {
-    const d = only instanceof Date ? only : new Date(only);
+    const d = only instanceof Date ? only : parseServerTimestamp(only);
     if (!Number.isNaN(d.getTime())) {
       return d.toLocaleDateString('en-IN', { ...IST_OPTS, day: 'numeric', month: 'short', year: 'numeric' });
     }

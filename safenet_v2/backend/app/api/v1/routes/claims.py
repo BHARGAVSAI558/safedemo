@@ -43,12 +43,23 @@ def _history_reason(s: Simulation, ui_status: str, payout_amt: float) -> str:
     return (s.reason or "")[:500]
 
 
+def _created_at_utc_z(created: datetime | None) -> str:
+    """Serialize for mobile: naive DB times are UTC; always include Z so JS parses one instant."""
+    if created is None:
+        return ""
+    if created.tzinfo is None:
+        dt = created.replace(tzinfo=timezone.utc)
+    else:
+        dt = created.astimezone(timezone.utc)
+    return dt.isoformat().replace("+00:00", "Z")
+
+
 def _history_row(s: Simulation) -> dict[str, Any]:
     label, _icon = disruption_from_simulation(s)
     ui_status = _ui_status_from_decision(s.decision)
     payout_amt = float(s.payout or 0.0) if ui_status == "APPROVED" else 0.0
     created = s.created_at
-    created_iso = created.isoformat() if created is not None else ""
+    created_iso = _created_at_utc_z(created)
     return {
         "id": s.id,
         "disruption_type": label,
