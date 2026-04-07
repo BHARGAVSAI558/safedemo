@@ -33,7 +33,7 @@ export const adminUi = {
     maxWidth: 720,
   },
   card: {
-    background: 'var(--admin-surface)',
+    background: 'linear-gradient(165deg, var(--admin-surface-raised, #fff) 0%, var(--admin-surface) 100%)',
     borderRadius: 12,
     border: '1px solid var(--admin-border)',
     boxShadow: 'var(--admin-shadow-sm)',
@@ -68,7 +68,7 @@ export const adminUi = {
     borderRadius: 10,
     padding: '10px 14px',
     fontSize: '0.9375rem',
-    background: 'var(--admin-surface)',
+    background: 'var(--admin-surface-raised)',
     color: 'var(--admin-text)',
     outline: 'none',
     boxSizing: 'border-box' as const,
@@ -78,7 +78,7 @@ export const adminUi = {
     borderRadius: 10,
     padding: '10px 14px',
     fontSize: '0.9375rem',
-    background: 'var(--admin-surface)',
+    background: 'var(--admin-surface-raised)',
     color: 'var(--admin-text)',
     cursor: 'pointer',
     minWidth: 140,
@@ -86,7 +86,7 @@ export const adminUi = {
   btn: {
     border: '1px solid var(--admin-border)',
     borderRadius: 10,
-    background: 'var(--admin-surface)',
+    background: 'var(--admin-surface-raised)',
     padding: '10px 16px',
     cursor: 'pointer',
     fontWeight: 700,
@@ -130,7 +130,7 @@ export const adminUi = {
     borderRadius: 12,
     overflow: 'auto' as const,
     maxHeight: 'min(560px, 62vh)',
-    background: 'var(--admin-surface)',
+    background: 'linear-gradient(180deg, var(--admin-surface-raised) 0%, var(--admin-surface) 100%)',
   },
   table: {
     width: '100%',
@@ -141,7 +141,7 @@ export const adminUi = {
   th: {
     textAlign: 'left' as const,
     padding: '12px 14px',
-    background: '#f8fafc',
+    background: 'var(--admin-th-bg)',
     color: 'var(--admin-muted)',
     fontWeight: 800,
     fontSize: '0.6875rem',
@@ -177,7 +177,7 @@ export const adminUi = {
     marginBottom: 24,
   },
   kpiCard: {
-    background: 'var(--admin-surface)',
+    background: 'linear-gradient(145deg, var(--admin-surface-raised) 0%, var(--admin-surface) 100%)',
     borderRadius: 12,
     padding: '20px',
     border: '1px solid var(--admin-border)',

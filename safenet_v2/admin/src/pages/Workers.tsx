@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 
 import api from '../api';
+import { WorkerDetailPanel, type WorkerDetailData } from '../components/WorkerDetailPanel';
 import { adminUi } from '../theme/adminUi';
 import { formatTierLabel } from '../utils/tier';
 
@@ -135,7 +136,7 @@ export default function Workers() {
                 style={adminUi.trHover}
                 onClick={() => setSelectedWorkerId(row.worker_id)}
                 onMouseEnter={(e) => {
-                  e.currentTarget.style.background = 'var(--admin-bg-subtle)';
+                  e.currentTarget.style.background = 'var(--admin-row-hover)';
                 }}
                 onMouseLeave={(e) => {
                   e.currentTarget.style.background = 'transparent';
@@ -206,18 +207,27 @@ export default function Workers() {
               width: 'min(560px, 100vw)',
               height: '100%',
               overflow: 'auto',
-              background: 'var(--admin-surface)',
+              background: 'var(--admin-drawer-surface)',
               padding: 24,
               borderLeft: '1px solid var(--admin-border)',
-              boxShadow: '-8px 0 32px rgba(15,23,42,0.12)',
+              boxShadow: '-8px 0 32px rgba(15,23,42,0.18)',
             }}
             onClick={(e) => e.stopPropagation()}
             role="dialog"
             aria-modal="true"
             aria-labelledby="worker-drawer-title"
           >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-              <h2 id="worker-drawer-title" style={{ margin: 0, fontSize: '1.125rem', fontWeight: 800 }}>
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                marginBottom: 20,
+                paddingBottom: 16,
+                borderBottom: '1px solid var(--admin-border)',
+              }}
+            >
+              <h2 id="worker-drawer-title" style={{ margin: 0, fontSize: '1.125rem', fontWeight: 800, color: 'var(--admin-text)' }}>
                 Worker #{selectedWorkerId}
               </h2>
               <button type="button" style={adminUi.btn} onClick={() => setSelectedWorkerId(null)}>
@@ -234,41 +244,9 @@ export default function Workers() {
                   Retry
                 </button>
               </p>
-            ) : (
-              <div style={{ display: 'grid', gap: 20 }}>
-                {(['profile', 'claim_history', 'gps_trail', 'trust_timeline', 'device_fingerprint'] as const).map((key) => (
-                  <section key={key}>
-                    <h3
-                      style={{
-                        fontSize: '0.6875rem',
-                        fontWeight: 800,
-                        textTransform: 'uppercase',
-                        letterSpacing: '0.08em',
-                        color: 'var(--admin-muted)',
-                        margin: '0 0 8px',
-                      }}
-                    >
-                      {key.replace(/_/g, ' ')}
-                    </h3>
-                    <pre
-                      style={{
-                        margin: 0,
-                        background: 'var(--admin-bg-subtle)',
-                        border: '1px solid var(--admin-border)',
-                        borderRadius: 10,
-                        padding: 14,
-                        fontSize: 12,
-                        overflow: 'auto',
-                        maxHeight: 240,
-                        lineHeight: 1.45,
-                      }}
-                    >
-                      {JSON.stringify((detailQuery.data as Record<string, unknown>)?.[key] ?? {}, null, 2)}
-                    </pre>
-                  </section>
-                ))}
-              </div>
-            )}
+            ) : detailQuery.data ? (
+              <WorkerDetailPanel data={detailQuery.data as WorkerDetailData} />
+            ) : null}
           </div>
         </div>
       ) : null}

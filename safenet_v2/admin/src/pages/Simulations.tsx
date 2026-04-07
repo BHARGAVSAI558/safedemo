@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import api from '../api';
 import { adminUi } from '../theme/adminUi';
+import { formatIstDateTime } from '../utils/adminDate';
 
 export default function Simulations() {
   const [zoneId, setZoneId] = useState('hyd_central');
@@ -105,7 +106,18 @@ export default function Simulations() {
                       fontWeight: 700,
                       padding: '4px 8px',
                       borderRadius: 6,
-                      background: 'var(--admin-bg-subtle)',
+                      background:
+                        String(s.decision).toUpperCase().includes('APPROV')
+                          ? 'rgba(22, 163, 74, 0.14)'
+                          : String(s.decision).toUpperCase().includes('FRAUD')
+                            ? 'rgba(220, 38, 38, 0.12)'
+                            : 'var(--admin-bg-subtle)',
+                      color:
+                        String(s.decision).toUpperCase().includes('APPROV')
+                          ? '#15803d'
+                          : String(s.decision).toUpperCase().includes('FRAUD')
+                            ? '#b91c1c'
+                            : 'var(--admin-text)',
                     }}
                   >
                     {s.decision}
@@ -113,7 +125,7 @@ export default function Simulations() {
                 </td>
                 <td style={adminUi.td}>₹{Number(s.payout).toFixed(0)}</td>
                 <td style={adminUi.td}>{Number(s.fraud_score).toFixed(2)}</td>
-                <td style={{ ...adminUi.td, whiteSpace: 'nowrap' }}>{new Date(s.created_at).toLocaleString()}</td>
+                <td style={{ ...adminUi.td, whiteSpace: 'nowrap' }}>{formatIstDateTime(s.created_at)}</td>
               </tr>
             ))}
             {sims.length === 0 ? (
