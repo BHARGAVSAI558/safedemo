@@ -854,6 +854,7 @@ export default function DashboardScreen({ navigation }) {
   });
 
   return (
+    <>
     <View
       style={[
         styles.container,
@@ -1538,6 +1539,7 @@ export default function DashboardScreen({ navigation }) {
     </View>
     <AssistantWidget onPress={() => setAssistantOpen(true)} />
     <AssistantModal visible={assistantOpen} onClose={() => setAssistantOpen(false)} />
+    </>
   );
 }
 
