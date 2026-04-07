@@ -94,43 +94,61 @@ export default function AdminLogin() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 px-4 py-10 text-slate-900">
-      <div className="mx-auto mt-20 w-full max-w-md rounded-2xl bg-white p-6 shadow-lg">
-        <h1 className="text-2xl font-extrabold text-slate-900">SafeNet Admin Login</h1>
-        <p className="mt-2 text-sm text-slate-600">Use your dashboard username and password. OTP is not used for admin access.</p>
-        {!username && !password ? <p className="mt-2 text-xs text-blue-600">Auto-filling demo credentials in 3-4 seconds...</p> : null}
+    <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_#dbeafe,_#eef2ff_45%,_#f8fafc)] px-4 py-10 text-slate-900">
+      <div className="mx-auto mt-8 grid w-full max-w-5xl gap-6 rounded-3xl border border-slate-200/70 bg-white/70 p-3 shadow-2xl backdrop-blur md:grid-cols-[1.1fr_0.9fr]">
+        <aside className="rounded-2xl bg-gradient-to-br from-blue-700 via-indigo-700 to-violet-700 p-7 text-white">
+          <div className="inline-flex items-center gap-2 rounded-full bg-white/15 px-3 py-1 text-xs font-semibold ring-1 ring-white/30">
+            <span className="h-2 w-2 rounded-full bg-emerald-300" />
+            SafeNet Operations
+          </div>
+          <h1 className="mt-5 text-3xl font-extrabold leading-tight md:text-4xl">Admin Control Center</h1>
+          <p className="mt-3 max-w-sm text-sm text-blue-100 md:text-base">
+            Monitor live claims, payout signals, and fraud alerts from one secure dashboard.
+          </p>
+          <div className="mt-6 grid gap-3 text-xs text-blue-100 md:text-sm">
+            <div className="rounded-xl bg-white/10 px-3 py-2 ring-1 ring-white/25">⚡ Real-time WebSocket feed</div>
+            <div className="rounded-xl bg-white/10 px-3 py-2 ring-1 ring-white/25">🛡️ Fraud analytics & trust timeline</div>
+            <div className="rounded-xl bg-white/10 px-3 py-2 ring-1 ring-white/25">📍 Zone and worker visibility</div>
+          </div>
+        </aside>
 
-        {error ? <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-red-700">{error}</div> : null}
+        <section className="rounded-2xl bg-white p-6 shadow-lg ring-1 ring-slate-200/70 md:p-8">
+          <h2 className="text-2xl font-extrabold text-slate-900">SafeNet Admin Login</h2>
+          <p className="mt-2 text-sm text-slate-600">Sign in to continue to the operations dashboard.</p>
+          {!username && !password ? <p className="mt-2 text-xs font-semibold text-blue-600">Auto-filling demo credentials in 3-4 seconds...</p> : null}
 
-        <label className="mt-4 block text-xs font-semibold uppercase tracking-wide text-slate-600">Username</label>
-        <input
-          className="mt-2 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none ring-blue-200 transition focus:ring"
-          placeholder="Username"
-          value={username}
-          onChange={(e) => setUsername(e.target.value)}
-          autoComplete="username"
-          onKeyDown={(e) => e.key === 'Enter' && void submit()}
-        />
+          {error ? <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-red-700">{error}</div> : null}
 
-        <label className="mt-4 block text-xs font-semibold uppercase tracking-wide text-slate-600">Password</label>
-        <input
-          className="mt-2 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none ring-blue-200 transition focus:ring"
-          type="password"
-          placeholder="Password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          autoComplete="current-password"
-          onKeyDown={(e) => e.key === 'Enter' && void submit()}
-        />
+          <label className="mt-5 block text-xs font-semibold uppercase tracking-wide text-slate-600">Username</label>
+          <input
+            className="mt-2 w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-2.5 text-sm outline-none ring-blue-200 transition focus:bg-white focus:ring"
+            placeholder="Username"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            autoComplete="username"
+            onKeyDown={(e) => e.key === 'Enter' && void submit()}
+          />
 
-        <button
-          type="button"
-          onClick={() => void submit()}
-          disabled={loading}
-          className="mt-5 w-full rounded-lg bg-blue-600 px-4 py-2 text-sm font-bold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-70"
-        >
-          {loading ? 'Signing in...' : 'Sign in'}
-        </button>
+          <label className="mt-4 block text-xs font-semibold uppercase tracking-wide text-slate-600">Password</label>
+          <input
+            className="mt-2 w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-2.5 text-sm outline-none ring-blue-200 transition focus:bg-white focus:ring"
+            type="password"
+            placeholder="Password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            autoComplete="current-password"
+            onKeyDown={(e) => e.key === 'Enter' && void submit()}
+          />
+
+          <button
+            type="button"
+            onClick={() => void submit()}
+            disabled={loading}
+            className="mt-6 w-full rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 px-4 py-2.5 text-sm font-bold text-white transition hover:from-blue-700 hover:to-indigo-700 disabled:cursor-not-allowed disabled:opacity-70"
+          >
+            {loading ? 'Signing in...' : 'Sign in'}
+          </button>
+        </section>
       </div>
     </div>
   );
