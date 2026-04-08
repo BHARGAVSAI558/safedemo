@@ -47,7 +47,7 @@ Install Expo Go and scan this QR:
 ![SafeNet Worker App QR](safenet_v2/admin/public/worker-app-qr.png)
 
 Fallback:
-`exp://u.expo.dev/2d45889e-9415-4966-be7f-ba2711a57f13/group/b2d4e11e-ec7a-421f-b60e-75132863e7be`
+`exp+://expo-development-client/?url=https%3A%2F%2Fu.expo.dev%2F2d45889e-9415-4966-be7f-ba2711a57f13%2Fgroup%2F1a3df0cf-e275-43ef-8d1e-3b1268b67a3f`
 
 ### Option 3 — Run locally
 ```bash
