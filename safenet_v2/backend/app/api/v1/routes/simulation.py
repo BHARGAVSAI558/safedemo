@@ -116,6 +116,17 @@ def _eligible_scenarios_for_today(user_id: int, now_utc: datetime) -> set[str]:
     return {all_scenarios[start], all_scenarios[second]}
 
 
+def _deterministic_target_fraction(user_id: int, scenario: str, now_utc: datetime) -> float:
+    """
+    Stable payout fraction (70%–80%) per user+scenario+IST day.
+    Removes random feel while still varying day-to-day.
+    """
+    ist_day = now_utc.astimezone(timezone(timedelta(hours=5, minutes=30))).strftime("%Y-%m-%d")
+    seed = f"{user_id}:{scenario}:{ist_day}".encode("utf-8")
+    v = int(sha256(seed).hexdigest()[:2], 16) % 3
+    return [0.72, 0.76, 0.80][v]
+
+
 class SimulationRunRequest(BaseModel):
     scenario: Literal["HEAVY_RAIN", "EXTREME_HEAT", "AQI_SPIKE", "CURFEW"]
     zone_id: str = Field(default="", max_length=128)
@@ -218,9 +229,8 @@ async def _demo_claim_pipeline(
                     already_paid_this_disruption = True
                     break
 
-            # Realistic demo cadence: 2 payouts, then 1 no-disruption (no payout).
-            cycle_idx = len(sims_for_dna) % 3
-            no_disruption_this_run = cycle_idx == 2 or (not scenario_allowed_today) or already_paid_this_disruption
+            # Deterministic rule: 2 disruption types are eligible per day; same disruption can't pay twice/day.
+            no_disruption_this_run = (not scenario_allowed_today) or already_paid_this_disruption
             scenario_hours = {
                 "HEAVY_RAIN": 5.0,
                 "EXTREME_HEAT": 4.0,
@@ -233,8 +243,8 @@ async def _demo_claim_pipeline(
                 "AQI_SPIKE": 0.75,
                 "CURFEW": 1.00,
             }.get(body.scenario, 0.8)
-            # 70–80% target of what the rider would normally earn during the disruption window.
-            target_frac = [0.72, 0.76, 0.80][cycle_idx % 3]
+            # Stable 70–80% target; deterministic by user+scenario+day.
+            target_frac = _deterministic_target_fraction(worker_id, body.scenario, now_utc)
 
             avg_daily_income = float(getattr(profile, "avg_daily_income", 650.0) or 650.0)
             slot_estimate = float(expected_slot) * float(scenario_hours)

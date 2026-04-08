@@ -247,6 +247,7 @@ export default function Dashboard() {
       />
     </div>
   );
+  const showStorageWarning = String(import.meta.env.VITE_SHOW_STORAGE_WARNING || '').trim() === '1';
   const isPersistentStorage = healthQuery.data?.storage?.persistent !== false;
 
   const zones = useMemo(() => {
@@ -325,7 +326,7 @@ export default function Dashboard() {
         `}
       </style>
 
-      {!isPersistentStorage ? (
+      {showStorageWarning && !isPersistentStorage ? (
         <div style={styles.poolWarnBanner}>
           <div style={styles.poolWarnLine}>Storage warning: SQLite mode detected</div>
           <div style={{ color: '#9a3412', fontSize: 12, fontWeight: 600 }}>
