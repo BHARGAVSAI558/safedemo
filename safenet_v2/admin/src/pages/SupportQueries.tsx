@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
 import api from '../api';
 import { adminUi } from '../theme/adminUi';
+import { formatIstDateTime } from '../utils/adminDate';
 
 type SupportRow = {
   id: number;
@@ -104,7 +105,7 @@ export default function SupportQueries() {
                     {r.status}
                   </span>
                 </td>
-                <td style={adminUi.td}>{r.created_at ? new Date(r.created_at).toLocaleString('en-IN') : '—'}</td>
+                <td style={adminUi.td}>{formatIstDateTime(r.created_at)}</td>
               </tr>
             ))}
             {!rows.length ? (
