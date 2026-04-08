@@ -357,45 +357,22 @@ async def _demo_claim_pipeline(
                 zone_id,
                 datetime.now(timezone.utc),
             )
+            final_status = "APPROVED"
+            final_message = _approved_message(body.scenario, payout) + fs_suffix
+            final_payout = float(payout)
             if no_disruption_this_run:
-                await publish_claim_update(
-                    redis=redis,
-                    worker_id=worker_id,
-                    claim_id=cid,
-                    status="CLAIM_REJECTED",
-                    message=(
-                        f"Already paid today for {body.scenario.replace('_', ' ').title()} in your zone."
-                        if already_paid_this_disruption
-                        else (
-                            f"No verified {body.scenario.replace('_', ' ').lower()} disruption in {zone_label} right now."
-                            + f" Active disruption now: {active_scenario.replace('_', ' ').title()}."
-                            if not scenario_allowed_today
-                            else f"No confirmed disruption in {zone_label}. Monitoring continues in real time."
-                        )
-                    ),
-                    payout_amount=0.0,
-                    zone_id=zone_id,
-                    disruption_type=body.scenario,
-                    fraud_score=0.1,
-                    correlation_id=run_id,
-                    payout_breakdown=breakdown,
-                    daily_coverage=daily_cap,
+                final_status = "CLAIM_REJECTED"
+                final_message = (
+                    f"Already paid today for {body.scenario.replace('_', ' ').title()} in your zone."
+                    if already_paid_this_disruption
+                    else (
+                        f"No verified {body.scenario.replace('_', ' ').lower()} disruption in {zone_label} right now."
+                        + f" Active disruption now: {active_scenario.replace('_', ' ').title()}."
+                        if not scenario_allowed_today
+                        else f"No confirmed disruption in {zone_label}. Monitoring continues in real time."
+                    )
                 )
-            else:
-                await publish_claim_update(
-                    redis=redis,
-                    worker_id=worker_id,
-                    claim_id=cid,
-                    status="APPROVED",
-                    message=_approved_message(body.scenario, payout) + fs_suffix,
-                    payout_amount=payout,
-                    zone_id=zone_id,
-                    disruption_type=body.scenario,
-                    fraud_score=0.1,
-                    correlation_id=run_id,
-                    payout_breakdown=breakdown,
-                    daily_coverage=daily_cap,
-                )
+                final_payout = 0.0
 
             if prof_row is not None:
                 prof_row.total_claims = int(prof_row.total_claims or 0) + 1
@@ -445,6 +422,21 @@ async def _demo_claim_pipeline(
                     message="Disruption verified. Payout added to your wallet.",
                 )
             await db.commit()
+            # Publish terminal state only after commit so app/web refetch sees persisted row.
+            await publish_claim_update(
+                redis=redis,
+                worker_id=worker_id,
+                claim_id=cid,
+                status=final_status,
+                message=final_message,
+                payout_amount=final_payout,
+                zone_id=zone_id,
+                disruption_type=body.scenario,
+                fraud_score=0.1,
+                correlation_id=run_id,
+                payout_breakdown=breakdown,
+                daily_coverage=daily_cap,
+            )
 
     except Exception as exc:
         log.error(

@@ -105,6 +105,68 @@ def _support_values(
     }
 
 
+def _localized_support_values(lang: str, vals: dict[str, str]) -> dict[str, str]:
+    l = _norm_lang(lang)
+    if l == "en":
+        return vals
+    hi_map = {
+        "Not detected": "पता नहीं चला",
+        "No activity change": "गतिविधि में बदलाव नहीं",
+        "Not checked": "जांच नहीं हुई",
+        "No active claim found": "कोई सक्रिय क्लेम नहीं मिला",
+        "—": "—",
+        "Pending": "लंबित",
+        "Detected": "पता चला",
+        "Shifted": "बदला हुआ",
+        "Under review": "समीक्षा में",
+        "Moderate": "मध्यम",
+        "Strong": "मजबूत",
+        "Significant drop": "स्पष्ट गिरावट",
+        "Approved": "स्वीकृत",
+        "High": "उच्च",
+        "Weak": "कमजोर",
+        "Near normal": "लगभग सामान्य",
+        "Rejected": "अस्वीकृत",
+        "Low": "निम्न",
+        "Flagged": "चिह्नित",
+        "Pattern mismatch": "पैटर्न मेल नहीं",
+        "Fraud blocked": "धोखाधड़ी के कारण रोका गया",
+        "Clear": "साफ",
+        "No major signals": "कोई बड़ा जोखिम संकेत नहीं",
+        "Yes": "हाँ",
+        "No": "नहीं",
+    }
+    te_map = {
+        "Not detected": "గుర్తించబడలేదు",
+        "No activity change": "కార్యకలాప మార్పు లేదు",
+        "Not checked": "తనిఖీ కాలేదు",
+        "No active claim found": "సక్రియ క్లెయిమ్ లేదు",
+        "—": "—",
+        "Pending": "పెండింగ్",
+        "Detected": "గుర్తించబడింది",
+        "Shifted": "మార్పు ఉంది",
+        "Under review": "పరిశీలనలో ఉంది",
+        "Moderate": "మధ్యస్థం",
+        "Strong": "బలంగా ఉంది",
+        "Significant drop": "గణనీయమైన తగ్గుదల",
+        "Approved": "ఆమోదించబడింది",
+        "High": "అధికం",
+        "Weak": "బలహీనంగా ఉంది",
+        "Near normal": "సాధారణానికి దగ్గరగా ఉంది",
+        "Rejected": "తిరస్కరించబడింది",
+        "Low": "తక్కువ",
+        "Flagged": "ఫ్లాగ్ చేయబడింది",
+        "Pattern mismatch": "ప్యాటర్న్ సరిపోలలేదు",
+        "Fraud blocked": "మోసం కారణంగా నిరోధించబడింది",
+        "Clear": "స్పష్టంగా ఉంది",
+        "No major signals": "పెద్ద ప్రమాద సంకేతాలు లేవు",
+        "Yes": "అవును",
+        "No": "లేదు",
+    }
+    m = hi_map if l == "hi" else te_map
+    return {k: m.get(str(v), str(v)) for k, v in vals.items()}
+
+
 def _predefined_reply(lang: str, key: str, vals: dict[str, str]) -> str | None:
     l = _norm_lang(lang)
     if str(key or "").lower() == "raise_ticket":
@@ -123,6 +185,7 @@ def _predefined_reply(lang: str, key: str, vals: dict[str, str]) -> str | None:
             "Ticket submitted. You will receive an admin reply in this chat soon.",
         )
 
+    vals = _localized_support_values(l, vals)
     # WOW-factor: multiple correct variants per question, so it never feels copy-pasted.
     variants: dict[str, dict[str, list[str]]] = {
         "en": {
@@ -164,7 +227,7 @@ def _predefined_reply(lang: str, key: str, vals: dict[str, str]) -> str | None:
             ],
             "disruption_active": [
                 "अभी ज़ोन का disruption status:\n\n• संकेत स्तर: {disruption_signal}\n• व्यवधान स्तर: {disruption_level}",
-                "Disruption workflow:\n\n• Signal: {disruption_signal}\n• Level: {disruption_level}\n\nहम रियल-टाइम में मॉनिटर करते रहते हैं।",
+                "वर्तमान व्यवधान प्रवाह:\n\n• संकेत: {disruption_signal}\n• स्तर: {disruption_level}\n\nहम रियल-टाइम में मॉनिटर करते रहते हैं।",
             ],
             "payment_delayed": [
                 "आपका क्लेम verification में है।\n\nPayout verification + safety checks के बाद तुरंत अपडेट होता है (आमतौर पर ~30 मिनट)।",
@@ -191,7 +254,7 @@ def _predefined_reply(lang: str, key: str, vals: dict[str, str]) -> str | None:
             ],
             "disruption_active": [
                 "ఇప్పుడే మీ జోన్ disruption status:\n\n• సంకేత బలం: {disruption_signal}\n• అంతరాయం స్థాయి: {disruption_level}",
-                "Disruption workflow:\n\n• Signal: {disruption_signal}\n• Level: {disruption_level}\n\nమేము రియల్ టైమ్‌లో మానిటర్ చేస్తూనే ఉంటాం।",
+                "ప్రస్తుత అంతరాయం ప్రవాహం:\n\n• సంకేతం: {disruption_signal}\n• స్థాయి: {disruption_level}\n\nమేము రియల్ టైమ్‌లో మానిటర్ చేస్తూనే ఉంటాం।",
             ],
             "payment_delayed": [
                 "మీ క్లెయిమ్ verification లో ఉంది।\n\nPayout verification + safety checks పూర్తయ్యాక వెంటనే అప్డేట్ అవుతుంది (సాధారణంగా ~30 నిమిషాల్లో)।",

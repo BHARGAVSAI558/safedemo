@@ -442,6 +442,7 @@ export default function ProfileSetupScreen({ navigation }) {
               <Text style={styles.shieldEmoji}>🛡️</Text>
             </Animated.View>
             <Text style={styles.successTitle}>{"You're protected 🛡️"}</Text>
+            <Text style={styles.successSub}>Coverage is active and synced with your dashboard.</Text>
 
             <View style={styles.summaryCardPremium}>
               <Text style={styles.summaryCardTitle}>Your coverage</Text>
@@ -468,8 +469,8 @@ export default function ProfileSetupScreen({ navigation }) {
               <Text style={styles.summaryFootnote}>Risk score {successPolicy.risk_score}/100 · builds as you ride with SafeNet</Text>
             </View>
 
-            <TouchableOpacity style={styles.next} onPress={goDashboard}>
-              <Text style={styles.nextText}>Go to Dashboard</Text>
+            <TouchableOpacity style={styles.successPrimaryBtn} onPress={goDashboard}>
+              <Text style={styles.successPrimaryBtnText}>Go to Dashboard</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
@@ -670,22 +671,51 @@ const styles = StyleSheet.create({
   activateText: { color: '#fff', fontSize: 17, fontWeight: '800' },
   backBtnOnly: { marginTop: 14, alignItems: 'center' },
   successWrap: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 4 },
-  shieldWrap: { marginBottom: 20 },
-  shieldEmoji: { fontSize: 100, textAlign: 'center' },
-  successTitle: { fontSize: 24, fontWeight: '800', color: '#0f172a', textAlign: 'center', marginBottom: 22 },
+  shieldWrap: {
+    marginBottom: 16,
+    backgroundColor: '#eaf2ff',
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#c7ddff',
+    width: 120,
+    height: 120,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  shieldEmoji: { fontSize: 66, textAlign: 'center' },
+  successTitle: { fontSize: 30, fontWeight: '900', color: '#0f172a', textAlign: 'center', marginBottom: 6 },
+  successSub: { fontSize: 14, color: '#64748b', textAlign: 'center', marginBottom: 18, fontWeight: '600' },
   summaryCardPremium: {
     width: '100%',
-    backgroundColor: '#f8fafc',
-    borderRadius: 20,
-    padding: 22,
+    backgroundColor: '#f8fbff',
+    borderRadius: 22,
+    padding: 20,
     borderWidth: 1,
-    borderColor: '#e2e8f0',
+    borderColor: '#dbeafe',
     marginBottom: 24,
+    shadowColor: '#1d4ed8',
+    shadowOpacity: 0.08,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 3,
   },
   summaryCardTitle: { fontSize: 12, fontWeight: '800', color: '#64748b', letterSpacing: 1, marginBottom: 12 },
   summaryLine: { fontSize: 15, color: '#334155', marginBottom: 10, lineHeight: 22 },
   summaryBold: { fontWeight: '800', color: '#0f172a' },
   summaryFootnote: { fontSize: 12, color: '#94a3b8', marginTop: 8, lineHeight: 18 },
-  logout: { marginTop: 12 },
+  successPrimaryBtn: {
+    backgroundColor: '#1d4ed8',
+    borderRadius: 14,
+    minWidth: 190,
+    paddingVertical: 14,
+    alignItems: 'center',
+    shadowColor: '#1d4ed8',
+    shadowOpacity: 0.28,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 5 },
+    elevation: 3,
+  },
+  successPrimaryBtnText: { color: '#fff', fontWeight: '900', fontSize: 20 },
+  logout: { marginTop: 14 },
   logoutText: { color: '#b91c1c', fontWeight: '700' },
 });

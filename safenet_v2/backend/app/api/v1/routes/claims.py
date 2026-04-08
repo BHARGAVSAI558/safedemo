@@ -11,6 +11,7 @@ from app.api.v1.routes.workers import get_current_user
 from app.db.session import get_db
 from app.engines.decision_engine import DecisionEngine
 from app.models.claim import DecisionType, Simulation
+from app.models.notification import Notification
 from app.models.worker import User
 from app.schemas.claim import SimulationRequest, SimulationResponse
 from app.services.simulation_labels import disruption_from_simulation
@@ -112,6 +113,15 @@ def _payout_row_from_simulation(s: Simulation) -> dict[str, Any]:
     }
 
 
+def _amount_from_title(title: str | None) -> float:
+    t = str(title or "")
+    digits = "".join(ch for ch in t if ch.isdigit() or ch == ".")
+    try:
+        return float(digits) if digits else 0.0
+    except Exception:
+        return 0.0
+
+
 @router.post("/run", response_model=SimulationResponse, status_code=201)
 async def run_claim(
     request: Request,
@@ -194,6 +204,27 @@ async def claim_history(
             # Never fail the whole history response because one row is malformed.
             continue
     next_cursor = sims[-1].id if has_more and sims else None
+    if not out:
+        notif_rows = (
+            await db.execute(
+                select(Notification)
+                .where(Notification.user_id == current_user.id, Notification.type == "payout")
+                .order_by(Notification.created_at.desc(), Notification.id.desc())
+                .limit(limit)
+            )
+        ).scalars().all()
+        out = [
+            {
+                "id": int(n.id) * -1,
+                "disruption_type": "Disruption",
+                "status": "CREDITED",
+                "payout_amount": round(_amount_from_title(n.title), 2),
+                "created_at": _created_at_utc_z(n.created_at),
+                "fraud_score": 0.0,
+                "reason": str(n.message or "Payout credited."),
+            }
+            for n in notif_rows
+        ]
     return {"data": out, "next_cursor": str(next_cursor) if next_cursor is not None else None, "total_count": int(total_count)}
 
 
@@ -230,6 +261,27 @@ async def payout_history(
         )
     ).scalar_one() or 0
     next_cursor = sims[-1].id if has_more and sims else None
+    if not data:
+        notif_rows = (
+            await db.execute(
+                select(Notification)
+                .where(Notification.user_id == current_user.id, Notification.type == "payout")
+                .order_by(Notification.created_at.desc(), Notification.id.desc())
+                .limit(limit)
+            )
+        ).scalars().all()
+        data = [
+            {
+                "date": _format_payout_date_display(n.created_at),
+                "disruption_type": "Disruption",
+                "amount": round(_amount_from_title(n.title), 2),
+                "status": "credited",
+                "icon": "cloudy",
+                "claim_id": int(n.id) * -1,
+                "source": "notification_fallback",
+            }
+            for n in notif_rows
+        ]
     return {
         "data": data,
         "next_cursor": str(next_cursor) if next_cursor is not None else None,

@@ -454,13 +454,16 @@ async def get_zone_geojson(admin: User = Depends(get_admin_user), db: AsyncSessi
         zid = str(z["zone_id"])
         min_lon, min_lat, max_lon, max_lat = z["bbox"]
         cc = claims_by_zone.get(zid, 0)
-        risk = "LOW"
-        if cc > 15:
-            risk = "HIGH"
-        elif cc >= 5:
-            risk = "MEDIUM"
         prow = _pool_row_for_canonical(pools, zid)
         bal = float(getattr(prow, "pool_balance_start_of_week", 0.0) or 0.0) if prow else 0.0
+        util = float(getattr(prow, "utilization_pct", 0.0) or 0.0) if prow else 0.0
+        # Stronger live risk signals so map doesn't stay uniformly green.
+        if util >= 80 or cc >= 8:
+            risk = "HIGH"
+        elif util >= 55 or cc >= 3:
+            risk = "MEDIUM"
+        else:
+            risk = "LOW"
         features.append(
             {
                 "type": "Feature",
@@ -470,6 +473,7 @@ async def get_zone_geojson(admin: User = Depends(get_admin_user), db: AsyncSessi
                     "claim_count": cc,
                     "risk_level": risk,
                     "pool_balance": bal,
+                    "utilization_pct": util,
                     "active_workers": int(active_by_zone.get(zid, 0)),
                     "last_disruption": last_disruption.get(zid, "—"),
                 },

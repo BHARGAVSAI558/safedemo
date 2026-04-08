@@ -135,9 +135,13 @@ export default function ClaimsScreen() {
     const isTerminal = ['APPROVED', 'PAYOUT_DONE', 'PAYOUT_CREDITED', 'CLAIM_REJECTED', 'DECISION_REJECTED', 'BLOCKED', 'REJECTED'].includes(st);
     if (!isTerminal) return;
     void historyQuery.refetch();
+    const delayed = setTimeout(() => {
+      void historyQuery.refetch();
+    }, 2500);
     const payoutAmt = Number(lastClaimUpdate?.payout_amount ?? 0);
     const hasPayout = Number.isFinite(payoutAmt) && payoutAmt > 0;
     if (hasPayout) void qc.invalidateQueries({ queryKey: ['payoutHistory'] });
+    return () => clearTimeout(delayed);
   }, [lastClaimUpdate?.claim_id, lastClaimUpdate?.status, lastClaimUpdate?.payout_amount, historyQuery, qc]);
 
   const refreshing = manualRefreshing;

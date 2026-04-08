@@ -48,8 +48,9 @@ export default function ZoneHeatmap() {
     if (risk === 'MEDIUM') return '#d97706';
     if (risk === 'LOW') return '#16a34a';
     const cc = Number(p.claim_count ?? summaryByZone[String(p.zone_id)]?.claim_density_per_hr ?? 0);
-    if (cc > 15) return '#dc2626';
-    if (cc >= 5) return '#d97706';
+    const util = Number(p.utilization_pct ?? summaryByZone[String(p.zone_id)]?.utilization_pct ?? 0);
+    if (util >= 80 || cc >= 8) return '#dc2626';
+    if (util >= 55 || cc >= 3) return '#d97706';
     return '#16a34a';
   };
 
@@ -73,6 +74,9 @@ export default function ZoneHeatmap() {
       <header style={adminUi.pageHeader}>
         <h1 style={adminUi.h1}>Zone heatmap</h1>
         <p style={adminUi.sub}>Hyderabad-centered zones. Color reflects risk / claim density. Popups show live summary; toggles reserve future layers.</p>
+        <p style={{ fontSize: 12, color: 'var(--admin-muted)', fontWeight: 700 }}>
+          Legend: <span style={{ color: '#16a34a' }}>Green</span> low, <span style={{ color: '#d97706' }}>Orange</span> medium, <span style={{ color: '#dc2626' }}>Red</span> high
+        </p>
       </header>
 
       <div style={{ ...adminUi.card, marginBottom: 16 }}>

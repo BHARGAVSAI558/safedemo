@@ -23,6 +23,8 @@ const assistantContent = {
     ],
     placeholder: 'Type your message...',
     empty: 'Ask a question. Support and admin replies will appear here.',
+    systemLabel: 'System',
+    adminLabel: 'Admin',
   },
   hi: {
     label: 'हिन्दी',
@@ -40,6 +42,8 @@ const assistantContent = {
     ],
     placeholder: 'अपना संदेश लिखें...',
     empty: 'अपना प्रश्न भेजें। सपोर्ट और एडमिन के जवाब यहां दिखेंगे।',
+    systemLabel: 'सिस्टम',
+    adminLabel: 'एडमिन',
   },
   te: {
     label: 'తెలుగు',
@@ -57,6 +61,8 @@ const assistantContent = {
     ],
     placeholder: 'మీ సందేశాన్ని టైప్ చేయండి...',
     empty: 'మీ ప్రశ్నను పంపండి. సపోర్ట్/అడ్మిన్ సమాధానాలు ఇక్కడ కనిపిస్తాయి.',
+    systemLabel: 'సిస్టమ్',
+    adminLabel: 'అడ్మిన్',
   },
 };
 
@@ -179,13 +185,13 @@ export default function AssistantModal({ visible, onClose }) {
                       <Text style={styles.userTime}>{timeText}</Text>
                     </View>
                     <View style={[styles.bubble, styles.systemBubble]}>
-                      <Text style={styles.sysLabel}>System</Text>
+                      <Text style={styles.sysLabel}>{languagePack.systemLabel}</Text>
                       <Text style={styles.sysText}>{row.reply}</Text>
                       <Text style={styles.msgTime}>{timeText}</Text>
                     </View>
                     {row.admin_reply ? (
                       <View style={[styles.bubble, styles.adminBubble]}>
-                        <Text style={styles.adminLabel}>Admin</Text>
+                        <Text style={styles.adminLabel}>{languagePack.adminLabel}</Text>
                         <Text style={styles.adminText}>{row.admin_reply}</Text>
                         <Text style={styles.msgTime}>{timeText}</Text>
                       </View>

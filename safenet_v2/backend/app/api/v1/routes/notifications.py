@@ -98,7 +98,16 @@ async def list_notifications(
     if ntype:
         stmt = stmt.where(Notification.type == str(ntype))
     rows = (await db.execute(stmt)).scalars().all()
-    unread = sum(1 for r in rows if not bool(r.is_read))
+    # Retroactive dedupe: collapse repeated rows with same type/title/message.
+    deduped: list[Notification] = []
+    seen: set[str] = set()
+    for r in rows:
+        key = f"{str(r.type)}|{str(r.title)}|{str(r.message)}"
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(r)
+    unread = sum(1 for r in deduped if not bool(r.is_read))
     return {
         "unread_count": unread,
         "data": [
@@ -111,7 +120,7 @@ async def list_notifications(
                 "is_read": bool(r.is_read),
                 "created_at": _as_utc_iso(r.created_at),
             }
-            for r in rows
+            for r in deduped
         ],
     }
 

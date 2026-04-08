@@ -494,6 +494,7 @@ export default function DashboardScreen({ navigation }) {
   const [approvalToast, setApprovalToast] = useState(null);
   const approvalSlide = useRef(new Animated.Value(-140)).current;
   const lastApprovedIdRef = useRef(null);
+  const lastNotifToastIdRef = useRef(null);
   const approvalHideTimerRef = useRef(null);
   const zoneStressAnim = useRef(new Animated.Value(0)).current;
 
@@ -533,6 +534,33 @@ export default function DashboardScreen({ navigation }) {
       clearTimeout(safety);
     };
   }, [lastClaimUpdate, approvalSlide]);
+
+  useEffect(() => {
+    const rows = notificationsQuery.data?.data;
+    if (!Array.isArray(rows) || rows.length === 0) return;
+    const latestPayout = rows.find((n) => String(n?.type || '').toLowerCase() === 'payout');
+    if (!latestPayout) return;
+    const nid = String(latestPayout.id || '');
+    if (!nid || lastNotifToastIdRef.current === nid) return;
+    const amount = Number(String(latestPayout.title || '').replace(/[^\d.]/g, '')) || 0;
+    lastNotifToastIdRef.current = nid;
+    setApprovalToast({
+      amount,
+      disruption: 'Disruption',
+      shieldLine: null,
+    });
+    approvalSlide.setValue(-140);
+    Animated.spring(approvalSlide, { toValue: 0, friction: 7, tension: 80, useNativeDriver: true }).start();
+    if (approvalHideTimerRef.current) clearTimeout(approvalHideTimerRef.current);
+    approvalHideTimerRef.current = setTimeout(() => {
+      Animated.timing(approvalSlide, { toValue: -140, duration: 240, useNativeDriver: true }).start(() => {
+        setApprovalToast(null);
+        approvalSlide.setValue(-140);
+      });
+    }, 3200);
+    qc.invalidateQueries({ queryKey: ['claimsHistory'] });
+    qc.invalidateQueries({ queryKey: ['payoutHistory'] });
+  }, [notificationsQuery.data, approvalSlide, qc]);
 
   useEffect(() => {
     // If backend/UI sends follow-up statuses, don’t leave the toast pinned.
@@ -830,10 +858,15 @@ export default function DashboardScreen({ navigation }) {
     if (Number.isFinite(amt) && amt > 0) {
       qc.invalidateQueries({ queryKey: ['payoutHistory'] });
     }
+    const delayed = setTimeout(() => {
+      qc.invalidateQueries({ queryKey: ['claimsHistory'] });
+      qc.invalidateQueries({ queryKey: ['payoutHistory'] });
+    }, 2500);
     qc.invalidateQueries({ queryKey: ['workerProfile'] });
     qc.invalidateQueries({ queryKey: ['earningsDna'] });
     qc.invalidateQueries({ queryKey: ['zoneStatus'] });
     qc.invalidateQueries({ queryKey: ['forecastShield'] });
+    return () => clearTimeout(delayed);
   }, [lastClaimUpdate, qc]);
 
   const forecastShields = Array.isArray(forecastShieldQuery.data?.shields)
