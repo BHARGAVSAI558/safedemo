@@ -302,6 +302,10 @@ async def health(request: Request):
     return {
         "status": overall,
         "version": settings.APP_VERSION,
+        "storage": {
+            "driver": "sqlite" if settings.is_sqlite else "postgres",
+            "persistent": not settings.is_sqlite,
+        },
         "database": {"connected": db_ok},
         "redis": {"connected": redis_ok, "skipped": redis_skipped},
         "mongodb": {"connected": mongo_ok, "skipped": mongo_skipped},

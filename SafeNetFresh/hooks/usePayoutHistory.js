@@ -11,13 +11,16 @@ export function usePayoutHistory() {
     enabled: Boolean(token),
     queryFn: async () => {
       const rows = await claims.getPayouts(10);
-      return Array.isArray(rows) ? rows : [];
+      const list = Array.isArray(rows) ? rows : [];
+      return list.filter((r) => Number(r?.amount ?? r?.payout ?? r?.payout_amount ?? 0) > 0);
     },
     staleTime: 1000 * 30,
+    gcTime: 1000 * 60 * 10,
     refetchInterval: 10000,
     refetchOnMount: 'always',
     refetchOnReconnect: true,
     retry: 1,
+    placeholderData: (prev) => prev ?? [],
   });
 }
 

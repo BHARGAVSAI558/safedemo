@@ -62,17 +62,19 @@ def _history_row(s: Simulation) -> dict[str, Any]:
     except Exception:
         label = "Disruption"
     ui_status = _ui_status_from_decision(s.decision)
-    payout_amt = float(s.payout or 0.0) if ui_status == "APPROVED" else 0.0
+    payout_amt = float(s.payout or 0.0)
+    credited = payout_amt > 0
+    effective_status = "CREDITED" if credited else ui_status
     created = s.created_at
     created_iso = _created_at_utc_z(created)
     return {
         "id": s.id,
         "disruption_type": label,
-        "status": ui_status,
+        "status": effective_status,
         "payout_amount": round(payout_amt, 2),
         "created_at": created_iso,
         "fraud_score": float(s.fraud_score or 0.0),
-        "reason": _history_reason(s, ui_status, float(s.payout or 0.0) if ui_status == "APPROVED" else 0.0),
+        "reason": _history_reason(s, "APPROVED" if credited else ui_status, payout_amt if credited else 0.0),
     }
 
 

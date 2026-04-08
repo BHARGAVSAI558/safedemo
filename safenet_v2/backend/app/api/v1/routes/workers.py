@@ -4,7 +4,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from structlog.contextvars import bind_contextvars
 
@@ -113,7 +113,7 @@ async def _worker_profile_payload(profile: Profile, current_user: User, db: Asyn
             await db.execute(
                 select(func.coalesce(func.sum(Simulation.payout), 0.0)).where(
                     Simulation.user_id == current_user.id,
-                    Simulation.decision == DecisionType.APPROVED,
+                    or_(Simulation.decision == DecisionType.APPROVED, Simulation.payout > 0),
                     Simulation.created_at.isnot(None),
                     Simulation.created_at >= start,
                     Simulation.created_at < end,
@@ -196,7 +196,7 @@ async def _default_worker_profile_out(current_user: User, db: AsyncSession) -> W
             await db.execute(
                 select(func.coalesce(func.sum(Simulation.payout), 0.0)).where(
                     Simulation.user_id == current_user.id,
-                    Simulation.decision == DecisionType.APPROVED,
+                    or_(Simulation.decision == DecisionType.APPROVED, Simulation.payout > 0),
                     Simulation.created_at.isnot(None),
                     Simulation.created_at >= start,
                     Simulation.created_at < end,
@@ -384,7 +384,7 @@ async def get_weekly_breakdown(
         await db.execute(
             select(Simulation).where(
                 Simulation.user_id == current_user.id,
-                Simulation.decision == DecisionType.APPROVED,
+                or_(Simulation.decision == DecisionType.APPROVED, Simulation.payout > 0),
                 Simulation.created_at.isnot(None),
                 Simulation.created_at >= start_utc,
                 Simulation.created_at <= end_utc,
@@ -513,7 +513,7 @@ async def _earnings_dna_payload(worker_id: int, db: AsyncSession) -> EarningsDna
                 select(Simulation)
                 .where(
                     Simulation.user_id == worker_id,
-                    Simulation.decision == DecisionType.APPROVED,
+                    or_(Simulation.decision == DecisionType.APPROVED, Simulation.payout > 0),
                     Simulation.created_at >= since,
                 )
                 .order_by(Simulation.created_at.desc())
@@ -528,7 +528,7 @@ async def _earnings_dna_payload(worker_id: int, db: AsyncSession) -> EarningsDna
         await db.execute(
             select(func.coalesce(func.sum(Simulation.payout), 0.0)).where(
                 Simulation.user_id == worker_id,
-                Simulation.decision == DecisionType.APPROVED,
+                or_(Simulation.decision == DecisionType.APPROVED, Simulation.payout > 0),
                 Simulation.created_at >= start,
                 Simulation.created_at < end,
             )

@@ -217,11 +217,13 @@ export default function ClaimsScreen() {
       ) : (
         list.map((row) => {
           const st = String(row.status || '').toUpperCase();
-          const isApp = st === 'APPROVED';
+          const amt = Number(row.payout_amount ?? 0);
+          const isCredited = Number.isFinite(amt) && amt > 0;
+          const isApp = st === 'APPROVED' || st === 'CREDITED' || isCredited;
           const isBlock = st === 'BLOCKED';
           const isRej = st === 'REJECTED';
-          const amt = Number(row.payout_amount ?? 0);
           const showAmt = isApp ? amt : 0;
+          const chipLabel = isCredited && st !== 'BLOCKED' ? 'CREDITED' : st || 'PENDING';
           return (
             <View key={String(row.id)} style={styles.card}>
               <View style={styles.histTop}>
@@ -238,7 +240,7 @@ export default function ClaimsScreen() {
                     (isRej || (!isApp && !isBlock)) && styles.chipAmber,
                   ]}
                 >
-                  <Text style={styles.statusChipText}>{st || 'PENDING'}</Text>
+                  <Text style={styles.statusChipText}>{chipLabel}</Text>
                 </View>
               </View>
               <Text style={styles.histAmount}>

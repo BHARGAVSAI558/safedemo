@@ -13,7 +13,7 @@ import {
   YAxis,
 } from 'recharts';
 
-import api from '../api';
+import api, { BASE_URL } from '../api';
 import { adminUi } from '../theme/adminUi';
 import { useClaimsFeedStore, type AdminClaimUpdate } from '../stores/claimsFeed';
 import { useFraudQueueStore, type AdminFraudAlert } from '../stores/fraudQueue';
@@ -31,6 +31,12 @@ type AdminKpiResponse = {
   loss_ratio_target_high: number;
   pooled_total_amount?: number;
   paid_total_amount?: number;
+};
+type HealthResponse = {
+  storage?: {
+    driver?: string;
+    persistent?: boolean;
+  };
 };
 
 const EMPTY_KPIS: AdminKpiResponse = {
@@ -141,6 +147,14 @@ export default function Dashboard() {
     queryFn: async (): Promise<AdminKpiResponse> => (await api.get('/admin/kpis')).data,
     refetchInterval: 30_000,
   });
+  const healthQuery = useQuery({
+    queryKey: ['backend', 'health'],
+    queryFn: async (): Promise<HealthResponse> => {
+      const res = await fetch(`${BASE_URL}/health`);
+      return (await res.json()) as HealthResponse;
+    },
+    refetchInterval: 60_000,
+  });
 
   const simulationsFeedQuery = useQuery({
     queryKey: ['admin', 'simulations', 'feed'],
@@ -233,6 +247,7 @@ export default function Dashboard() {
       />
     </div>
   );
+  const isPersistentStorage = healthQuery.data?.storage?.persistent !== false;
 
   const zones = useMemo(() => {
     const arr = Object.values(poolHealthByZone).filter(Boolean);
@@ -309,6 +324,15 @@ export default function Dashboard() {
           }
         `}
       </style>
+
+      {!isPersistentStorage ? (
+        <div style={styles.poolWarnBanner}>
+          <div style={styles.poolWarnLine}>Storage warning: SQLite mode detected</div>
+          <div style={{ color: '#9a3412', fontSize: 12, fontWeight: 600 }}>
+            Data may reset on restart/deploy. Set backend `DATABASE_URL` to managed Postgres for permanent storage.
+          </div>
+        </div>
+      ) : null}
 
       {fraudToast ? (
         <div style={styles.fraudToast} role="status">
