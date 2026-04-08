@@ -27,14 +27,13 @@ type UserAdminResponse = {
 export default function Users() {
   const [users, setUsers] = useState<UserAdminResponse[]>([]);
   const [loading, setLoading] = useState(true);
+  const [deletingId, setDeletingId] = useState<number | null>(null);
 
-  useEffect(() => {
-    let mounted = true;
+  const loadUsers = () => {
     setLoading(true);
     api
       .get('/admin/users')
       .then((r) => {
-        if (!mounted) return;
         setUsers(r.data);
       })
       .catch((e) => {
@@ -42,13 +41,33 @@ export default function Users() {
         console.error(e);
       })
       .finally(() => {
-        if (!mounted) return;
         setLoading(false);
       });
+  };
+
+  useEffect(() => {
+    let mounted = true;
+    if (!mounted) return;
+    loadUsers();
     return () => {
       mounted = false;
     };
   }, []);
+
+  const onDeleteUser = async (id: number) => {
+    if (!window.confirm(`Delete user ${id} and all related data? This cannot be undone.`)) return;
+    setDeletingId(id);
+    try {
+      await api.delete(`/admin/users/${id}`);
+      loadUsers();
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error(e);
+      window.alert('Could not delete user. Try again.');
+    } finally {
+      setDeletingId(null);
+    }
+  };
 
   if (loading) return <div style={styles.loading}>Loading users...</div>;
 
@@ -71,6 +90,7 @@ export default function Users() {
               <th style={styles.th}>Total Payouts</th>
               <th style={styles.th}>Status</th>
               <th style={styles.th}>Joined</th>
+              <th style={styles.th}>Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -105,6 +125,16 @@ export default function Users() {
                   </span>
                 </td>
                 <td style={styles.td}>{u.created_at ? new Date(u.created_at).toLocaleDateString() : '—'}</td>
+                <td style={styles.td}>
+                  <button
+                    type="button"
+                    style={styles.deleteBtn}
+                    disabled={deletingId === u.id}
+                    onClick={() => onDeleteUser(u.id)}
+                  >
+                    {deletingId === u.id ? 'Deleting…' : 'Delete'}
+                  </button>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -129,6 +159,15 @@ const styles: Record<string, React.CSSProperties> = {
   tr: { borderBottom: '1px solid #f0f0f0' },
   td: { padding: '12px 16px', fontSize: 13, color: '#333' },
   badge: { padding: '3px 10px', borderRadius: 20, fontSize: 12, fontWeight: 700 },
+  deleteBtn: {
+    backgroundColor: '#fee2e2',
+    color: '#b91c1c',
+    border: '1px solid #fecaca',
+    borderRadius: 8,
+    padding: '6px 10px',
+    fontWeight: 700,
+    cursor: 'pointer',
+  },
   loading: { textAlign: 'center', padding: 60, color: '#888' },
 };
 

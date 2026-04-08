@@ -4,7 +4,8 @@ import asyncio
 import json
 import traceback
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 from types import SimpleNamespace
 from typing import Any, Literal
 
@@ -101,6 +102,20 @@ def _deterministic_demo_payout(expected_slot: float, daily_cap: float, scenario:
     return round(amt, 2)
 
 
+def _eligible_scenarios_for_today(user_id: int, now_utc: datetime) -> set[str]:
+    """
+    Rotate exactly 2 payout-eligible disruption types per user per IST day.
+    This keeps demos realistic and non-repetitive.
+    """
+    ist_day = now_utc.astimezone(timezone(timedelta(hours=5, minutes=30))).strftime("%Y-%m-%d")
+    seed = f"{user_id}:{ist_day}".encode("utf-8")
+    digest = sha256(seed).hexdigest()
+    all_scenarios = ["HEAVY_RAIN", "EXTREME_HEAT", "AQI_SPIKE", "CURFEW"]
+    start = int(digest[:2], 16) % len(all_scenarios)
+    second = (start + 2 + (int(digest[2:4], 16) % 2)) % len(all_scenarios)
+    return {all_scenarios[start], all_scenarios[second]}
+
+
 class SimulationRunRequest(BaseModel):
     scenario: Literal["HEAVY_RAIN", "EXTREME_HEAT", "AQI_SPIKE", "CURFEW"]
     zone_id: str = Field(default="", max_length=128)
@@ -172,9 +187,40 @@ async def _demo_claim_pipeline(
                 daily_cap,
                 sims_for_dna,
             )
+            now_utc = datetime.now(timezone.utc)
+            eligible_today = _eligible_scenarios_for_today(worker_id, now_utc)
+            scenario_allowed_today = body.scenario in eligible_today
+
+            # Block duplicate payout for same disruption type within the same IST day.
+            start_ist = now_utc.astimezone(timezone(timedelta(hours=5, minutes=30))).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+            start_utc = start_ist.astimezone(timezone.utc)
+            approved_today = (
+                await db.execute(
+                    select(Simulation)
+                    .where(
+                        Simulation.user_id == worker_id,
+                        Simulation.decision == DecisionType.APPROVED,
+                        Simulation.created_at >= start_utc,
+                    )
+                    .order_by(Simulation.created_at.desc())
+                    .limit(40)
+                )
+            ).scalars().all()
+            already_paid_this_disruption = False
+            for s in approved_today:
+                try:
+                    wd = json.loads(s.weather_data) if isinstance(s.weather_data, str) and s.weather_data else {}
+                except Exception:
+                    wd = {}
+                if str(wd.get("scenario") or "").upper() == body.scenario:
+                    already_paid_this_disruption = True
+                    break
+
             # Realistic demo cadence: 2 payouts, then 1 no-disruption (no payout).
             cycle_idx = len(sims_for_dna) % 3
-            no_disruption_this_run = cycle_idx == 2
+            no_disruption_this_run = cycle_idx == 2 or (not scenario_allowed_today) or already_paid_this_disruption
             scenario_hours = {
                 "HEAVY_RAIN": 5.0,
                 "EXTREME_HEAT": 4.0,
@@ -223,7 +269,15 @@ async def _demo_claim_pipeline(
                 payout=0.0 if no_disruption_this_run else float(payout_total),
                 decision=DecisionType.REJECTED if no_disruption_this_run else DecisionType.APPROVED,
                 reason=(
-                    f"No live disruption found in {zone_label} during this check"
+                    (
+                        f"Already paid today for {body.scenario.replace('_', ' ').title()} in your zone"
+                        if already_paid_this_disruption
+                        else (
+                            f"No verified {body.scenario.replace('_', ' ').lower()} disruption in {zone_label} right now"
+                            if not scenario_allowed_today
+                            else f"No live disruption found in {zone_label} during this check"
+                        )
+                    )
                     if no_disruption_this_run
                     else f"Demo approved — {body.scenario}"
                 ),
@@ -302,7 +356,15 @@ async def _demo_claim_pipeline(
                     worker_id=worker_id,
                     claim_id=cid,
                     status="CLAIM_REJECTED",
-                    message=f"No confirmed disruption in {zone_label}. Monitoring continues in real time.",
+                    message=(
+                        f"Already paid today for {body.scenario.replace('_', ' ').title()} in your zone."
+                        if already_paid_this_disruption
+                        else (
+                            f"No verified {body.scenario.replace('_', ' ').lower()} disruption in {zone_label} right now."
+                            if not scenario_allowed_today
+                            else f"No confirmed disruption in {zone_label}. Monitoring continues in real time."
+                        )
+                    ),
                     payout_amount=0.0,
                     zone_id=zone_id,
                     disruption_type=body.scenario,
@@ -354,8 +416,16 @@ async def _demo_claim_pipeline(
                     db,
                     user_id=worker_id,
                     ntype="system",
-                    title="No disruption detected",
-                    message="No verified disruption this run. SafeNet is still monitoring your zone.",
+                    title="Claim update",
+                    message=(
+                        f"Already paid today for {body.scenario.replace('_', ' ').title()} in your zone."
+                        if already_paid_this_disruption
+                        else (
+                            f"No verified {body.scenario.replace('_', ' ').lower()} disruption in your area right now."
+                            if not scenario_allowed_today
+                            else "No verified disruption this run. SafeNet is still monitoring your zone."
+                        )
+                    ),
                 )
             else:
                 await create_notification(

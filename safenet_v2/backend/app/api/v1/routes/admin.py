@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -15,6 +15,8 @@ from app.db.session import get_db
 from app.models.claim import DecisionType, Log, Simulation
 from app.models.device_fingerprint import DeviceFingerprint
 from app.models.fraud import FraudSignal
+from app.models.notification import Notification
+from app.models.payout import PayoutRecord
 from app.models.support import SupportQuery
 from app.models.pool_balance import ZonePoolBalance
 from app.models.policy import Policy
@@ -254,6 +256,36 @@ async def get_all_users(
         select(User).options(selectinload(User.profile)).offset(skip).limit(limit)
     )
     return result.scalars().unique().all()
+
+
+@router.delete("/users/{user_id}")
+async def delete_user_admin(
+    user_id: int,
+    admin: User = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if int(user_id) == int(admin.id):
+        raise HTTPException(status_code=400, detail="You cannot delete your own admin user")
+
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Delete dependent rows first to avoid FK violations.
+    sim_ids = (await db.execute(select(Simulation.id).where(Simulation.user_id == user_id))).scalars().all()
+    if sim_ids:
+        await db.execute(delete(PayoutRecord).where(PayoutRecord.simulation_id.in_(sim_ids)))
+        await db.execute(delete(FraudSignal).where(FraudSignal.simulation_id.in_(sim_ids)))
+        await db.execute(delete(Log).where(Log.user_id == user_id))
+        await db.execute(delete(Simulation).where(Simulation.id.in_(sim_ids)))
+    await db.execute(delete(DeviceFingerprint).where(DeviceFingerprint.user_id == user_id))
+    await db.execute(delete(Profile).where(Profile.user_id == user_id))
+    await db.execute(delete(Policy).where(Policy.user_id == user_id))
+    await db.execute(delete(SupportQuery).where(SupportQuery.user_id == user_id))
+    await db.execute(delete(Notification).where(Notification.user_id == user_id))
+    await db.execute(delete(User).where(User.id == user_id))
+    await db.commit()
+    return {"ok": True, "deleted_user_id": user_id}
 
 
 @router.get("/simulations")
