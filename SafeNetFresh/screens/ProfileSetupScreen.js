@@ -16,6 +16,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useAuth } from '../contexts/AuthContext';
+import { usePolicy } from '../contexts/PolicyContext';
 import { gigProfile, workers, policies, formatApiError } from '../services/api';
 
 const BRAND = '#1A56DB';
@@ -93,6 +94,7 @@ function formatValidUntil(iso) {
 
 export default function ProfileSetupScreen({ navigation }) {
   const { signOut, dispatch } = useAuth();
+  const { setPolicy } = usePolicy();
   const insets = useSafeAreaInsets();
   const nameRef = useRef(null);
   const [step, setStep] = useState(1);
@@ -103,6 +105,7 @@ export default function ProfileSetupScreen({ navigation }) {
   const [tier, setTier] = useState('Standard');
   const [loading, setLoading] = useState(false);
   const [successPolicy, setSuccessPolicy] = useState(null);
+  const tierRef = useRef('Standard');
 
   const shieldScale = useRef(new Animated.Value(0.3)).current;
 
@@ -138,6 +141,10 @@ export default function ProfileSetupScreen({ navigation }) {
 
   const selectedTier = TIERS.find((t) => t.id === tier) || TIERS[1];
 
+  useEffect(() => {
+    tierRef.current = tier;
+  }, [tier]);
+
   const submitOnboarding = async () => {
     if (!name.trim() || name.trim().length < 2) {
       Alert.alert('Name needed', 'Please tell us what to call you.');
@@ -160,8 +167,36 @@ export default function ProfileSetupScreen({ navigation }) {
         working_hours_preset: hoursPreset,
         coverage_tier: tier,
       });
-      const activated = await policies.activate({ tier });
-      setSuccessPolicy(activated);
+      const chosenTierId = tierRef.current || tier;
+      const chosenTier = TIERS.find((t) => t.id === chosenTierId) || selectedTier;
+      const activated = await policies.activate({ tier: chosenTierId });
+      const mergedSuccess = {
+        ...activated,
+        tier: chosenTierId,
+        zone_label: zone?.label || activated?.zone_label || 'Hyderabad',
+        zone_risk_level:
+          zone?.riskLevel === 'high'
+            ? 'High Risk'
+            : zone?.riskLevel === 'low'
+              ? 'Low Risk'
+              : activated?.zone_risk_level || 'Medium Risk',
+        max_coverage_per_day: chosenTier.daily,
+      };
+      setSuccessPolicy(mergedSuccess);
+      // Keep app state synced immediately with selected plan after activation.
+      setPolicy(
+        {
+          status: 'active',
+          tier: chosenTierId,
+          weekly_premium: Number(activated?.weekly_premium ?? chosenTier.weekly),
+          valid_until: activated?.valid_until,
+          max_coverage_per_day: chosenTier.daily,
+          risk_score: Number(activated?.risk_score ?? zoneScore),
+          zone: zone?.label || 'Hyderabad',
+          policy_id: activated?.id,
+        },
+        'active'
+      );
       setStep(6);
     } catch (e) {
       if (e?.response?.status === 401) {
@@ -394,7 +429,10 @@ export default function ProfileSetupScreen({ navigation }) {
                 <TouchableOpacity
                   key={t.id}
                   style={[styles.tierCard, selected && styles.tierCardOn]}
-                  onPress={() => setTier(t.id)}
+                  onPress={() => {
+                    setTier(t.id);
+                    tierRef.current = t.id;
+                  }}
                   activeOpacity={0.9}
                 >
                   {rec ? (

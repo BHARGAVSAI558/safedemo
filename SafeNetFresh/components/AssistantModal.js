@@ -274,6 +274,7 @@ export default function AssistantModal({ visible, onClose }) {
             </View>
           ) : (
             <ScrollView
+              style={styles.quickStrip}
               horizontal
               showsHorizontalScrollIndicator={false}
               contentContainerStyle={styles.quickRow}
@@ -319,14 +320,18 @@ export default function AssistantModal({ visible, onClose }) {
 
 const styles = StyleSheet.create({
   wrap: { flex: 1, backgroundColor: 'rgba(0,0,0,0.35)', justifyContent: 'flex-end' },
-  keyboardWrap: { width: '100%' },
+  keyboardWrap: { flex: 1, width: '100%', justifyContent: 'flex-end' },
   card: {
     backgroundColor: '#fff',
     borderTopLeftRadius: 18,
     borderTopRightRadius: 18,
-    height: '90%',
-    maxHeight: '90%',
-    padding: 14,
+    height: '80%',
+    maxHeight: '80%',
+    paddingHorizontal: 12,
+    paddingTop: 12,
+    paddingBottom: 10,
+    borderTopWidth: 1,
+    borderColor: '#e2e8f0',
   },
   head: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   headLeft: { flexDirection: 'row', alignItems: 'center', gap: 8, flex: 1 },
@@ -354,10 +359,10 @@ const styles = StyleSheet.create({
   langItemActive: { backgroundColor: '#eff6ff' },
   langItemText: { color: '#334155', fontWeight: '600' },
   langItemTextActive: { color: '#1d4ed8', fontWeight: '800' },
-  title: { fontSize: 18, fontWeight: '900', color: '#0f172a' },
+  title: { fontSize: 16, fontWeight: '900', color: '#0f172a' },
   close: { color: '#1a73e8', fontWeight: '700' },
-  history: { marginTop: 10, flex: 1, minHeight: 120 },
-  historyContent: { paddingBottom: 12 },
+  history: { marginTop: 8, flex: 1, minHeight: 140 },
+  historyContent: { paddingBottom: 10, paddingHorizontal: 2 },
   dayPillWrap: { alignItems: 'center', marginVertical: 4 },
   dayPillText: {
     fontSize: 11,
@@ -369,7 +374,7 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   empty: { color: '#64748b', fontSize: 13 },
-  bubble: { borderRadius: 12, padding: 10, marginTop: 6, maxWidth: '90%' },
+  bubble: { borderRadius: 12, padding: 10, marginTop: 6, maxWidth: '85%' },
   userBubble: { alignSelf: 'flex-end', backgroundColor: '#1a73e8' },
   userText: { color: '#fff', fontWeight: '700' },
   userTime: { color: 'rgba(255,255,255,0.8)', fontSize: 10, marginTop: 6, textAlign: 'right' },
@@ -380,9 +385,29 @@ const styles = StyleSheet.create({
   adminLabel: { fontSize: 10, fontWeight: '900', color: '#0c4a6e', marginBottom: 4, textTransform: 'uppercase' },
   adminText: { color: '#0f172a', fontSize: 13, fontWeight: '700' },
   msgTime: { color: '#64748b', fontSize: 10, marginTop: 6, textAlign: 'right' },
-  quickRow: { gap: 8, paddingVertical: 8 },
-  quickBtn: { borderRadius: 999, borderWidth: 1, borderColor: '#dbeafe', backgroundColor: '#eff6ff', paddingVertical: 6, paddingHorizontal: 10 },
-  quickText: { color: '#1d4ed8', fontSize: 12, fontWeight: '700' },
+  quickStrip: {
+    marginTop: 6,
+    maxHeight: 58,
+    minHeight: 58,
+    borderTopWidth: 1,
+    borderTopColor: '#e2e8f0',
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+  },
+  quickRow: { gap: 8, paddingVertical: 10, alignItems: 'center' },
+  quickBtn: {
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#cbd5e1',
+    backgroundColor: '#f8fafc',
+    paddingVertical: 7,
+    paddingHorizontal: 10,
+    alignSelf: 'center',
+    maxWidth: 210,
+    minHeight: 32,
+    justifyContent: 'center',
+  },
+  quickText: { color: '#334155', fontSize: 11, fontWeight: '700' },
   inputRow: { flexDirection: 'row', gap: 8, alignItems: 'center', marginTop: 8, marginBottom: 4 },
   input: { flex: 1, borderWidth: 1, borderColor: '#e2e8f0', borderRadius: 10, paddingHorizontal: 10, paddingVertical: 10, fontSize: 14 },
   send: { backgroundColor: '#1a73e8', borderRadius: 10, paddingHorizontal: 14, paddingVertical: 10 },
