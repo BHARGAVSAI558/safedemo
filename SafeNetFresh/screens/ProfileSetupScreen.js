@@ -173,6 +173,7 @@ export default function ProfileSetupScreen({ navigation }) {
       const mergedSuccess = {
         ...activated,
         tier: chosenTierId,
+        weekly_premium: chosenTier.weekly,
         zone_label: zone?.label || activated?.zone_label || 'Hyderabad',
         zone_risk_level:
           zone?.riskLevel === 'high'
@@ -188,7 +189,7 @@ export default function ProfileSetupScreen({ navigation }) {
         {
           status: 'active',
           tier: chosenTierId,
-          weekly_premium: Number(activated?.weekly_premium ?? chosenTier.weekly),
+          weekly_premium: Number(chosenTier.weekly),
           valid_until: activated?.valid_until,
           max_coverage_per_day: chosenTier.daily,
           risk_score: Number(activated?.risk_score ?? zoneScore),

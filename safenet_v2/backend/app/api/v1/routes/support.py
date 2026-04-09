@@ -11,6 +11,7 @@ from app.api.v1.routes.admin import get_admin_user
 from app.api.v1.routes.workers import get_current_user
 from app.db.session import get_db
 from app.models.claim import ClaimLifecycle, DecisionType, Simulation
+from app.models.notification import Notification
 from app.models.support import SupportQuery
 from app.models.policy import Policy
 from app.models.worker import User
@@ -429,6 +430,34 @@ def _format_last_five_histories(lang: str, sims: list[Simulation]) -> str:
     return "Your last 5 transactions (Success/Denied):\n\n" + "\n".join(lines) + "\n\nInclude Transaction ID when raising a ticket."
 
 
+def _format_last_five_from_notifications(lang: str, rows: list[Notification]) -> str:
+    l = _norm_lang(lang)
+    if not rows:
+        if l == "hi":
+            return "अभी कोई ट्रांजैक्शन हिस्ट्री नहीं मिली। एक disruption रन के बाद मैं आपकी latest 5 entries दिखाऊँगा।"
+        if l == "te":
+            return "ఇప్పటికీ ట్రాన్సాక్షన్ హిస్టరీ లేదు. ఒక disruption run తర్వాత మీ latest 5 entries చూపిస్తాను."
+        return "No transaction history found yet. Run one disruption and I will show your latest 5 entries."
+
+    lines: list[str] = []
+    for n in rows[:5]:
+        title = str(getattr(n, "title", "") or "")
+        digits = "".join(ch for ch in title if ch.isdigit() or ch == ".")
+        try:
+            amt = int(round(float(digits))) if digits else 0
+        except Exception:
+            amt = 0
+        txid = f"NTX-{_to_base36(max(1, int(n.id)) * 7919 + 97)}"
+        ts = _as_utc_iso(getattr(n, "created_at", None))
+        lines.append(f"• {txid} | SUCCESS | Disruption | ₹{amt} | {ts}")
+
+    if l == "hi":
+        return "आपकी latest 5 transactions (Success/Denied):\n\n" + "\n".join(lines) + "\n\nIssue raise करते समय Transaction ID लिखें।"
+    if l == "te":
+        return "మీ latest 5 ట్రాన్సాక్షన్లు (Success/Denied):\n\n" + "\n".join(lines) + "\n\nIssue raise చేసే సమయంలో Transaction ID ఇవ్వండి."
+    return "Your last 5 transactions (Success/Denied):\n\n" + "\n".join(lines) + "\n\nInclude Transaction ID when raising a ticket."
+
+
 async def _auto_system_reply(db: AsyncSession, user_id: int, msg: str, lang: str = "en") -> str:
     t = msg.lower()
     life = (
@@ -555,7 +584,18 @@ async def create_support_query(
                 .limit(5)
             )
         ).scalars().all()
-        sys_reply = _format_last_five_histories(body.language, latest)
+        if latest:
+            sys_reply = _format_last_five_histories(body.language, latest)
+        else:
+            notif_rows = (
+                await db.execute(
+                    select(Notification)
+                    .where(Notification.user_id == uid, Notification.type == "payout")
+                    .order_by(Notification.created_at.desc(), Notification.id.desc())
+                    .limit(5)
+                )
+            ).scalars().all()
+            sys_reply = _format_last_five_from_notifications(body.language, notif_rows)
     if not sys_reply:
         sys_reply = await _auto_system_reply(db, uid, body.message, body.language)
     is_ticket = str(body.type or "").lower() == "ticket" or str(body.query_key or "").lower() == "raise_ticket"

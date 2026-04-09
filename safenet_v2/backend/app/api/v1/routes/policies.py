@@ -42,6 +42,11 @@ TIER_MULT: Dict[str, float] = {
     "Standard": 1.0,
     "Pro": 1.12,
 }
+TIER_LIST_WEEKLY: Dict[str, float] = {
+    "Basic": 35.0,
+    "Standard": 49.0,
+    "Pro": 70.0,
+}
 
 
 def _product_to_tier(product_code: str | None) -> str:
@@ -223,7 +228,8 @@ async def activate_policy(
     hours = (prof.working_hours_preset or "flexible").strip()
     platform = (prof.platform or "other").strip()
     risk_score = compute_risk_score(zone_key, hours, platform)
-    weekly = float(compute_weekly_premium(zone_key, hours, tier))
+    # Keep plan pricing synced with selected tier card values in app/web.
+    weekly = float(TIER_LIST_WEEKLY.get(tier, compute_weekly_premium(zone_key, hours, tier)))
     monthly = round(weekly * 4.33, 2)
     max_day = TIER_MAX_DAILY.get(tier, 500.0)
 
