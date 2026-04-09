@@ -5,6 +5,17 @@ import { adminUi } from '../theme/adminUi';
 import { formatIstDateTime } from '../utils/adminDate';
 
 export default function Simulations() {
+  const fallbackTxn = (id: number) => {
+    const chars = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    let x = Math.max(1, Number(id || 0)) * 7919 + 97;
+    let out = '';
+    while (x > 0) {
+      const r = x % 36;
+      out = chars[r] + out;
+      x = Math.floor(x / 36);
+    }
+    return `CLM-${out || '0'}`;
+  };
   const [zoneId, setZoneId] = useState('hyd_central');
   const [disruptionType, setDisruptionType] = useState('Heavy Rain');
   const [fraudScenario, setFraudScenario] = useState('none');
@@ -100,7 +111,7 @@ export default function Simulations() {
             {sims.map((s: { id: number; transaction_id?: string; user_id: number; decision: string; payout: number; fraud_score: number; reason?: string; created_at: string }) => (
               <tr key={s.id}>
                 <td style={adminUi.td}>{s.id}</td>
-                <td style={adminUi.td}>{s.transaction_id || `CLM-${String(s.id).padStart(8, '0')}`}</td>
+                <td style={adminUi.td}>{s.transaction_id || fallbackTxn(s.id)}</td>
                 <td style={adminUi.td}>{s.user_id}</td>
                 <td style={adminUi.td}>
                   <span

@@ -31,6 +31,23 @@ log = get_logger(__name__)
 router = APIRouter()
 _SIM_CLUSTER_ACTIONS: Dict[str, str] = {}
 
+def _to_base36(n: int) -> str:
+    chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    x = max(0, int(n))
+    if x == 0:
+        return "0"
+    out = ""
+    while x:
+        x, r = divmod(x, 36)
+        out = chars[r] + out
+    return out
+
+
+def _public_tx_id(prefix: str, row_id: int) -> str:
+    seed = max(1, int(row_id)) * 7919 + 97
+    return f"{prefix}-{_to_base36(seed)}"
+
+
 # Hyderabad zones for admin GeoJSON (lon/lat bbox corners per product spec)
 HYDERABAD_ZONES_GEO: List[Dict[str, Any]] = [
     {"zone_id": "kukatpally", "zone_name": "Kukatpally", "bbox": (78.37, 17.47, 78.42, 17.52)},
@@ -309,7 +326,7 @@ async def get_all_simulations(
             {
                 "id": s.id,
                 "claim_id": s.id,
-                "transaction_id": (f"TXN-{int(s.id):08d}" if float(s.payout or 0.0) > 0 else f"CLM-{int(s.id):08d}"),
+                "transaction_id": _public_tx_id("TXN" if float(s.payout or 0.0) > 0 else "CLM", int(s.id)),
                 "user_id": s.user_id,
                 "decision": s.decision.value if hasattr(s.decision, "value") else str(s.decision),
                 "status": s.decision.value if hasattr(s.decision, "value") else str(s.decision),
@@ -670,7 +687,7 @@ async def get_worker_detail(worker_id: int, admin: User = Depends(get_admin_user
             {
                 "id": s.id,
                 "claim_id": s.id,
-                "transaction_id": (f"TXN-{int(s.id):08d}" if float(s.payout or 0.0) > 0 else f"CLM-{int(s.id):08d}"),
+                "transaction_id": _public_tx_id("TXN" if float(s.payout or 0.0) > 0 else "CLM", int(s.id)),
                 "decision": s.decision.value if hasattr(s.decision, "value") else str(s.decision),
                 "payout": s.payout,
                 "fraud_score": s.fraud_score,

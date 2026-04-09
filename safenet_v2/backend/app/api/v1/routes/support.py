@@ -355,8 +355,22 @@ def _status_reply_localized(lang: str, dis: str, status: str) -> str:
     )
 
 
+def _to_base36(n: int) -> str:
+    chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    x = max(0, int(n))
+    if x == 0:
+        return "0"
+    out = ""
+    while x:
+        x, r = divmod(x, 36)
+        out = chars[r] + out
+    return out
+
+
 def _tx_id(sim_id: int, payout: float) -> str:
-    return f"TXN-{int(sim_id):08d}" if float(payout or 0.0) > 0.0 else f"CLM-{int(sim_id):08d}"
+    prefix = "TXN" if float(payout or 0.0) > 0.0 else "CLM"
+    seed = max(1, int(sim_id)) * 7919 + 97
+    return f"{prefix}-{_to_base36(seed)}"
 
 
 def _format_last_five_histories(lang: str, sims: list[Simulation]) -> str:

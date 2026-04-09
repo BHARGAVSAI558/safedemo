@@ -24,6 +24,24 @@ router = APIRouter()
 IST = ZoneInfo("Asia/Kolkata")
 
 
+def _to_base36(n: int) -> str:
+    chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    x = max(0, int(n))
+    if x == 0:
+        return "0"
+    out = ""
+    while x:
+        x, r = divmod(x, 36)
+        out = chars[r] + out
+    return out
+
+
+def _public_tx_id(prefix: str, row_id: int) -> str:
+    seed = max(1, int(row_id)) * 7919 + 97
+    core = _to_base36(seed)
+    return f"{prefix}-{core}"
+
+
 def _ui_status_from_decision(decision: Any) -> str:
     v = decision.value if hasattr(decision, "value") else str(decision or "")
     u = str(v).upper()
@@ -68,7 +86,7 @@ def _history_row(s: Simulation) -> dict[str, Any]:
     effective_status = "CREDITED" if credited else ui_status
     created = s.created_at
     created_iso = _created_at_utc_z(created)
-    transaction_id = f"TXN-{int(s.id):08d}" if payout_amt > 0 else f"CLM-{int(s.id):08d}"
+    transaction_id = _public_tx_id("TXN" if payout_amt > 0 else "CLM", int(s.id))
     return {
         "id": s.id,
         "transaction_id": transaction_id,
@@ -114,7 +132,7 @@ def _format_payout_date_display(created_at: datetime | None) -> str:
 def _payout_row_from_simulation(s: Simulation) -> dict[str, Any]:
     label, icon = disruption_from_simulation(s)
     amt = float(s.payout or 0.0)
-    transaction_id = f"TXN-{int(s.id):08d}"
+    transaction_id = _public_tx_id("TXN", int(s.id))
     return {
         "date": _format_payout_date_display(s.created_at),
         "disruption_type": label,
@@ -242,7 +260,7 @@ async def claim_history(
         out = [
             {
                 "id": int(n.id) * -1,
-                "transaction_id": f"NTX-{int(n.id):08d}",
+                "transaction_id": _public_tx_id("NTX", int(n.id)),
                 "disruption_type": "Disruption",
                 "status": "CREDITED",
                 "payout_amount": round(_amount_from_title(n.title), 2),
@@ -251,7 +269,7 @@ async def claim_history(
                 "reason": str(n.message or "Payout credited."),
                 "details": {
                     "claim_id": int(n.id) * -1,
-                    "transaction_id": f"NTX-{int(n.id):08d}",
+                    "transaction_id": _public_tx_id("NTX", int(n.id)),
                     "decision": "APPROVED",
                     "expected_income": 0.0,
                     "actual_income": 0.0,
@@ -315,13 +333,13 @@ async def payout_history(
                 "status": "credited",
                 "icon": "cloudy",
                 "claim_id": int(n.id) * -1,
-                "transaction_id": f"NTX-{int(n.id):08d}",
+                "transaction_id": _public_tx_id("NTX", int(n.id)),
                 "timestamp": _created_at_utc_z(n.created_at),
                 "reason": str(n.message or "Payout credited."),
                 "source": "notification_fallback",
                 "details": {
                     "claim_id": int(n.id) * -1,
-                    "transaction_id": f"NTX-{int(n.id):08d}",
+                    "transaction_id": _public_tx_id("NTX", int(n.id)),
                     "decision": "APPROVED",
                     "expected_income": 0.0,
                     "actual_income": 0.0,
