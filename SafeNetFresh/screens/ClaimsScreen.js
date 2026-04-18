@@ -7,14 +7,20 @@ import {
   RefreshControl,
   ActivityIndicator,
   TouchableOpacity,
+  Alert,
 } from 'react-native';
+import * as FileSystem from 'expo-file-system';
+import * as Sharing from 'expo-sharing';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { claims } from '../services/api';
+import { claims, workers as workersApi } from '../services/api';
+import { useAuth } from '../contexts/AuthContext';
 import { useClaims } from '../contexts/ClaimContext';
+import { useLocalization } from '../contexts/LocalizationContext';
 import { formatIstDateTime } from '../utils/istFormat';
 import AppModal from '../components/AppModal';
+import { useWorkerProfile } from '../hooks/useWorkerProfile';
 
 const BRAND = '#1a73e8';
 const STEPS = ['Detected', 'Verifying', 'Fraud Check', 'Approved'];
@@ -32,6 +38,7 @@ const TERMINAL = new Set([
 
 function statusToStep(status) {
   const s = String(status || '').toUpperCase();
+  if (s.includes('PROCESSING_PAYOUT')) return 3;
   if (s.includes('INITIATED')) return 0;
   if (s.includes('VERIFYING') || s.includes('CONFIDENCE')) return 1;
   if (s.includes('BEHAVIORAL')) return 1;
@@ -43,9 +50,14 @@ function statusToStep(status) {
   return 0;
 }
 
-function stepMessage(step, status) {
+function stepMessage(step, status, payoutRemainSec) {
   const s = String(status || '').toUpperCase();
-  if (s.includes('BLOCKED') || s.includes('REJECT')) return 'Claim could not be completed';
+  if (s.includes('PROCESSING_PAYOUT') && payoutRemainSec != null && payoutRemainSec >= 0) {
+    return `Payout in ${payoutRemainSec} seconds…`;
+  }
+  if (s.includes('BLOCKED') || s.includes('REJECT')) return 'Not eligible — disruption signal insufficient';
+  if (s === 'CREDITED' || s.includes('PAYOUT') || s.includes('APPROVED')) return 'Payout credited to your wallet ✔';
+  if (s.includes('REVALIDAT') || s.includes('REVIEW')) return 'Under verification — manual review in progress';
   if (step >= 3) return 'Payout processing — wallet credit incoming';
   if (step === 2) return 'Running fraud & behavior checks…';
   if (step === 1) return 'GPS integrity verified ✓';
@@ -68,26 +80,62 @@ function disruptionIcon(label) {
   return '⚠️';
 }
 
-export default function ClaimsScreen() {
+function arrayBufferToBase64(buffer) {
+  let binary = '';
+  const bytes = new Uint8Array(buffer);
+  const len = bytes.byteLength;
+  for (let i = 0; i < len; i += 1) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
+}
+
+export default function ClaimsScreen({ navigation }) {
   const insets = useSafeAreaInsets();
   const qc = useQueryClient();
+  const { t } = useLocalization();
+  const { userId } = useAuth();
   const { lastClaimUpdate, activeClaims } = useClaims();
   const [elapsed, setElapsed] = useState(0);
   const [manualRefreshing, setManualRefreshing] = useState(false);
   const [selectedTx, setSelectedTx] = useState(null);
+  const { data: workerProfile } = useWorkerProfile();
+
+  const [payoutRemainSec, setPayoutRemainSec] = useState(null);
+
+  const summariesQuery = useQuery({
+    queryKey: ['weeklySummaries', userId],
+    queryFn: () => workersApi.listWeeklySummaries(),
+    enabled: Boolean(userId),
+    staleTime: 60_000,
+  });
 
   const historyQuery = useQuery({
-    queryKey: ['claimsHistory'],
-    queryFn: () => claims.getHistory(),
+    queryKey: ['claimsHistory', userId],
+    queryFn: () => (userId ? claims.getWorkerHistory(userId) : claims.getHistory()),
     staleTime: 1000 * 20,
     refetchInterval: 10000,
     refetchOnMount: 'always',
     refetchOnReconnect: true,
+    enabled: Boolean(userId),
+  });
+
+  const activeDisruptionsQuery = useQuery({
+    queryKey: ['activeDisruptions'],
+    queryFn: () => claims.getActive(),
+    staleTime: 1000 * 30,
+    refetchInterval: 30000,
   });
 
   const list = useMemo(() => {
     const raw = historyQuery.data;
-    return Array.isArray(raw) ? raw : [];
+    const rows = Array.isArray(raw) ? raw : [];
+    return rows.filter((r) => {
+      const reason = String(r?.reason || '').toLowerCase();
+      if (!reason) return true;
+      return !(
+        reason.includes('daily payout limit reached') ||
+        reason.includes('already simulated and paid today')
+      );
+    });
   }, [historyQuery.data]);
 
   const inflight = useMemo(
@@ -120,9 +168,34 @@ export default function ClaimsScreen() {
     () => statusToStep(lastClaimUpdate?.status),
     [lastClaimUpdate?.status]
   );
+  useEffect(() => {
+    const st = String(lastClaimUpdate?.status || '').toUpperCase();
+    if (!st.includes('PROCESSING_PAYOUT')) {
+      setPayoutRemainSec(null);
+      return;
+    }
+    const total = Number(lastClaimUpdate?.payout_countdown_seconds ?? 0);
+    const epoch = Number(lastClaimUpdate?.event_epoch_ms ?? 0);
+    const tick = () => {
+      if (!total || !epoch) {
+        setPayoutRemainSec(total || null);
+        return;
+      }
+      const elapsed = Math.floor((Date.now() - epoch) / 1000);
+      setPayoutRemainSec(Math.max(0, total - elapsed));
+    };
+    tick();
+    const id = setInterval(tick, 500);
+    return () => clearInterval(id);
+  }, [
+    lastClaimUpdate?.status,
+    lastClaimUpdate?.payout_countdown_seconds,
+    lastClaimUpdate?.event_epoch_ms,
+  ]);
+
   const msg = useMemo(
-    () => stepMessage(currentStep, lastClaimUpdate?.status),
-    [currentStep, lastClaimUpdate?.status]
+    () => stepMessage(currentStep, lastClaimUpdate?.status, payoutRemainSec),
+    [currentStep, lastClaimUpdate?.status, payoutRemainSec]
   );
 
   const onRefresh = useCallback(() => {
@@ -155,13 +228,39 @@ export default function ClaimsScreen() {
       contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + 32 }]}
       refreshControl={<RefreshControl refreshing={Boolean(refreshing)} onRefresh={onRefresh} />}
     >
-      <Text style={styles.screenTitle}>Claims</Text>
-      <Text style={styles.screenSub}>Live lifecycle and your full claim history</Text>
+      <Text style={styles.screenTitle}>{t('claims.title')}</Text>
+      <Text style={styles.screenSub}>{t('claims.screen_sub')}</Text>
 
-      <Text style={styles.sectionLabel}>Active claim</Text>
+      {/* Live disruptions from /claims/active */}
+      {Array.isArray(activeDisruptionsQuery.data) && activeDisruptionsQuery.data.length > 0 ? (
+        activeDisruptionsQuery.data.map((d) => (
+          <View key={String(d.disruption_event_id)} style={styles.disruptionBanner}>
+            <Text style={styles.disruptionBannerIcon}>{disruptionIcon(d.disruption_type)}</Text>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.disruptionBannerTitle}>
+                {d.disruption_type?.replace(/_/g, ' ')} detected — {d.confidence} confidence
+              </Text>
+              {d.claim_status ? (
+                <Text style={styles.disruptionBannerSub}>
+                  Claim status: {d.claim_status}{d.claim_payout > 0 ? ` · ₹${Math.round(d.claim_payout)} queued` : ''}
+                </Text>
+              ) : (
+                <Text style={styles.disruptionBannerSub}>Your claim is being processed</Text>
+              )}
+            </View>
+          </View>
+        ))
+      ) : null}
+
+      <Text style={styles.sectionLabel}>{t('claims.active')}</Text>
       <View style={styles.card}>
         {!inflight ? (
-          <Text style={styles.emptyActive}>No active claims — system monitoring your zone</Text>
+          <>
+            <Text style={styles.emptyActive}>{t('claims.no_active_claim')}</Text>
+            {Array.isArray(activeDisruptionsQuery.data) && activeDisruptionsQuery.data.length === 0 ? (
+              <Text style={[styles.emptyActive, { marginTop: 10, fontSize: 13 }]}>{t('claims.zone_monitoring')}</Text>
+            ) : null}
+          </>
         ) : (
           <>
             <View style={styles.stepRow}>
@@ -204,13 +303,36 @@ export default function ClaimsScreen() {
       </View>
 
       <View style={styles.sectionHead}>
-        <Text style={styles.sectionLabel}>Claim history</Text>
+        <Text style={styles.sectionLabel}>Past summaries</Text>
+      {Array.isArray(summariesQuery.data) && summariesQuery.data.length > 0 ? (
+        summariesQuery.data.slice(0, 6).map((s) => (
+          <View key={String(s.id)} style={styles.card}>
+            <Text style={styles.histTitle}>{s.title || 'Week in review'}</Text>
+            <Text style={styles.reasonLine}>{s.body || '—'}</Text>
+            <Text style={styles.histWhen}>
+              Week of {s.week_start ? formatIstDateTime(s.week_start) : '—'} · Risk next week:{' '}
+              {s.zone_risk_next_week || '—'}
+            </Text>
+          </View>
+        ))
+      ) : (
+        <View style={styles.card}>
+          <Text style={styles.emptyHist}>
+            {summariesQuery.isLoading ? 'Loading summaries…' : 'No weekly summaries yet — delivered Sundays 8 PM IST.'}
+          </Text>
+        </View>
+      )}
+
+      <Text style={styles.sectionLabel}>{t('claims.history')}</Text>
+        <TouchableOpacity style={styles.bankMiniBtn} onPress={() => setSelectedTx({ _viewBank: true })}>
+          <Text style={styles.bankMiniBtnText}>View bank details</Text>
+        </TouchableOpacity>
       </View>
 
       {historyQuery.isLoading && list.length === 0 ? (
         <View style={styles.loadingBox}>
           <ActivityIndicator color={BRAND} />
-          <Text style={styles.loadingText}>Loading history…</Text>
+          <Text style={styles.loadingText}>{t('common.loading')}</Text>
         </View>
       ) : historyQuery.isError && list.length === 0 ? (
         <View style={styles.card}>
@@ -218,7 +340,7 @@ export default function ClaimsScreen() {
         </View>
       ) : list.length === 0 ? (
         <View style={styles.card}>
-          <Text style={styles.emptyHist}>No past claims yet. Run a simulation from Home.</Text>
+          <Text style={styles.emptyHist}>{t('claims.history_empty_hint')}</Text>
         </View>
       ) : (
         list.map((row) => {
@@ -227,9 +349,15 @@ export default function ClaimsScreen() {
           const isCredited = Number.isFinite(amt) && amt > 0;
           const isApp = st === 'APPROVED' || st === 'CREDITED' || isCredited;
           const isBlock = st === 'BLOCKED';
-          const isRej = st === 'REJECTED';
+          const isNoPayout = st === 'NO_PAYOUT';
+          const isRej =
+            (st === 'REJECTED' || (st.includes('REJECT') && !isNoPayout)) && !isBlock;
+          const isFlagged = st.includes('FLAG');
           const showAmt = isApp ? amt : 0;
-          const chipLabel = isCredited && st !== 'BLOCKED' ? 'CREDITED' : st || 'PENDING';
+          let chipLabel = st || 'PENDING';
+          if (isCredited && st !== 'BLOCKED') chipLabel = 'CREDITED';
+          else if (isNoPayout) chipLabel = 'NO PAYOUT';
+          else if (isBlock) chipLabel = 'BLOCKED';
           return (
             <TouchableOpacity key={String(row.id)} style={styles.card} activeOpacity={0.88} onPress={() => setSelectedTx(row)}>
               <View style={styles.histTop}>
@@ -243,17 +371,35 @@ export default function ClaimsScreen() {
                     styles.statusChip,
                     isApp && styles.chipGreen,
                     isBlock && styles.chipRed,
-                    (isRej || (!isApp && !isBlock)) && styles.chipAmber,
+                    isFlagged && styles.chipYellow,
+                    isNoPayout && styles.chipInfo,
+                    (isRej || (!isApp && !isBlock && !isFlagged && !isNoPayout)) && styles.chipAmber,
                   ]}
                 >
-                  <Text style={styles.statusChipText}>{chipLabel}</Text>
+                  <Text
+                    style={[
+                      styles.statusChipText,
+                      isApp && styles.chipTextGreen,
+                      isBlock && styles.chipTextRed,
+                      isFlagged && styles.chipTextYellow,
+                      isNoPayout && styles.chipTextInfo,
+                    ]}
+                  >
+                    {chipLabel}
+                  </Text>
                 </View>
               </View>
               <Text style={styles.histAmount}>
                 {isApp ? `₹${Math.round(showAmt)}` : '₹0'}
               </Text>
               {isApp ? (
-                <Text style={styles.histHint}>Paid based on your earning fingerprint for this time slot</Text>
+                <View style={styles.breakdownBox}>
+                  <Text style={styles.breakdownLabel}>{t('claims.payout_basis_title')}</Text>
+                  <Text style={styles.breakdownFormula}>{t('claims.payout_basis')}</Text>
+                </View>
+              ) : null}
+              {isApp ? (
+                <Text style={styles.histHint}>{t('claims.fingerprint_hint')}</Text>
               ) : null}
               {isBlock ? (
                 <Text style={styles.fraudNote}>Fraud check failed — GPS anomaly detected</Text>
@@ -269,15 +415,80 @@ export default function ClaimsScreen() {
         <View style={styles.modalBackdrop}>
           <View style={styles.modalSheet}>
             <Text style={styles.modalTitle}>Payment details</Text>
-            <Text style={styles.modalLine}>Transaction ID: {selectedTx?.transaction_id || '—'}</Text>
-            <Text style={styles.modalLine}>Claim ID: {selectedTx?.id ?? '—'}</Text>
-            <Text style={styles.modalLine}>Status: {String(selectedTx?.status || '—')}</Text>
-            <Text style={styles.modalLine}>Amount: ₹{Math.round(Number(selectedTx?.payout_amount || 0))}</Text>
-            <Text style={styles.modalLine}>Timestamp: {selectedTx?.created_at ? formatIstDateTime(selectedTx?.created_at) : '—'}</Text>
-            <Text style={styles.modalReason}>{selectedTx?.reason || '—'}</Text>
-            <TouchableOpacity style={styles.modalBtn} onPress={() => setSelectedTx(null)}>
-              <Text style={styles.modalBtnText}>Close</Text>
-            </TouchableOpacity>
+            {selectedTx?._viewBank ? (
+              <>
+                <Text style={styles.modalLine}>UPI: {workerProfile?.bank_upi_id || '—'}</Text>
+                <Text style={styles.modalLine}>Account: {workerProfile?.bank_account_number || '—'}</Text>
+                <Text style={styles.modalLine}>IFSC: {workerProfile?.bank_ifsc || '—'}</Text>
+                <Text style={styles.modalLine}>Name: {workerProfile?.bank_account_name || '—'}</Text>
+                <TouchableOpacity style={styles.modalBtn} onPress={() => {
+                  setSelectedTx(null);
+                  navigation?.navigate?.('Account');
+                }}>
+                  <Text style={styles.modalBtnText}>Update details</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.modalBtn} onPress={() => {
+                  setSelectedTx(null);
+                }}>
+                  <Text style={styles.modalBtnText}>Close</Text>
+                </TouchableOpacity>
+              </>
+            ) : (
+              <>
+                <Text style={styles.modalLine}>Transaction ID: {selectedTx?.transaction_id || '—'}</Text>
+                <Text style={styles.modalLine}>Claim ID: {selectedTx?.id ?? '—'}</Text>
+                <Text style={styles.modalLine}>Status: {String(selectedTx?.status || '—')}</Text>
+                <Text style={styles.modalLine}>Amount: ₹{Math.round(Number(selectedTx?.payout_amount || 0))}</Text>
+                <Text style={styles.modalLine}>Timestamp: {selectedTx?.created_at ? formatIstDateTime(selectedTx?.created_at) : '—'}</Text>
+                <Text style={styles.modalLine}>
+                  Credited to: {workerProfile?.bank_upi_id || workerProfile?.bank_account_number || 'Bank details pending'}
+                </Text>
+                <Text style={styles.modalReason}>{selectedTx?.reason || '—'}</Text>
+                {(() => {
+                  const st = String(selectedTx?.status || '').toUpperCase();
+                  const amt = Number(selectedTx?.payout_amount ?? 0);
+                  return (
+                    amt > 0 &&
+                    (st === 'CREDITED' || st === 'APPROVED' || st.includes('CREDIT'))
+                  );
+                })() ? (
+                  <TouchableOpacity
+                    style={[styles.modalBtn, { backgroundColor: '#0f766e', marginTop: 8 }]}
+                    onPress={async () => {
+                      const cid = selectedTx?.id ?? selectedTx?.claim_id;
+                      if (!cid) return;
+                      try {
+                        const res = await claims.downloadReceipt(cid);
+                        const data = res?.data;
+                        if (!data) throw new Error('empty');
+                        const b64 = arrayBufferToBase64(data);
+                        const name = `safenet-receipt-${cid}.pdf`;
+                        const path = `${FileSystem.cacheDirectory || ''}${name}`;
+                        await FileSystem.writeAsStringAsync(path, b64, {
+                          encoding: FileSystem.EncodingType.Base64,
+                        });
+                        if (await Sharing.isAvailableAsync()) {
+                          await Sharing.shareAsync(path, {
+                            mimeType: 'application/pdf',
+                            dialogTitle: 'Income loss receipt',
+                            UTI: 'com.adobe.pdf',
+                          });
+                        } else {
+                          Alert.alert('Receipt saved', path);
+                        }
+                      } catch (e) {
+                        Alert.alert('Download failed', 'Could not fetch PDF. Try again when online.');
+                      }
+                    }}
+                  >
+                    <Text style={styles.modalBtnText}>Download receipt (PDF)</Text>
+                  </TouchableOpacity>
+                ) : null}
+                <TouchableOpacity style={styles.modalBtn} onPress={() => setSelectedTx(null)}>
+                  <Text style={styles.modalBtnText}>Close</Text>
+                </TouchableOpacity>
+              </>
+            )}
           </View>
         </View>
       </AppModal>
@@ -292,6 +503,8 @@ const styles = StyleSheet.create({
   screenSub: { fontSize: 14, color: '#64748b', marginTop: 6, marginBottom: 20 },
   sectionLabel: { fontSize: 13, fontWeight: '800', color: '#475569', marginBottom: 10, textTransform: 'uppercase' },
   sectionHead: { marginTop: 8, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  bankMiniBtn: { borderWidth: 1, borderColor: '#93c5fd', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6, backgroundColor: '#eff6ff' },
+  bankMiniBtnText: { color: '#1d4ed8', fontSize: 11, fontWeight: '800' },
   card: {
     backgroundColor: '#fff',
     borderRadius: 16,
@@ -348,9 +561,25 @@ const styles = StyleSheet.create({
   },
   chipGreen: { backgroundColor: '#dcfce7' },
   chipRed: { backgroundColor: '#fee2e2' },
+  chipYellow: { backgroundColor: '#fef08a' },
   chipAmber: { backgroundColor: '#fef3c7' },
+  chipInfo: { backgroundColor: '#dbeafe', borderWidth: 1, borderColor: '#93c5fd' },
+  chipTextInfo: { color: '#1e3a8a' },
   statusChipText: { fontSize: 10, fontWeight: '900', color: '#0f172a' },
+  chipTextGreen: { color: '#15803d' },
+  chipTextRed: { color: '#b91c1c' },
+  chipTextYellow: { color: '#854d0e' },
   histAmount: { fontSize: 22, fontWeight: '900', color: '#0f172a', marginTop: 12 },
+  breakdownBox: {
+    marginTop: 10,
+    backgroundColor: 'rgba(26,115,232,0.08)',
+    borderRadius: 10,
+    padding: 10,
+    borderLeftWidth: 3,
+    borderLeftColor: '#1a73e8',
+  },
+  breakdownLabel: { fontSize: 11, fontWeight: '700', color: '#334155', marginBottom: 4 },
+  breakdownFormula: { fontSize: 12, fontWeight: '700', color: '#0f172a', lineHeight: 18 },
   histHint: { fontSize: 12, color: '#64748b', marginTop: 6, lineHeight: 18 },
   fraudNote: { fontSize: 12, color: '#b91c1c', fontWeight: '700', marginTop: 10 },
   reasonLine: { fontSize: 12, color: '#475569', marginTop: 8, lineHeight: 18 },

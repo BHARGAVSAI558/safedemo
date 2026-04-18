@@ -1,29 +1,37 @@
 import json
-import random
+import csv
+import io
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
-from sqlalchemy import delete, func, or_, select
+from fastapi.responses import Response, StreamingResponse
+import httpx
+from sqlalchemy import delete, func, or_, select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.config import settings
 from app.core.security import get_user_id_from_token, verify_admin_token
 from app.core.rate_limit import limiter
 from app.db.session import get_db
-from app.models.claim import DecisionType, Log, Simulation
+from app.db.session import _seed_local_dataset, _seed_zones
+from app.models.claim import ClaimLifecycle, DecisionType, DisruptionEvent, Log, Simulation
 from app.models.device_fingerprint import DeviceFingerprint
-from app.models.fraud import FraudSignal
+from app.models.fraud import FraudFlag, FraudSignal
 from app.models.notification import Notification
 from app.models.payout import PayoutRecord
 from app.models.support import SupportQuery
 from app.models.pool_balance import ZonePoolBalance
 from app.models.policy import Policy
 from app.models.worker import Profile, User
+from app.models.zone import Zone
 from app.services.notification_service import create_notification
 from app.schemas.admin import AnalyticsResponse, UserAdminResponse, ZoneAlertsInjectBody
+from app.engines.actuarial_pricing import compute_pool_health_payload, persist_pool_health_snapshot, run_full_weekly_pricing
 from app.services.earnings_dna_service import admin_aggregate_earnings_analytics
+from app.services.income_loss_receipt import build_income_loss_receipt_pdf
 from app.services.event_service import government_alert_store
 from app.utils.logger import get_logger
 
@@ -138,26 +146,39 @@ def _pool_row_for_canonical(pools: Dict[str, ZonePoolBalance], canonical_id: str
     return None
 
 
+# Deterministic per-zone seed values — no random, stable across restarts
+_ZONE_SEED_PARAMS: Dict[str, tuple] = {
+    "kukatpally":   (98_000.0, 58.4),
+    "hitec_city":   (112_000.0, 51.2),
+    "secunderabad": (95_000.0, 63.7),
+    "gachibowli":   (108_000.0, 49.8),
+    "lb_nagar":     (89_000.0, 67.1),
+    "hyd_central":  (102_000.0, 55.3),
+}
+
+
 async def _ensure_demo_zone_pools(db: AsyncSession) -> None:
     pools = await _latest_pools_by_zone_raw(db)
     now = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    random.seed(42)
     added = 0
     for z in HYDERABAD_ZONES_GEO:
         zid = str(z["zone_id"])
         if _pool_row_for_canonical(pools, zid) is not None:
             continue
-        bal = float(random.randint(85_000, 115_000))
-        util = round(random.uniform(45.0, 72.0), 1)
+        bal, util = _ZONE_SEED_PARAMS.get(zid, (100_000.0, 55.0))
         payouts = round(bal * (util / 100.0), 2)
         row = ZonePoolBalance(
             zone_id=zid,
             week_start=now,
             pool_balance_start_of_week=bal,
+            total_premiums_collected=bal,
             total_payouts_this_week=payouts,
+            total_payouts_disbursed=payouts,
+            current_balance=round(bal - payouts, 2),
             utilization_pct=util,
+            loss_ratio=round(payouts / bal, 4) if bal > 0 else 0.0,
             flagged_reinsurance=util > 68.0,
-            risk_note=f"{z['zone_name']} auto-seeded",
+            risk_note=f"{z['zone_name']} seeded",
         )
         db.add(row)
         pools[zid] = row
@@ -222,6 +243,39 @@ async def get_admin_user(
     if not user:
         raise HTTPException(status_code=403, detail="Admin access required")
     return user
+
+
+def _require_api_key(x_admin_key: Optional[str] = Header(None, alias="X-Admin-Key")) -> None:
+    """
+    Optional secondary auth via X-Admin-Key header.
+    If ADMIN_API_KEY is set in env, this header must match.
+    Falls through silently when ADMIN_API_KEY is not configured.
+    """
+    configured = (settings.ADMIN_API_KEY or "").strip()
+    if not configured:
+        return
+    if not x_admin_key or x_admin_key.strip() != configured:
+        raise HTTPException(status_code=403, detail="Invalid or missing X-Admin-Key")
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _iso(dt: Optional[datetime]) -> Optional[str]:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat().replace("+00:00", "Z")
+
+
+def _risk_from_loss_ratio(lr: float) -> str:
+    if lr >= 0.85:
+        return "HIGH"
+    if lr >= 0.65:
+        return "MEDIUM"
+    return "LOW"
 
 
 @router.get("/analytics", response_model=AnalyticsResponse)
@@ -293,9 +347,10 @@ async def delete_user_admin(
     if sim_ids:
         await db.execute(delete(PayoutRecord).where(PayoutRecord.simulation_id.in_(sim_ids)))
         await db.execute(delete(FraudSignal).where(FraudSignal.simulation_id.in_(sim_ids)))
+        await db.execute(delete(FraudFlag).where(FraudFlag.simulation_id.in_(sim_ids)))
         await db.execute(delete(Log).where(Log.user_id == user_id))
         await db.execute(delete(Simulation).where(Simulation.id.in_(sim_ids)))
-    await db.execute(delete(DeviceFingerprint).where(DeviceFingerprint.user_id == user_id))
+    await db.execute(delete(FraudFlag).where(FraudFlag.user_id == user_id))
     await db.execute(delete(Profile).where(Profile.user_id == user_id))
     await db.execute(delete(Policy).where(Policy.user_id == user_id))
     await db.execute(delete(SupportQuery).where(SupportQuery.user_id == user_id))
@@ -417,6 +472,16 @@ async def make_admin(user_id: int, admin: User = Depends(get_admin_user), db: As
     return {"message": f"User {user_id} is now an admin"}
 
 
+@router.post("/seed")
+async def run_admin_seed(
+    admin: User = Depends(get_admin_user),
+    _key: None = Depends(_require_api_key),
+):
+    await _seed_zones()
+    await _seed_local_dataset()
+    return {"ok": True, "message": "Database seed completed"}
+
+
 @router.get("/zones/geojson")
 async def get_zone_geojson(admin: User = Depends(get_admin_user), db: AsyncSession = Depends(get_db)):
     await _ensure_demo_zone_pools(db)
@@ -502,78 +567,124 @@ async def get_zone_geojson(admin: User = Depends(get_admin_user), db: AsyncSessi
 
 
 @router.get("/zones/summary")
-async def get_zones_summary(admin: User = Depends(get_admin_user), db: AsyncSession = Depends(get_db)):
-    await _ensure_demo_zone_pools(db)
-    pools = await _latest_pools_by_zone_raw(db)
-    sims = (await db.execute(select(Simulation))).scalars().all()
-    sims_sorted = sorted(
-        sims,
-        key=lambda s: s.created_at or datetime.min.replace(tzinfo=timezone.utc),
-        reverse=True,
-    )
-    claims_by_zone: Dict[str, int] = {}
-    last_disruption: Dict[str, str] = {}
-    for s in sims:
-        cz = _canonicalize_zone(_parse_zone_from_simulation(s))
-        if not cz:
-            continue
-        claims_by_zone[cz] = claims_by_zone.get(cz, 0) + 1
-    for s in sims_sorted:
-        cz = _canonicalize_zone(_parse_zone_from_simulation(s))
-        if not cz or cz in last_disruption:
-            continue
-        wd = None
-        try:
-            if s.weather_data:
-                wd = json.loads(s.weather_data) if isinstance(s.weather_data, str) else s.weather_data
-        except Exception:
-            wd = None
-        dt = None
-        if isinstance(wd, dict):
-            dt = wd.get("disruption_type") or wd.get("scenario")
-        if not dt and s.reason:
-            dt = s.reason[:80]
-        if dt:
-            last_disruption[cz] = str(dt)
+async def get_zones_summary(
+    admin: User = Depends(get_admin_user),
+    _key: None = Depends(_require_api_key),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Per-zone aggregated stats using DB aggregation queries.
+    No Python loops over simulation lists.
+    """
+    day_start, day_end = _utc_day_bounds()
+    week_start = day_start - timedelta(days=day_start.weekday())
 
-    active_by_zone: Dict[str, int] = {}
-    pol_rows = (
+    # ── Active workers per zone (profile.zone_id) ──────────────────────────────
+    active_workers_sq = (
         await db.execute(
-            select(Profile.city, func.count(func.distinct(Policy.user_id)))
-            .select_from(Policy)
-            .join(Profile, Profile.user_id == Policy.user_id)
+            select(Profile.zone_id, func.count(func.distinct(Profile.user_id)).label("cnt"))
+            .join(Policy, Policy.user_id == Profile.user_id)
             .where(Policy.status == "active")
-            .group_by(Profile.city)
+            .group_by(Profile.zone_id)
         )
     ).all()
-    for city, cnt in pol_rows:
-        cz = PROFILE_CITY_TO_ZONE.get(str(city).strip())
-        if cz:
-            active_by_zone[cz] = active_by_zone.get(cz, 0) + int(cnt or 0)
+    active_workers_map: Dict[str, int] = {str(r.zone_id): int(r.cnt) for r in active_workers_sq if r.zone_id}
 
-    out: List[Dict[str, Any]] = []
-    for z in HYDERABAD_ZONES_GEO:
-        zid = str(z["zone_id"])
-        min_lon, min_lat, max_lon, max_lat = z["bbox"]
-        lat = (min_lat + max_lat) / 2.0
-        lon = (min_lon + max_lon) / 2.0
-        cc = claims_by_zone.get(zid, 0)
-        prow = _pool_row_for_canonical(pools, zid)
-        util = float(getattr(prow, "utilization_pct", 0.0) or 0.0) if prow else 0.0
-        bal = float(getattr(prow, "pool_balance_start_of_week", 0.0) or 0.0) if prow else 0.0
-        out.append(
-            {
-                "zone_id": zid,
-                "city": z["zone_name"],
-                "active_workers": int(active_by_zone.get(zid, 0)),
-                "pool_balance": bal,
-                "utilization_pct": util,
-                "last_disruption": last_disruption.get(zid, "—"),
-                "claim_density_per_hr": cc,
-                "lat": lat,
-                "lon": lon,
-            }
+    # ── Active policies per zone ───────────────────────────────────────────────
+    active_policies_sq = (
+        await db.execute(
+            select(Profile.zone_id, func.count(Policy.id).label("cnt"))
+            .join(Policy, Policy.user_id == Profile.user_id)
+            .where(Policy.status == "active")
+            .group_by(Profile.zone_id)
         )
+    ).all()
+    active_policies_map: Dict[str, int] = {str(r.zone_id): int(r.cnt) for r in active_policies_sq if r.zone_id}
+
+    # ── Claims today per zone (via ClaimLifecycle.zone_id) ────────────────────
+    claims_today_sq = (
+        await db.execute(
+            select(ClaimLifecycle.zone_id, func.count(ClaimLifecycle.id).label("cnt"))
+            .where(ClaimLifecycle.created_at >= day_start, ClaimLifecycle.created_at < day_end)
+            .group_by(ClaimLifecycle.zone_id)
+        )
+    ).all()
+    claims_today_map: Dict[str, int] = {str(r.zone_id): int(r.cnt) for r in claims_today_sq}
+
+    # ── Payouts today per zone ─────────────────────────────────────────────────
+    payouts_today_sq = (
+        await db.execute(
+            select(ClaimLifecycle.zone_id, func.coalesce(func.sum(ClaimLifecycle.payout_amount), 0.0).label("total"))
+            .where(
+                ClaimLifecycle.created_at >= day_start,
+                ClaimLifecycle.created_at < day_end,
+                ClaimLifecycle.status.in_(["PAYOUT", "approved"]),
+            )
+            .group_by(ClaimLifecycle.zone_id)
+        )
+    ).all()
+    payouts_today_map: Dict[str, float] = {str(r.zone_id): float(r.total) for r in payouts_today_sq}
+
+    # ── Payouts this week per zone ─────────────────────────────────────────────
+    payouts_week_sq = (
+        await db.execute(
+            select(ClaimLifecycle.zone_id, func.coalesce(func.sum(ClaimLifecycle.payout_amount), 0.0).label("total"))
+            .where(
+                ClaimLifecycle.created_at >= week_start,
+                ClaimLifecycle.status.in_(["PAYOUT", "approved"]),
+            )
+            .group_by(ClaimLifecycle.zone_id)
+        )
+    ).all()
+    payouts_week_map: Dict[str, float] = {str(r.zone_id): float(r.total) for r in payouts_week_sq}
+
+    # ── Latest pool balance per zone ───────────────────────────────────────────
+    pools = await _latest_pools_by_zone_raw(db)
+
+    # ── Active disruptions per zone ────────────────────────────────────────────
+    disruption_sq = (
+        await db.execute(
+            select(DisruptionEvent.zone_id, DisruptionEvent.disruption_type, DisruptionEvent.severity)
+            .where(DisruptionEvent.is_active.is_(True))
+            .order_by(DisruptionEvent.severity.desc())
+        )
+    ).all()
+    disruption_map: Dict[str, tuple] = {}
+    for r in disruption_sq:
+        if str(r.zone_id) not in disruption_map:
+            disruption_map[str(r.zone_id)] = (r.disruption_type, float(r.severity or 0.0))
+
+    # ── Assemble per-zone output from Zone table ───────────────────────────────
+    zone_rows = (await db.execute(select(Zone))).scalars().all()
+    out: List[Dict[str, Any]] = []
+    for z in zone_rows:
+        zid = str(z.city_code)
+        pool = _pool_row_for_canonical(pools, zid) or pools.get(zid)
+        loss_ratio = float(getattr(pool, "loss_ratio", 0.0) or 0.0) if pool else 0.0
+        dis = disruption_map.get(zid)
+        claims_today = claims_today_map.get(zid, 0)
+        payouts_today = payouts_today_map.get(zid, 0.0)
+        workers = active_workers_map.get(zid, 0)
+        out.append({
+            "zone_id": z.id,
+            "zone_name": z.name,
+            "city": z.city,
+            "city_code": zid,
+            "lat": float(getattr(z, "lat", 0.0) or 0.0),
+            "lng": float(getattr(z, "lng", 0.0) or 0.0),
+            "total_active_workers": workers,
+            "active_workers": workers,
+            "active_policies": active_policies_map.get(zid, 0),
+            "claims_today": claims_today,
+            "claims_count": claims_today,
+            "payouts_today": round(payouts_today, 2),
+            "payouts_this_week": round(payouts_week_map.get(zid, 0.0), 2),
+            "avg_payout": round((float(payouts_today) / float(claims_today)) if claims_today else 0.0, 2),
+            "loss_ratio": round(loss_ratio, 4),
+            "current_disruption": dis[0] if dis else None,
+            "disruption_severity": round(dis[1], 3) if dis else None,
+            "risk_level": _risk_from_loss_ratio(loss_ratio),
+        })
     return out
 
 
@@ -701,12 +812,23 @@ async def get_worker_detail(worker_id: int, admin: User = Depends(get_admin_user
                 "created_at": s.created_at.isoformat() if s.created_at else None,
             }
         )
-    gps_trail = [
-        {"lat": 17.385 + i * 0.002, "lon": 78.4867 + i * 0.002, "timestamp": datetime.now(timezone.utc).isoformat()}
-        for i in range(8)
-    ]
+    gps_trail: List[Dict[str, Any]] = []
     trust_score = float(getattr(prof, "trust_score", 0.0) or 0.0)
-    trust_timeline = [{"label": f"W-{i}", "score": max(0.0, trust_score - i * 2.0)} for i in range(8)][::-1]
+    trust_timeline_sims = (
+        await db.execute(
+            select(Simulation.created_at, Simulation.fraud_score)
+            .where(Simulation.user_id == worker_id)
+            .order_by(Simulation.created_at.asc())
+            .limit(8)
+        )
+    ).all()
+    trust_timeline: List[Dict[str, Any]] = [
+        {
+            "label": _iso(r.created_at),
+            "score": round(max(0.0, trust_score - float(r.fraud_score or 0.0) * 10.0), 1),
+        }
+        for r in trust_timeline_sims
+    ]
 
     fp_row = (await db.execute(select(DeviceFingerprint).where(DeviceFingerprint.worker_id == worker_id))).scalar_one_or_none()
     device_fingerprint: Optional[Dict[str, Any]] = None
@@ -753,26 +875,65 @@ async def get_worker_detail(worker_id: int, admin: User = Depends(get_admin_user
 
 
 @router.get("/fraud/analytics")
-async def get_fraud_analytics(admin: User = Depends(get_admin_user), db: AsyncSession = Depends(get_db)):
+async def get_fraud_analytics(
+    admin: User = Depends(get_admin_user),
+    _key: None = Depends(_require_api_key),
+    db: AsyncSession = Depends(get_db),
+):
+    """Real fraud analytics from DB — no mock data."""
+    day_start, day_end = _utc_day_bounds()
+
+    # Fraud score histogram from actual simulations
     sims = (
-        await db.execute(select(Simulation).order_by(Simulation.created_at.desc()).limit(500))
+        await db.execute(
+            select(Simulation.fraud_score)
+            .order_by(Simulation.created_at.desc())
+            .limit(2000)
+        )
     ).scalars().all()
     histogram: Dict[str, int] = {}
-    for s in sims:
-        b = f"{int((s.fraud_score or 0) * 10) / 10:.1f}"
+    for score in sims:
+        b = f"{int(float(score or 0) * 10) / 10:.1f}"
         histogram[b] = histogram.get(b, 0) + 1
+
+    # Real GPS flag counts from FraudSignal reason_codes
+    flag_counts_sq = (
+        await db.execute(
+            select(FraudSignal.reason_code, func.count(FraudSignal.id).label("cnt"))
+            .group_by(FraudSignal.reason_code)
+        )
+    ).all()
+    gps_flags = [
+        {"flag": r.reason_code, "count": int(r.cnt)}
+        for r in flag_counts_sq
+        if r.reason_code not in ("DEMO_SIM", "POST_RUN", "CLAIMS_ENGINE", "ASSESSMENT")
+    ]
+
+    # Enrollment timeline: enrollments per hour today
+    if settings.is_sqlite:
+        hour_expr = func.strftime("%H", User.created_at)
+    else:
+        hour_expr = func.to_char(User.created_at, "HH24")
+    enrollment_sq = (
+        await db.execute(
+            select(
+                hour_expr.label("hr"),
+                func.count(User.id).label("cnt"),
+            )
+            .where(User.created_at >= day_start, User.created_at < day_end)
+            .group_by(hour_expr)
+        )
+    ).all()
+    enrollment_by_hour: Dict[int, int] = {int(r.hr): int(r.cnt) for r in enrollment_sq if r.hr}
+    enrollment_timeline = [
+        {"hour": h, "enrollments": enrollment_by_hour.get(h, 0)}
+        for h in range(24)
+    ]
+
     return {
         "fraud_score_histogram": [{"bucket": k, "count": v} for k, v in sorted(histogram.items())],
-        "gps_spoof_patterns": [
-            {"flag": "teleport_flag", "count": random.randint(5, 40)},
-            {"flag": "static_spoof_flag", "count": random.randint(5, 40)},
-            {"flag": "tower_mismatch_flag", "count": random.randint(5, 40)},
-            {"flag": "gap_flag", "count": random.randint(5, 40)},
-        ],
-        "enrollment_timeline": [
-            {"hour": h, "enrollments": random.randint(1, 25), "weather_alert": random.choice([0, 1])}
-            for h in range(24)
-        ],
+        "gps_spoof_patterns": gps_flags,
+        "enrollment_timeline": enrollment_timeline,
     }
 
 
@@ -801,14 +962,38 @@ async def run_admin_simulation(
     disruption_type = str(body.get("disruption_type") or "Heavy Rain")
     workers = int(body.get("workers", 10))
     fraud_scenario = str(body.get("fraud_scenario") or "none")
+    disruption_hours = float(body.get("disruption_hours", 3.0))
+    severity = float(body.get("severity", 0.7))
     created = []
     users = (await db.execute(select(User).limit(max(1, min(25, workers))))).scalars().all()
     for idx, u in enumerate(users):
         fraud_score = 0.85 if fraud_scenario == "ring_fraud" else (0.75 if fraud_scenario == "gps_spoof" else 0.2)
         no_disruption = (idx % 3) == 2 and fraud_scenario == "none"
         decision = DecisionType.FRAUD if fraud_score > 0.8 else (DecisionType.REJECTED if no_disruption else DecisionType.APPROVED)
-        base = 120 + ((u.id * 37) % 340)
-        payout = 0.0 if decision != DecisionType.APPROVED else float(min(700, base))
+
+        payout = 0.0
+        expected_loss = 0.0
+        if decision == DecisionType.APPROVED:
+            try:
+                prof = (await db.execute(select(Profile).where(Profile.user_id == u.id))).scalar_one_or_none()
+                if prof:
+                    from app.engines.payout_engine import PayoutEngine
+                    _payout, _breakdown, _ = await PayoutEngine.compute_db_payout(
+                        db=db,
+                        user_id=u.id,
+                        profile=prof,
+                        zone_id=zone,
+                        disruption_hours=disruption_hours,
+                        severity=severity,
+                        simulation_id=None,
+                        disruption_type=disruption_type,
+                    )
+                    payout = _payout
+                    expected_loss = float(_breakdown.get("expected_loss", 0.0))
+            except Exception:
+                payout = 0.0
+                expected_loss = 0.0
+
         sim = Simulation(
             user_id=u.id,
             is_active=True,
@@ -818,9 +1003,9 @@ async def run_admin_simulation(
             traffic_disruption=False,
             event_disruption=False,
             final_disruption=not no_disruption,
-            expected_income=900,
-            actual_income=500 if decision == DecisionType.APPROVED else 900,
-            loss=400 if decision == DecisionType.APPROVED else 0,
+            expected_income=expected_loss or 900.0,
+            actual_income=0.0 if decision == DecisionType.APPROVED else (expected_loss or 900.0),
+            loss=expected_loss or 0.0,
             payout=payout,
             decision=decision,
             reason=(f"{disruption_type} in {zone}" if decision == DecisionType.APPROVED else f"No disruption in {zone}"),
@@ -828,6 +1013,12 @@ async def run_admin_simulation(
         )
         db.add(sim)
         created.append(sim)
+    await db.flush()
+    # Now persist PayoutRecords with real simulation IDs
+    for sim in created:
+        if sim.payout and float(sim.payout) > 0:
+            from app.models.payout import PayoutRecord as _PR
+            db.add(_PR(simulation_id=sim.id, amount=float(sim.payout), currency="INR", status="completed"))
     await db.commit()
     return {"ok": True, "created_count": len(created), "zone_id": zone, "fraud_scenario": fraud_scenario}
 
@@ -857,14 +1048,22 @@ async def get_dashboard_kpis(admin: User = Depends(get_admin_user), db: AsyncSes
         )
     ).scalar_one() or 0
 
-    today_sims = (
+    today_sims_count = (
         await db.execute(
-            select(Simulation).where(Simulation.created_at >= start, Simulation.created_at < end)
+            select(func.count(Simulation.id)).where(Simulation.created_at >= start, Simulation.created_at < end)
         )
-    ).scalars().all()
-    if today_sims:
-        approved = sum(1 for s in today_sims if s.decision == DecisionType.APPROVED)
-        approval_rate_pct = round(approved / len(today_sims) * 100, 1)
+    ).scalar_one() or 0
+    today_approved = (
+        await db.execute(
+            select(func.count(Simulation.id)).where(
+                Simulation.created_at >= start,
+                Simulation.created_at < end,
+                Simulation.decision == DecisionType.APPROVED,
+            )
+        )
+    ).scalar_one() or 0
+    if today_sims_count > 0:
+        approval_rate_pct = round(today_approved / today_sims_count * 100, 1)
     else:
         total_s = (await db.execute(select(func.count(Simulation.id)))).scalar_one() or 0
         appr = (await db.execute(select(func.count(Simulation.id)).where(Simulation.decision == DecisionType.APPROVED))).scalar_one() or 0
@@ -908,11 +1107,33 @@ async def get_dashboard_kpis(admin: User = Depends(get_admin_user), db: AsyncSes
         "fraud_blocked": int(fraud_blocked),
         "pool_utilization_pct": float(pool_utilization_pct),
         "pool_risk_level": pool_risk_level,
-        "loss_ratio_actual_pct": round(60 + (disruption_rate / 100) * 15, 1),
+        "loss_ratio_actual_pct": round(paid_total / pooled_total * 100.0, 1) if pooled_total > 0 else 0.0,
         "loss_ratio_target_low": 60,
         "loss_ratio_target_high": 75,
         "pooled_total_amount": round(pooled_total, 2),
         "paid_total_amount": round(paid_total, 2),
+    }
+
+
+@router.get("/stats")
+async def get_dashboard_stats(admin: User = Depends(get_admin_user), db: AsyncSession = Depends(get_db)):
+    kpis = await get_dashboard_kpis(admin=admin, db=db)
+    now = datetime.now(timezone.utc)
+    week_start = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=now.weekday())
+    week_premiums = (
+        await db.execute(
+            select(func.coalesce(func.sum(Policy.weekly_premium), 0.0)).where(
+                Policy.status == "active",
+                Policy.created_at >= week_start,
+            )
+        )
+    ).scalar_one() or 0.0
+    return {
+        "active_workers_this_week": int(kpis.get("active_workers", 0)),
+        "claims_today": int(kpis.get("claims_today", 0)),
+        "fraud_blocked_today": int(kpis.get("fraud_blocked", 0)),
+        "pool_utilization_pct": float(kpis.get("pool_utilization_pct", 0.0)),
+        "total_premiums_collected_this_week": round(float(week_premiums), 2),
     }
 
 
@@ -938,34 +1159,62 @@ async def get_earnings_dna_analytics(
 
 
 @router.get("/weekly-earnings")
-async def get_weekly_earnings(days: int = 7, admin: User = Depends(get_admin_user)):
+async def get_weekly_earnings(
+    days: int = 7,
+    admin: User = Depends(get_admin_user),
+    _key: None = Depends(_require_api_key),
+    db: AsyncSession = Depends(get_db),
+):
+    """Real weekly payout breakdown from PayoutRecord table."""
     days = max(1, min(14, days))
-    today = datetime.now(timezone.utc).date()
-    breakdown = []
-    total = 0.0
-    reasons = ["Heavy Rain", "Extreme Heat", "AQI Spike", "Curfew", "Platform Outage"]
-    for i in range(days):
-        d = today - timedelta(days=i)
-        amt = float(random.randint(50, 600))
-        total += amt
-        breakdown.append({"day": d.isoformat(), "protected_amount": amt, "reason": random.choice(reasons)})
-    return {"protected_this_week": round(total, 2), "breakdown": list(reversed(breakdown))}
+    since = _utcnow() - timedelta(days=days)
+
+    rows = (
+        await db.execute(
+            select(
+                func.date(PayoutRecord.created_at).label("day"),
+                func.sum(PayoutRecord.amount).label("total"),
+            )
+            .where(PayoutRecord.created_at >= since, PayoutRecord.status == "completed")
+            .group_by(func.date(PayoutRecord.created_at))
+            .order_by(func.date(PayoutRecord.created_at))
+        )
+    ).all()
+
+    breakdown = [
+        {"day": str(r.day), "protected_amount": round(float(r.total or 0.0), 2)}
+        for r in rows
+    ]
+    total = round(sum(r["protected_amount"] for r in breakdown), 2)
+    return {"protected_this_week": total, "breakdown": breakdown}
 
 
 @router.get("/support/queries")
 async def list_support_queries(
     status: str | None = None,
+    priority: str | None = None,
+    category: str | None = None,
+    sort: str = "score_desc",
     admin: User = Depends(get_admin_user),
     db: AsyncSession = Depends(get_db),
 ):
     stmt = (
         select(SupportQuery)
         .where(or_(SupportQuery.query_type == "custom", SupportQuery.query_type == "ticket"))
-        .order_by(SupportQuery.created_at.desc(), SupportQuery.id.desc())
-        .limit(500)
     )
     if status in {"open", "resolved"}:
         stmt = stmt.where(SupportQuery.status == status)
+    p = str(priority or "").upper()
+    if p in {"HIGH", "MEDIUM", "LOW"}:
+        stmt = stmt.where(SupportQuery.priority == p)
+    c = str(category or "").strip().lower()
+    if c in {"payment", "safety", "weather", "technical", "other"}:
+        stmt = stmt.where(SupportQuery.category == c)
+    if str(sort).lower() == "created_desc":
+        stmt = stmt.order_by(SupportQuery.created_at.desc(), SupportQuery.id.desc())
+    else:
+        stmt = stmt.order_by(SupportQuery.score.desc(), SupportQuery.created_at.desc(), SupportQuery.id.desc())
+    stmt = stmt.limit(500)
     rows = (await db.execute(stmt)).scalars().all()
     return [
         {
@@ -976,6 +1225,10 @@ async def list_support_queries(
             "admin_reply": r.admin_reply,
             "status": r.status,
             "query_type": r.query_type,
+            "priority": getattr(r, "priority", "LOW"),
+            "category": getattr(r, "category", "other"),
+            "score": int(getattr(r, "score", 0) or 0),
+            "reason": getattr(r, "reason", ""),
             "ticket_no": f"TKT-{int(r.id):06d}" if str(r.query_type) == "ticket" else None,
             "created_at": r.created_at.isoformat() if r.created_at else None,
         }
@@ -1007,3 +1260,557 @@ async def admin_support_reply(
     )
     await db.commit()
     return {"ok": True, "query_id": row.id, "status": row.status}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# NEW PRODUCTION ADMIN ENDPOINTS (all DB-backed, no mock data)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/claims/live")
+async def get_live_claims(
+    admin: User = Depends(get_admin_user),
+    _key: None = Depends(_require_api_key),
+    db: AsyncSession = Depends(get_db),
+    zone_id: Optional[str] = None,
+    disruption_type: Optional[str] = None,
+    page: int = 1,
+    limit: int = 20,
+):
+    """Paginated live claim feed from ClaimLifecycle + Simulation join."""
+    page = max(1, page)
+    limit = max(1, min(100, limit))
+    offset = (page - 1) * limit
+
+    stmt = (
+        select(
+            ClaimLifecycle.id.label("claim_id"),
+            ClaimLifecycle.user_id,
+            Profile.name.label("worker_name"),
+            ClaimLifecycle.zone_id,
+            ClaimLifecycle.disruption_type,
+            ClaimLifecycle.status,
+            ClaimLifecycle.payout_amount,
+            ClaimLifecycle.created_at,
+        )
+        .join(Profile, Profile.user_id == ClaimLifecycle.user_id)
+        .order_by(ClaimLifecycle.created_at.desc())
+    )
+    if zone_id:
+        stmt = stmt.where(ClaimLifecycle.zone_id == zone_id)
+    if disruption_type:
+        stmt = stmt.where(ClaimLifecycle.disruption_type == disruption_type)
+
+    total_stmt = select(func.count(ClaimLifecycle.id))
+    if zone_id:
+        total_stmt = total_stmt.where(ClaimLifecycle.zone_id == zone_id)
+    if disruption_type:
+        total_stmt = total_stmt.where(ClaimLifecycle.disruption_type == disruption_type)
+
+    total = (await db.execute(total_stmt)).scalar_one() or 0
+    rows = (await db.execute(stmt.offset(offset).limit(limit))).all()
+
+    # Fetch latest fraud_score per user in one query
+    user_ids = list({r.user_id for r in rows})
+    fraud_scores: Dict[int, float] = {}
+    if user_ids:
+        fs_rows = (
+            await db.execute(
+                select(Simulation.user_id, func.max(Simulation.fraud_score).label("fs"))
+                .where(Simulation.user_id.in_(user_ids))
+                .group_by(Simulation.user_id)
+            )
+        ).all()
+        fraud_scores = {int(r.user_id): float(r.fs or 0.0) for r in fs_rows}
+
+    # Zone name lookup
+    zone_names: Dict[str, str] = {}
+    zone_rows = (await db.execute(select(Zone.city_code, Zone.name))).all()
+    for zr in zone_rows:
+        zone_names[str(zr.city_code)] = str(zr.name)
+
+    data = []
+    for r in rows:
+        data.append({
+            "claim_id": int(r.claim_id),
+            "worker_name": str(r.worker_name or "Worker"),
+            "zone_name": zone_names.get(str(r.zone_id or ""), str(r.zone_id or "")),
+            "disruption_type": str(r.disruption_type or ""),
+            "confidence": "HIGH",
+            "fraud_score": round(fraud_scores.get(int(r.user_id), 0.0), 3),
+            "final_payout": round(float(r.payout_amount or 0.0), 2),
+            "status": str(r.status or ""),
+            "created_at": _iso(r.created_at),
+        })
+
+    return {"data": data, "page": page, "limit": limit, "total_count": int(total)}
+
+
+@router.post("/run-weekly-pricing")
+async def admin_run_weekly_pricing(
+    request: Request,
+    admin: User = Depends(get_admin_user),
+    _key: None = Depends(_require_api_key),
+    db: AsyncSession = Depends(get_db),
+):
+    """Manual trigger for Monday actuarial job (demo / operations)."""
+    shields = getattr(request.app.state, "forecast_shields", None)
+    out = await run_full_weekly_pricing(db, redis=getattr(request.app.state, "redis", None))
+    await persist_pool_health_snapshot(db, shields if isinstance(shields, dict) else None)
+    return out
+
+
+@router.get("/claims/{claim_id}/receipt")
+async def admin_download_claim_receipt(
+    claim_id: int,
+    admin: User = Depends(get_admin_user),
+    _key: None = Depends(_require_api_key),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        pdf = await build_income_loss_receipt_pdf(
+            db, claim_id=int(claim_id), requester_user_id=int(admin.id), is_admin=True
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="safenet-receipt-{claim_id}.pdf"'},
+    )
+
+
+@router.get("/pool/stats")
+async def get_pool_stats(
+    request: Request,
+    admin: User = Depends(get_admin_user),
+    _key: None = Depends(_require_api_key),
+    db: AsyncSession = Depends(get_db),
+):
+    """Financial health of all zone pools from ZonePoolBalance table."""
+    pools = await _latest_pools_by_zone_raw(db)
+    zone_rows = (await db.execute(select(Zone))).scalars().all()
+    zone_name_map = {str(z.city_code): z.name for z in zone_rows}
+
+    total_premiums = 0.0
+    total_payouts = 0.0
+    zone_breakdown: List[Dict[str, Any]] = []
+
+    for zone_id, pool in pools.items():
+        premiums = float(pool.total_premiums_collected or 0.0)
+        payouts = float(pool.total_payouts_disbursed or 0.0)
+        balance = float(pool.current_balance or 0.0)
+        lr = float(pool.loss_ratio or 0.0)
+        total_premiums += premiums
+        total_payouts += payouts
+        zone_breakdown.append({
+            "zone_id": zone_id,
+            "zone_name": zone_name_map.get(zone_id, zone_id),
+            "total_premiums_collected": round(premiums, 2),
+            "total_payouts_disbursed": round(payouts, 2),
+            "current_balance": round(balance, 2),
+            "loss_ratio": round(lr, 4),
+            "risk_level": _risk_from_loss_ratio(lr),
+            "flagged_reinsurance": bool(pool.flagged_reinsurance),
+        })
+
+    overall_lr = round(total_payouts / total_premiums, 4) if total_premiums > 0 else 0.0
+    if overall_lr >= 0.85:
+        status = "critical"
+    elif overall_lr >= 0.70:
+        status = "stressed"
+    else:
+        status = "healthy"
+
+    shields = getattr(request.app.state, "forecast_shields", None)
+    health = await compute_pool_health_payload(db, shields if isinstance(shields, dict) else None)
+
+    return {
+        "total_premiums_all_zones": round(total_premiums, 2),
+        "total_payouts_all_zones": round(total_payouts, 2),
+        "overall_loss_ratio": overall_lr,
+        "target_loss_ratio": 0.70,
+        "status": status,
+        "zones": zone_breakdown,
+        **health,
+    }
+
+
+@router.get("/fraud/signals")
+async def get_fraud_signals(
+    admin: User = Depends(get_admin_user),
+    _key: None = Depends(_require_api_key),
+    db: AsyncSession = Depends(get_db),
+):
+    """Fraud insights: flags today, suspicious workers, zone clusters."""
+    day_start, day_end = _utc_day_bounds()
+
+    # Flags today
+    flags_today = (
+        await db.execute(
+            select(func.count(FraudFlag.id))
+            .where(FraudFlag.created_at >= day_start, FraudFlag.created_at < day_end)
+        )
+    ).scalar_one() or 0
+
+    # Suspicious workers: fraud_score >= 0.5, last 7 days
+    week_ago = _utcnow() - timedelta(days=7)
+    suspicious_sq = (
+        await db.execute(
+            select(
+                Simulation.user_id,
+                func.max(Simulation.fraud_score).label("max_score"),
+                func.count(Simulation.id).label("claim_cnt"),
+            )
+            .where(
+                Simulation.fraud_score >= 0.5,
+                Simulation.created_at >= week_ago,
+            )
+            .group_by(Simulation.user_id)
+            .order_by(func.max(Simulation.fraud_score).desc())
+            .limit(20)
+        )
+    ).all()
+
+    # Collect flag types per worker
+    worker_ids = [r.user_id for r in suspicious_sq]
+    flag_types_sq: Dict[int, List[str]] = {}
+    if worker_ids:
+        ft_rows = (
+            await db.execute(
+                select(FraudFlag.user_id, FraudFlag.flag_type)
+                .where(FraudFlag.user_id.in_(worker_ids))
+                .order_by(FraudFlag.created_at.desc())
+            )
+        ).all()
+        for r in ft_rows:
+            flag_types_sq.setdefault(int(r.user_id), []).append(str(r.flag_type))
+
+    suspicious_workers = [
+        {
+            "worker_id": int(r.user_id),
+            "fraud_score": round(float(r.max_score or 0.0), 3),
+            "claim_count": int(r.claim_cnt),
+            "flag_types": list(set(flag_types_sq.get(int(r.user_id), []))),
+        }
+        for r in suspicious_sq
+    ]
+
+    # Zone clusters: zones where claim count in last 1h > 8 (possible mass fraud)
+    one_hour_ago = _utcnow() - timedelta(hours=1)
+    cluster_sq = (
+        await db.execute(
+            select(
+                ClaimLifecycle.zone_id,
+                func.count(ClaimLifecycle.id).label("cnt"),
+            )
+            .where(ClaimLifecycle.created_at >= one_hour_ago)
+            .group_by(ClaimLifecycle.zone_id)
+            .having(func.count(ClaimLifecycle.id) > 8)
+        )
+    ).all()
+    zone_clusters = [
+        {"zone_id": str(r.zone_id), "claim_count_last_1h": int(r.cnt)}
+        for r in cluster_sq
+    ]
+
+    return {
+        "flags_today": int(flags_today),
+        "suspicious_workers": suspicious_workers,
+        "zone_clusters": zone_clusters,
+    }
+
+
+@router.get("/disruptions/active")
+async def get_active_disruptions_detail(
+    admin: User = Depends(get_admin_user),
+    _key: None = Depends(_require_api_key),
+    db: AsyncSession = Depends(get_db),
+):
+    """Active DisruptionEvents with zone name and workers_affected count."""
+    active_events = (
+        await db.execute(
+            select(DisruptionEvent)
+            .where(DisruptionEvent.is_active.is_(True))
+            .order_by(DisruptionEvent.started_at.desc())
+        )
+    ).scalars().all()
+
+    zone_name_map: Dict[str, str] = {}
+    zone_rows = (await db.execute(select(Zone.city_code, Zone.name))).all()
+    for zr in zone_rows:
+        zone_name_map[str(zr.city_code)] = str(zr.name)
+
+    # Workers affected = active policy holders in each disrupted zone
+    affected_sq = (
+        await db.execute(
+            select(Profile.zone_id, func.count(func.distinct(Profile.user_id)).label("cnt"))
+            .join(Policy, Policy.user_id == Profile.user_id)
+            .where(Policy.status == "active")
+            .group_by(Profile.zone_id)
+        )
+    ).all()
+    affected_map: Dict[str, int] = {str(r.zone_id): int(r.cnt) for r in affected_sq if r.zone_id}
+
+    return [
+        {
+            "event_id": e.id,
+            "zone_id": e.zone_id,
+            "zone_name": zone_name_map.get(str(e.zone_id), str(e.zone_id)),
+            "disruption_type": e.disruption_type,
+            "severity": round(float(e.severity or 0.0), 3),
+            "confidence": e.confidence,
+            "api_source": e.api_source,
+            "raw_value": e.raw_value,
+            "workers_affected": affected_map.get(str(e.zone_id), 0),
+            "started_at": _iso(e.started_at),
+            "ended_at": _iso(e.ended_at),
+        }
+        for e in active_events
+    ]
+
+
+@router.get("/payouts/monitor")
+async def get_payout_monitor(
+    admin: User = Depends(get_admin_user),
+    _key: None = Depends(_require_api_key),
+    db: AsyncSession = Depends(get_db),
+):
+    """Payout queue status: pending, failed, disbursed today."""
+    day_start, day_end = _utc_day_bounds()
+
+    pending_count = (
+        await db.execute(
+            select(func.count(PayoutRecord.id)).where(PayoutRecord.status == "pending")
+        )
+    ).scalar_one() or 0
+
+    pending_amount = (
+        await db.execute(
+            select(func.coalesce(func.sum(PayoutRecord.amount), 0.0))
+            .where(PayoutRecord.status == "pending")
+        )
+    ).scalar_one() or 0.0
+
+    failed_count = (
+        await db.execute(
+            select(func.count(PayoutRecord.id)).where(PayoutRecord.status == "failed")
+        )
+    ).scalar_one() or 0
+
+    disbursed_today = (
+        await db.execute(
+            select(func.coalesce(func.sum(PayoutRecord.amount), 0.0))
+            .where(
+                PayoutRecord.status == "completed",
+                PayoutRecord.created_at >= day_start,
+                PayoutRecord.created_at < day_end,
+            )
+        )
+    ).scalar_one() or 0.0
+
+    disbursed_count_today = (
+        await db.execute(
+            select(func.count(PayoutRecord.id))
+            .where(
+                PayoutRecord.status == "completed",
+                PayoutRecord.created_at >= day_start,
+                PayoutRecord.created_at < day_end,
+            )
+        )
+    ).scalar_one() or 0
+
+    # Recent pending payouts detail
+    pending_rows = (
+        await db.execute(
+            select(PayoutRecord)
+            .where(PayoutRecord.status == "pending")
+            .order_by(PayoutRecord.created_at.desc())
+            .limit(20)
+        )
+    ).scalars().all()
+
+    return {
+        "pending_count": int(pending_count),
+        "pending_amount": round(float(pending_amount), 2),
+        "failed_count": int(failed_count),
+        "disbursed_today": round(float(disbursed_today), 2),
+        "disbursed_count_today": int(disbursed_count_today),
+        "pending_queue": [
+            {
+                "payout_id": p.id,
+                "simulation_id": p.simulation_id,
+                "amount": round(float(p.amount or 0.0), 2),
+                "created_at": _iso(p.created_at),
+            }
+            for p in pending_rows
+        ],
+    }
+
+
+@router.get("/disruptions")
+async def list_active_disruptions(
+    admin: User = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db),
+    active_only: bool = True,
+):
+    """
+    Returns all DisruptionEvent rows, optionally filtered to active only.
+    Used by admin dashboard to monitor live zone disruptions.
+    """
+    stmt = select(DisruptionEvent).order_by(DisruptionEvent.started_at.desc()).limit(200)
+    if active_only:
+        stmt = stmt.where(DisruptionEvent.is_active.is_(True))
+    rows = (await db.execute(stmt)).scalars().all()
+
+    def _iso(dt: Optional[datetime]) -> Optional[str]:
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.isoformat().replace("+00:00", "Z")
+
+    return [
+        {
+            "id": r.id,
+            "zone_id": r.zone_id,
+            "disruption_type": r.disruption_type,
+            "severity": round(float(r.severity or 0.0), 3),
+            "confidence": r.confidence,
+            "api_source": r.api_source,
+            "raw_value": r.raw_value,
+            "threshold_value": r.threshold_value,
+            "is_active": r.is_active,
+            "started_at": _iso(r.started_at),
+            "ended_at": _iso(r.ended_at),
+        }
+        for r in rows
+    ]
+
+
+@router.post("/disruptions/{event_id}/expire")
+async def expire_disruption_event(
+    event_id: int,
+    admin: User = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Manually expire a DisruptionEvent (admin override).
+    Sets is_active=False and ended_at=now.
+    """
+    row = (await db.execute(select(DisruptionEvent).where(DisruptionEvent.id == event_id))).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="DisruptionEvent not found")
+    if not row.is_active:
+        return {"ok": True, "already_expired": True, "event_id": event_id}
+    row.is_active = False
+    row.ended_at = datetime.now(timezone.utc)
+    await db.commit()
+    log.info(
+        "disruption_manually_expired",
+        engine_name="admin_route",
+        reason_code="ADMIN_EXPIRE",
+        event_id=event_id,
+        admin_id=admin.id,
+    )
+    return {"ok": True, "event_id": event_id, "ended_at": row.ended_at.isoformat()}
+
+
+@router.get("/claims/export")
+async def export_claims_csv(
+    format: str = "csv",
+    week: str = "current",
+    admin: User = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if format.lower() != "csv":
+        raise HTTPException(status_code=400, detail="Only csv format is supported")
+    now = datetime.now(timezone.utc)
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=now.weekday())
+    end = start + timedelta(days=7)
+    if week != "current":
+        raise HTTPException(status_code=400, detail="Only week=current is supported")
+    rows = (
+        await db.execute(
+            select(ClaimLifecycle, Profile.name)
+            .join(Profile, Profile.user_id == ClaimLifecycle.user_id)
+            .where(ClaimLifecycle.created_at >= start, ClaimLifecycle.created_at < end)
+            .order_by(ClaimLifecycle.created_at.desc())
+        )
+    ).all()
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow(["claim_id", "worker_name", "zone_id", "disruption_type", "status", "payout_amount", "created_at"])
+    for c, name in rows:
+        writer.writerow([
+            c.claim_id,
+            name or "Worker",
+            c.zone_id,
+            c.disruption_type or "",
+            c.status,
+            round(float(c.payout_amount or 0.0), 2),
+            _iso(c.created_at) or "",
+        ])
+    out.seek(0)
+    return StreamingResponse(
+        iter([out.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=claims_current_week.csv"},
+    )
+
+
+@router.get("/risk/forecast")
+async def get_risk_forecast(
+    admin: User = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    zones = (await db.execute(select(Zone))).scalars().all()
+    if not zones:
+        return {"items": []}
+    key = (settings.OPENWEATHER_API_KEY or "").strip()
+    items: List[Dict[str, Any]] = []
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        for z in zones[:8]:
+            rain_prob = 0.0
+            risk = "LOW"
+            reserve = 0.0
+            forecast_day = "N/A"
+            if key:
+                try:
+                    resp = await client.get(
+                        "https://api.openweathermap.org/data/2.5/forecast",
+                        params={"lat": z.lat, "lon": z.lng, "appid": key, "units": "metric"},
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        best = None
+                        for p in data.get("list", []):
+                            pop = float(p.get("pop", 0.0) or 0.0)
+                            if best is None or pop > best[0]:
+                                best = (pop, p.get("dt_txt", "N/A"))
+                        if best:
+                            rain_prob = round(best[0] * 100.0, 1)
+                            forecast_day = str(best[1])
+                except Exception:
+                    pass
+            if rain_prob >= 75:
+                risk = "HIGH"
+            elif rain_prob >= 45:
+                risk = "MEDIUM"
+            workers = (
+                await db.execute(
+                    select(func.count(Profile.id)).where(Profile.zone_id == z.city_code)
+                )
+            ).scalar_one() or 0
+            est_claims = int(max(1, round(workers * (0.35 if risk == "HIGH" else 0.18 if risk == "MEDIUM" else 0.08))))
+            reserve = round(est_claims * 620.0, 2)
+            items.append({
+                "zone_id": z.city_code,
+                "zone_name": z.name,
+                "forecast_day": forecast_day,
+                "rain_probability_pct": rain_prob,
+                "risk": risk,
+                "estimated_claims": est_claims,
+                "estimated_reserve": reserve,
+                "headline": f"{forecast_day} {risk} risk (rain {int(round(rain_prob))}% probability) — prepare ₹{int(round(reserve))} reserve",
+            })
+    return {"items": items}

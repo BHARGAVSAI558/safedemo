@@ -42,6 +42,10 @@ class ProfileUpdate(BaseModel):
     occupation: OccupationType | None = None
     avg_daily_income: float | None = None
     risk_profile: RiskProfile | None = None
+    bank_account_number: str | None = None
+    bank_ifsc: str | None = None
+    bank_upi_id: str | None = None
+    bank_account_name: str | None = None
 
     @field_validator("name", "city")
     @classmethod
@@ -67,10 +71,15 @@ class ProfileResponse(BaseModel):
     total_payouts: float
     platform: str | None = None
     zone_id: str | None = None
+    location_display: str | None = None
     working_hours_preset: str | None = None
     coverage_tier: str | None = None
     risk_score: float | None = None
     weekly_premium: float | None = None
+    bank_account_number: str | None = None
+    bank_ifsc: str | None = None
+    bank_upi_id: str | None = None
+    bank_account_name: str | None = None
     created_at: datetime | None
 
     model_config = {"from_attributes": True}
@@ -78,7 +87,7 @@ class ProfileResponse(BaseModel):
     @field_validator("trust_score", mode="before")
     @classmethod
     def trust_score_none(cls, v: Any) -> float:
-        return 1.0 if v is None else float(v)
+        return 0.0 if v is None else float(v)
 
     @field_validator("avg_daily_income", mode="before")
     @classmethod
@@ -126,3 +135,5 @@ class WorkerProfileOut(ProfileResponse):
     policy_history: list[PolicyWeekHistoryItem] = Field(default_factory=list)
     is_profile_complete: bool = True
     phone_number: str | None = Field(default=None, description="Masked phone for onboarding state")
+    trust_score_points: float = Field(50.0, description="Normalized trust 0–100 for UI")
+    trust_tier: str = Field("Reliable", description="Emerging / Reliable / Trusted / Elite")

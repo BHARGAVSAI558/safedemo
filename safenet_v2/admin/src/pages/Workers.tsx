@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 
 import api from '../api';
@@ -45,21 +45,46 @@ export default function Workers() {
 
   const workersQuery = useQuery({
     queryKey: ['admin', 'workers', debouncedQ, debouncedZone, page],
-    queryFn: async (): Promise<WorkerListResponse> =>
-      (await api.get('/admin/workers', { params: { q: debouncedQ, zone: debouncedZone, page, page_size: 200 } })).data,
+    queryFn: async (): Promise<WorkerListResponse> => {
+      try {
+        const res = await api.get('/admin/workers', { params: { q: debouncedQ, zone: debouncedZone, page, page_size: 200 } });
+        return res.data as WorkerListResponse;
+      } catch (err) {
+        console.error('Workers fetch failed:', err);
+        return { data: [], total_count: 0, page_size: 200 };
+      }
+    },
     placeholderData: (prev) => prev,
+    retry: 1,
   });
 
   const detailQuery = useQuery({
     queryKey: ['admin', 'workers', 'detail', selectedWorkerId],
-    queryFn: async () => (await api.get(`/admin/workers/${selectedWorkerId}`)).data,
+    queryFn: async () => {
+      try {
+        const res = await api.get(`/admin/workers/${selectedWorkerId}`);
+        return res.data;
+      } catch (err) {
+        console.error('Worker detail fetch failed:', err);
+        return null;
+      }
+    },
     enabled: selectedWorkerId !== null,
+    retry: 1,
   });
 
-  const rows = workersQuery.data?.data ?? [];
+  const rows = useMemo(() => {
+    try {
+      const data = Array.isArray(workersQuery.data?.data) ? workersQuery.data.data : [];
+      return [...data].sort((a, b) => Number(a.trust_score ?? 0) - Number(b.trust_score ?? 0));
+    } catch {
+      return [];
+    }
+  }, [workersQuery.data]);
+
   const totalPages = Math.max(
     1,
-    Math.ceil((workersQuery.data?.total_count ?? 0) / (workersQuery.data?.page_size ?? 12))
+    Math.ceil((Number(workersQuery.data?.total_count ?? 0)) / (Number(workersQuery.data?.page_size ?? 12)))
   );
 
   return (
@@ -130,41 +155,49 @@ export default function Workers() {
                 </td>
               </tr>
             ) : null}
-            {rows.map((row) => (
-              <tr
-                key={row.worker_id}
-                style={adminUi.trHover}
-                onClick={() => setSelectedWorkerId(row.worker_id)}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = 'var(--admin-row-hover)';
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = 'transparent';
-                }}
-              >
-                <td style={adminUi.td}>{row.phone_masked}</td>
-                <td style={adminUi.td}>{row.zone}</td>
-                <td style={adminUi.td}>{row.trust_score.toFixed(2)}</td>
-                <td style={adminUi.td}>{formatTierLabel(row.coverage_tier)}</td>
-                <td style={adminUi.td}>₹{row.weekly_premium.toFixed(0)}</td>
-                <td style={adminUi.td}>{row.claims_total}</td>
-                <td style={adminUi.td}>{row.fraud_flags}</td>
-                <td style={adminUi.td}>
-                  <span
-                    style={{
+            {rows.map((row) => {
+              const trust = Number(row.trust_score ?? 0);
+              return (
+                <tr
+                  key={row.worker_id}
+                  style={adminUi.trHover}
+                  onClick={() => setSelectedWorkerId(row.worker_id)}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.background = 'var(--admin-row-hover)';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.background = 'transparent';
+                  }}
+                >
+                  <td style={adminUi.td}>{String(row.phone_masked || row.phone || '—')}</td>
+                  <td style={adminUi.td}>{String(row.zone || '—')}</td>
+                  <td style={adminUi.td}>
+                    <span style={{
+                      fontWeight: 700,
+                      color: trust >= 0.8 ? '#16a34a' : trust >= 0.5 ? '#d97706' : '#dc2626',
+                    }}>
+                      {trust.toFixed(2)}
+                    </span>
+                  </td>
+                  <td style={adminUi.td}>{formatTierLabel(String(row.coverage_tier || ''))}</td>
+                  <td style={adminUi.td}>₹{Number(row.weekly_premium ?? 0).toFixed(0)}</td>
+                  <td style={adminUi.td}>{Number(row.claims_total ?? 0)}</td>
+                  <td style={adminUi.td}>{Number(row.fraud_flags ?? 0)}</td>
+                  <td style={adminUi.td}>
+                    <span style={{
                       fontSize: '0.75rem',
                       fontWeight: 700,
                       padding: '4px 8px',
                       borderRadius: 6,
-                      background: 'var(--admin-bg-subtle)',
-                      border: '1px solid var(--admin-border)',
-                    }}
-                  >
-                    {row.status}
-                  </span>
-                </td>
-              </tr>
-            ))}
+                      background: String(row.status || '').toUpperCase() === 'ACTIVE' ? 'rgba(22,163,74,0.12)' : String(row.status || '').toUpperCase() === 'EXPIRED' ? 'rgba(234,179,8,0.15)' : 'rgba(220,38,38,0.1)',
+                      color: String(row.status || '').toUpperCase() === 'ACTIVE' ? '#15803d' : String(row.status || '').toUpperCase() === 'EXPIRED' ? '#92400e' : '#b91c1c',
+                    }}>
+                      {String(row.status || 'UNKNOWN')}
+                    </span>
+                  </td>
+                </tr>
+              );
+            })}
             {!workersQuery.isFetching && rows.length === 0 ? (
               <tr>
                 <td colSpan={8} style={adminUi.td}>

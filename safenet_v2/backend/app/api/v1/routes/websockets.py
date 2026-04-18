@@ -28,14 +28,19 @@ async def _try_parse_json(data: Any) -> Any:
 
 
 async def _redis_listener(pubsub: Any, channel: str, out_q: asyncio.Queue[Any]) -> None:
-    async for msg in pubsub.listen():
-        if msg is None:
-            continue
-        if msg.get("type") != "message":
-            continue
-        data = msg.get("data")
-        parsed = await _try_parse_json(data)
-        await out_q.put(parsed)
+    try:
+        async for msg in pubsub.listen():
+            if msg is None:
+                continue
+            if msg.get("type") != "message":
+                continue
+            data = msg.get("data")
+            parsed = await _try_parse_json(data)
+            await out_q.put(parsed)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        pass
 
 
 @router.websocket("/ws/claims/{worker_id}")
@@ -51,7 +56,12 @@ async def worker_ws(
         await websocket.close(code=4401)
         return
 
-    await ws_manager.connect(worker_id, websocket)
+    connected = False
+    try:
+        await ws_manager.connect(worker_id, websocket)
+        connected = True
+    except Exception:
+        return
 
     redis = getattr(websocket.app.state, "redis", None)
     channel = f"claim_updates:{worker_id}"
@@ -136,7 +146,8 @@ async def worker_ws(
             await unsubscribe_channel(redis, channel, pubsub, bus_queue, forward_task)
         except Exception:
             pass
-        await ws_manager.disconnect(worker_id)
+        if connected:
+            await ws_manager.disconnect(worker_id)
         log.info(
             "ws_worker_disconnected",
             engine_name="websockets",
@@ -144,6 +155,15 @@ async def worker_ws(
             reason_code="WS_CLOSED",
             worker_id=worker_id,
         )
+
+
+@router.websocket("/ws/worker/{worker_id}")
+async def worker_ws_alias(
+    websocket: WebSocket,
+    worker_id: int,
+    token: str = Query(..., description="Bearer access token"),
+):
+    await worker_ws(websocket=websocket, worker_id=worker_id, token=token)
 
 
 @router.websocket("/ws/admin/feed")
@@ -172,6 +192,16 @@ async def admin_ws(
             tasks.append(asyncio.create_task(_queue_tag_forwarder(ch, q, admin_q)))
             sub_state.append((ch, pubsub, bus_queue, forward_task))
 
+        async def _admin_heartbeat() -> None:
+            while True:
+                await asyncio.sleep(30.0)
+                try:
+                    await websocket.send_json({"type": "PING"})
+                except Exception:
+                    return
+
+        tasks.append(asyncio.create_task(_admin_heartbeat()))
+
         while True:
             payload = await admin_q.get()
             try:
@@ -199,6 +229,14 @@ async def admin_ws(
             await websocket.close()
         except Exception:
             pass
+
+
+@router.websocket("/ws/admin")
+async def admin_ws_alias(
+    websocket: WebSocket,
+    token: str = Query(..., description="Admin JWT"),
+):
+    await admin_ws(websocket=websocket, token=token)
 
 
 async def _queue_tag_forwarder(channel_name: str, src_q: asyncio.Queue[Any], out_q: asyncio.Queue[Dict[str, Any]]) -> None:

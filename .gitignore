@@ -1,5 +1,9 @@
 safenet_v2/backend/.env
+SafeNetFresh/.env
 safenet_v2/backend/*.db
+*.db-journal
+**/.sqlite-write-probe.db
+tmp_openapi.json
 safenet_v2/backend/__pycache__/
 safenet_v2/backend/**/__pycache__/
 safenet_v2/backend/**/*.pyc
@@ -12,6 +16,7 @@ SafeNetFresh/dist/
 
 safenet_v2/admin/node_modules/
 safenet_v2/admin/dist/
+safenet_v2/.expo/
 
 .DS_Store
 Thumbs.db

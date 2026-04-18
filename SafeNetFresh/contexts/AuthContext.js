@@ -1,6 +1,11 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useReducer } from 'react';
 import { auth, setUnauthorizedHandler } from '../services/api';
+import { clearClaimsOnSignOut } from '../services/claimResetBridge';
 import { getCurrentTokenStore, setTokenStore, clearTokenStore, getUserIdStore, getPhoneStore } from '../services/tokenStore';
+
+// Module-level QueryClient reference — set by AuthProvider
+let _qcRef = null;
+export function setQueryClientRef(qc) { _qcRef = qc; }
 
 const AuthContext = createContext(null);
 
@@ -85,6 +90,14 @@ export function AuthProvider({ children }) {
 
   const signOut = useCallback(async () => {
     await clearTokenStore();
+    clearClaimsOnSignOut();
+    if (_qcRef) {
+      _qcRef.removeQueries({ queryKey: ['policy', 'current'] });
+      _qcRef.removeQueries({ queryKey: ['policy'] });
+      _qcRef.removeQueries({ queryKey: ['claimsHistory'] });
+      _qcRef.removeQueries({ queryKey: ['payoutHistory'] });
+      _qcRef.removeQueries({ queryKey: ['workerProfile'] });
+    }
     dispatch({ type: 'SIGN_OUT' });
   }, []);
 
@@ -96,6 +109,14 @@ export function AuthProvider({ children }) {
 
   const signIn = useCallback(async ({ phone, access_token, refresh_token, user_id }) => {
     await setTokenStore({ token: access_token, refreshToken: refresh_token, userId: user_id, phone });
+    // Clear stale cache from previous session
+    if (_qcRef) {
+      _qcRef.removeQueries({ queryKey: ['workerProfile'] });
+      _qcRef.removeQueries({ queryKey: ['claimsHistory'] });
+      _qcRef.removeQueries({ queryKey: ['payoutHistory'] });
+      _qcRef.removeQueries({ queryKey: ['earningsDna'] });
+      _qcRef.removeQueries({ queryKey: ['policy'] });
+    }
     dispatch({ type: 'SIGN_IN', token: access_token, refreshToken: refresh_token, userId: user_id, phone });
   }, []);
 

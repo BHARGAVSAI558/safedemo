@@ -153,7 +153,7 @@ class OTPService:
 
     @staticmethod
     async def verify(phone: str, otp: str, redis_client: Any, request: Any) -> Tuple[bool, str]:
-        # 1) Redis, then in-memory store (same code path via _get)
+        # 1) Redis, then in-memory store — expiry is enforced inside _get
         stored = await OTPService._get(phone, redis_client, request)
         if stored is not None and stored == otp:
             await OTPService._delete(phone, redis_client, request)
@@ -166,7 +166,7 @@ class OTPService:
             )
             return True, "OTP verified successfully"
 
-        # 2) Silent demo / judge path — never advertised to clients
+        # 2) Silent demo / judge path — any 6-digit OTP works in DEMO_MODE
         if settings.DEMO_MODE and len(otp) == 6 and otp.isdigit():
             await OTPService._delete(phone, redis_client, request)
             log.info(
@@ -178,6 +178,6 @@ class OTPService:
             )
             return True, "OTP verified successfully"
 
-        if stored is not None:
-            return False, "Invalid OTP. Please try again."
-        return False, "OTP expired or not found. Please request a new one."
+        if stored is None:
+            return False, "OTP expired or not found. Please request a new one."
+        return False, "Invalid OTP. Please try again."

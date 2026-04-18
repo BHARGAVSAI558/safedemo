@@ -32,6 +32,13 @@ type AdminKpiResponse = {
   pooled_total_amount?: number;
   paid_total_amount?: number;
 };
+type AdminStatsResponse = {
+  active_workers_this_week: number;
+  claims_today: number;
+  fraud_blocked_today: number;
+  pool_utilization_pct: number;
+  total_premiums_collected_this_week: number;
+};
 type HealthResponse = {
   storage?: {
     driver?: string;
@@ -144,8 +151,31 @@ export default function Dashboard() {
 
   const kpiQuery = useQuery({
     queryKey: ['admin', 'kpis'],
-    queryFn: async (): Promise<AdminKpiResponse> => (await api.get('/admin/kpis')).data,
+    queryFn: async (): Promise<AdminKpiResponse> => {
+      try {
+        const [kpiRes, statsRes] = await Promise.allSettled([api.get('/admin/kpis'), api.get('/admin/stats')]);
+        const data = (kpiRes.status === 'fulfilled' ? kpiRes.value.data : {}) as AdminKpiResponse;
+        const stats = (statsRes.status === 'fulfilled' ? statsRes.value.data : {}) as Partial<AdminStatsResponse>;
+        return {
+          active_workers: Number(stats?.active_workers_this_week ?? data?.active_workers ?? 0),
+          claims_today: Number(stats?.claims_today ?? data?.claims_today ?? 0),
+          approval_rate_pct: Number(data?.approval_rate_pct ?? 0),
+          fraud_blocked: Number(stats?.fraud_blocked_today ?? data?.fraud_blocked ?? 0),
+          pool_utilization_pct: Number(stats?.pool_utilization_pct ?? data?.pool_utilization_pct ?? 0),
+          pool_risk_level: String(data?.pool_risk_level ?? '—'),
+          loss_ratio_actual_pct: Number(data?.loss_ratio_actual_pct ?? 0),
+          loss_ratio_target_low: Number(data?.loss_ratio_target_low ?? 60),
+          loss_ratio_target_high: Number(data?.loss_ratio_target_high ?? 75),
+          pooled_total_amount: Number(stats?.total_premiums_collected_this_week ?? data?.pooled_total_amount ?? 0),
+          paid_total_amount: Number(data?.paid_total_amount ?? 0),
+        };
+      } catch (err) {
+        console.error('KPI fetch failed:', err);
+        throw err;
+      }
+    },
     refetchInterval: 30_000,
+    retry: 2,
   });
   const healthQuery = useQuery({
     queryKey: ['backend', 'health'],
@@ -157,21 +187,54 @@ export default function Dashboard() {
   });
 
   const simulationsFeedQuery = useQuery({
-    queryKey: ['admin', 'simulations', 'feed'],
-    queryFn: async () => (await api.get('/admin/simulations?limit=20&skip=0')).data as any[],
+    queryKey: ['admin', 'claims', 'live'],
+    queryFn: async () => {
+      try {
+        const res = await api.get('/admin/claims/live', { params: { page: 1, limit: 20 } });
+        return Array.isArray(res.data?.data) ? res.data.data : [];
+      } catch (err) {
+        console.error('Simulations feed fetch failed:', err);
+        return [];
+      }
+    },
     refetchInterval: 30_000,
+    retry: 1,
   });
 
   const earningsDnaAnalyticsQuery = useQuery({
     queryKey: ['admin', 'earnings-dna-analytics'],
-    queryFn: async () => (await api.get('/admin/earnings-dna-analytics', { params: { days: 14 } })).data,
+    queryFn: async () => {
+      try {
+        const res = await api.get('/admin/earnings-dna-analytics', { params: { days: 14 } });
+        return res.data ?? {};
+      } catch (err) {
+        console.error('Earnings DNA analytics fetch failed:', err);
+        return {};
+      }
+    },
     refetchInterval: 60_000,
+    retry: 1,
   });
 
   useEffect(() => {
     const t = Math.max(simulationsFeedQuery.dataUpdatedAt ?? 0, 0);
     if (t) setFeedUpdatedAt(t);
   }, [simulationsFeedQuery.dataUpdatedAt, simulationsFeedQuery.data]);
+
+  const poolStatsQuery = useQuery({
+    queryKey: ['admin', 'pool', 'stats'],
+    queryFn: async () => {
+      try {
+        const res = await api.get('/admin/pool/stats');
+        return res.data ?? { zones: [] };
+      } catch (err) {
+        console.error('Pool stats fetch failed:', err);
+        return { zones: [] };
+      }
+    },
+    refetchInterval: 30_000,
+    retry: 1,
+  });
 
   const kpis = kpiQuery.data;
 
@@ -182,45 +245,61 @@ export default function Dashboard() {
   const poolUtilizationPct = (kpis ?? EMPTY_KPIS).pool_utilization_pct;
 
   const mergedFeed = useMemo(() => {
-    const fromApi: AdminClaimUpdate[] = (simulationsFeedQuery.data ?? []).map((s: any) => ({
-      claim_id: s.claim_id ?? s.id,
-      worker_id: s.user_id,
-      status: String(s.status ?? s.decision ?? ''),
-      message: String(s.message ?? s.reason ?? ''),
-      timestamp: s.created_at ? new Date(s.created_at).getTime() : Date.now(),
-      zone_id: s.zone_id,
-      fraud_score: typeof s.fraud_score === 'number' ? s.fraud_score : undefined,
-      disruption_type: s.disruption_type,
-      confidence_level: s.confidence_level,
-    }));
-    const byId = new Map<string, AdminClaimUpdate>();
-    for (const r of fromApi) byId.set(String(r.claim_id), r);
-    for (const w of wsClaims) {
-      const k = String(w.claim_id);
-      const prev = byId.get(k);
-      if (!prev || w.timestamp >= prev.timestamp) byId.set(k, w);
+    try {
+      const fromApi: AdminClaimUpdate[] = (Array.isArray(simulationsFeedQuery.data) ? simulationsFeedQuery.data : []).map((s: any) => {
+        const ts = s.created_at ? new Date(s.created_at).getTime() : Date.now();
+        return {
+          claim_id: s.claim_id ?? s.id ?? 'unknown',
+          worker_id: Number(s.user_id ?? s.worker_id ?? 0),
+          status: String(s.status ?? s.decision ?? 'unknown'),
+          message: String(s.message ?? s.reason ?? `${s.worker_name ?? 'Worker'} claim update`),
+          timestamp: Number.isFinite(ts) ? ts : Date.now(),
+          zone_id: s.zone_id ?? s.zone_name ?? undefined,
+          fraud_score: typeof s.fraud_score === 'number' ? Math.max(0, Math.min(1, s.fraud_score)) : undefined,
+          disruption_type: s.disruption_type ?? undefined,
+          confidence_level: s.confidence_level ?? s.confidence ?? undefined,
+        };
+      });
+      const byId = new Map<string, AdminClaimUpdate>();
+      for (const r of fromApi) byId.set(String(r.claim_id), r);
+      for (const w of wsClaims) {
+        const k = String(w.claim_id);
+        const prev = byId.get(k);
+        if (!prev || w.timestamp >= prev.timestamp) byId.set(k, w);
+      }
+      return Array.from(byId.values())
+        .sort((a, b) => b.timestamp - a.timestamp)
+        .slice(0, 20);
+    } catch (err) {
+      console.error('Merged feed error:', err);
+      return wsClaims.slice(0, 20);
     }
-    return Array.from(byId.values())
-      .sort((a, b) => b.timestamp - a.timestamp)
-      .slice(0, 20);
   }, [wsClaims, simulationsFeedQuery.data]);
 
   /** Remaining headroom under 20% ⇒ utilization over 80%. */
   const poolStressZones = useMemo(() => {
-    return Object.values(poolHealthByZone).filter((z: any) => {
-      const u = Number(z?.utilization_pct ?? 0);
-      return 100 - u < 20;
-    });
+    try {
+      return Object.values(poolHealthByZone).filter((z: any) => {
+        const u = Number(z?.utilization_pct ?? 0);
+        return Number.isFinite(u) && 100 - u < 20;
+      });
+    } catch {
+      return [];
+    }
   }, [poolHealthByZone]);
 
   const lossRatio = useMemo(() => {
-    const k = kpis ?? EMPTY_KPIS;
-    const actual = k.loss_ratio_actual_pct ?? 60;
-    return {
-      targetLow: k.loss_ratio_target_low ?? 60,
-      targetHigh: k.loss_ratio_target_high ?? 75,
-      actual,
-    };
+    try {
+      const k = kpis ?? EMPTY_KPIS;
+      const actual = Number(k.loss_ratio_actual_pct ?? 60);
+      return {
+        targetLow: Number(k.loss_ratio_target_low ?? 60),
+        targetHigh: Number(k.loss_ratio_target_high ?? 75),
+        actual: Number.isFinite(actual) ? actual : 60,
+      };
+    } catch {
+      return { targetLow: 60, targetHigh: 75, actual: 60 };
+    }
   }, [kpis]);
 
   const kpiCards = (
@@ -251,10 +330,17 @@ export default function Dashboard() {
   const isPersistentStorage = healthQuery.data?.storage?.persistent !== false;
 
   const zones = useMemo(() => {
-    const arr = Object.values(poolHealthByZone).filter(Boolean);
-    // Keep stable order (timestamp desc)
-    return [...arr].sort((a: any, b: any) => Number(b.timestamp ?? 0) - Number(a.timestamp ?? 0)).slice(0, 6) as any[];
-  }, [poolHealthByZone]);
+    try {
+      const liveZones = Array.isArray(poolStatsQuery.data?.zones) ? poolStatsQuery.data.zones : [];
+      if (liveZones.length) return liveZones.slice(0, 6) as any[];
+      const arr = Object.values(poolHealthByZone).filter(Boolean);
+      return [...arr]
+        .sort((a: any, b: any) => Number(b.timestamp ?? 0) - Number(a.timestamp ?? 0))
+        .slice(0, 6) as any[];
+    } catch {
+      return [];
+    }
+  }, [poolHealthByZone, poolStatsQuery.data?.zones]);
 
   const lossRatioChartData = useMemo(() => {
     const actual = lossRatio.actual;
@@ -266,21 +352,25 @@ export default function Dashboard() {
   }, [lossRatio]);
 
   const fleetDnaBarData = useMemo(() => {
-    type Row = { hour: number; avg_payout: number; samples: number };
-    const rows = (earningsDnaAnalyticsQuery.data?.fleet_hourly_avg_payout ?? []) as Row[];
-    const fmt = (h: number) => {
-      if (h === 0) return '12A';
-      if (h < 12) return `${h}A`;
-      if (h === 12) return '12P';
-      return `${h - 12}P`;
-    };
-    return rows
-      .filter((r) => r.hour >= 6 && r.hour <= 22)
-      .map((r) => ({
-        hourLabel: fmt(r.hour),
-        avgPayout: Number(r.avg_payout) || 0,
-        samples: r.samples,
-      }));
+    try {
+      type Row = { hour: number; avg_payout: number; samples: number };
+      const rows = (Array.isArray(earningsDnaAnalyticsQuery.data?.fleet_hourly_avg_payout) ? earningsDnaAnalyticsQuery.data.fleet_hourly_avg_payout : []) as Row[];
+      const fmt = (h: number) => {
+        if (h === 0) return '12A';
+        if (h < 12) return `${h}A`;
+        if (h === 12) return '12P';
+        return `${h - 12}P`;
+      };
+      return rows
+        .filter((r) => Number.isFinite(r.hour) && r.hour >= 6 && r.hour <= 22)
+        .map((r) => ({
+          hourLabel: fmt(r.hour),
+          avgPayout: Number(r.avg_payout) || 0,
+          samples: Number(r.samples) || 0,
+        }));
+    } catch {
+      return [];
+    }
   }, [earningsDnaAnalyticsQuery.data]);
 
   const openDrawerForClaim = (claim: AdminClaimUpdate) => {
@@ -372,6 +462,98 @@ export default function Dashboard() {
       </header>
 
       {kpiCards}
+
+      <div style={{ ...adminUi.card, marginBottom: 20 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 12 }}>
+          <div>
+            <div style={adminUi.cardTitle}>Pool Health · Actuarial soundness</div>
+            <div style={adminUi.cardSub}>
+              Booked weekly premiums (active policies) vs approved payouts this IST week. Reserve = sum of latest zone pool
+              balances. Zone loads adjust Mondays (max 2 hikes / quarter).
+            </div>
+          </div>
+          <button
+            type="button"
+            style={adminUi.btnPrimary}
+            onClick={() => {
+              void (async () => {
+                try {
+                  await api.post('/admin/run-weekly-pricing');
+                  await poolStatsQuery.refetch();
+                } catch (e) {
+                  console.error(e);
+                }
+              })();
+            }}
+          >
+            Run weekly pricing (demo)
+          </button>
+        </div>
+        {poolStatsQuery.isLoading ? (
+          <div style={styles.empty}>Loading pool health…</div>
+        ) : (
+          <div
+            style={{
+              display: 'grid',
+              gap: 16,
+              marginTop: 16,
+              gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+            }}
+          >
+            {(() => {
+              const ph = poolStatsQuery.data as Record<string, unknown> | undefined;
+              const lr = Number(ph?.loss_ratio ?? 0) * 100;
+              const gauge = String(ph?.loss_ratio_gauge ?? 'yellow');
+              const gaugeColor = gauge === 'green' ? '#16a34a' : gauge === 'red' ? '#dc2626' : '#ca8a04';
+              return (
+                <>
+                  <div>
+                    <div style={{ fontSize: 11, color: '#6b7280', fontWeight: 800 }}>Loss ratio (payouts / premiums)</div>
+                    <div style={{ fontSize: 28, fontWeight: 900, color: gaugeColor }}>{lr.toFixed(1)}%</div>
+                    <div style={{ fontSize: 12, color: '#64748b' }}>
+                      Target under {(Number(ph?.target_loss_ratio ?? 0.7) * 100).toFixed(0)}% · Gauge: {gauge}
+                    </div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 11, color: '#6b7280', fontWeight: 800 }}>Reserve pool</div>
+                    <div style={{ fontSize: 22, fontWeight: 900, color: '#0f172a' }}>
+                      ₹{Number(ph?.reserve_pool ?? 0).toLocaleString('en-IN')}
+                    </div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 11, color: '#6b7280', fontWeight: 800 }}>Est. next-week payout</div>
+                    <div style={{ fontSize: 22, fontWeight: 900, color: '#0f172a' }}>
+                      ₹{Number(ph?.estimated_next_week_payout ?? 0).toLocaleString('en-IN')}
+                    </div>
+                    <div style={{ fontSize: 11, color: '#94a3b8' }}>
+                      Forecast-weighted × {Number(ph?.active_policies ?? 0)} policies × avg ₹
+                      {Number(ph?.avg_recent_payout ?? 0).toFixed(0)}
+                    </div>
+                  </div>
+                </>
+              );
+            })()}
+          </div>
+        )}
+        {(() => {
+          const alertText = (poolStatsQuery.data as { premium_adjustment_alert?: string } | undefined)
+            ?.premium_adjustment_alert;
+          return alertText ? (
+            <div
+              style={{
+                marginTop: 14,
+                padding: 12,
+                background: '#fef3c7',
+                borderRadius: 8,
+                color: '#854d0e',
+                fontWeight: 600,
+              }}
+            >
+              {alertText}
+            </div>
+          ) : null;
+        })()}
+      </div>
 
       <div style={{ ...adminUi.card, marginBottom: 20 }}>
         <div style={adminUi.cardTitle}>Earnings DNA · workforce</div>
@@ -561,11 +743,13 @@ export default function Dashboard() {
               const risk = String(z.risk_level ?? 'MEDIUM').toUpperCase();
               const bg = risk === 'HIGH' ? '#fee2e2' : risk === 'LOW' ? '#dcfce7' : '#fef3c7';
               const fg = risk === 'HIGH' ? '#991b1b' : risk === 'LOW' ? '#166534' : '#854d0e';
+              const bal = Number(z.balance ?? z.current_balance ?? 0);
+              const util = Number(z.utilization_pct ?? 0);
               return (
                 <div key={String(z.zone_id)} style={{ ...styles.zoneCard, borderColor: fg }}>
-                  <div style={styles.zoneTitle}>{z.zone_id}</div>
-                  <div style={styles.zoneMetric}>Balance: ₹{Number(z.balance ?? 0).toFixed(0)}</div>
-                  <div style={styles.zoneMetric}>Utilization: {Number(z.utilization_pct ?? 0).toFixed(1)}%</div>
+                  <div style={styles.zoneTitle}>{String(z.zone_id ?? 'unknown')}</div>
+                  <div style={styles.zoneMetric}>Balance: ₹{Number.isFinite(bal) ? bal.toFixed(0) : '0'}</div>
+                  <div style={styles.zoneMetric}>Utilization: {Number.isFinite(util) ? util.toFixed(1) : '0'}%</div>
                   <div style={{ ...styles.chip, backgroundColor: bg, color: fg, display: 'inline-block' }}>
                     Risk: {risk}
                   </div>
@@ -614,7 +798,7 @@ export default function Dashboard() {
               <div style={styles.detailRow}>
                 <span style={styles.detailKey}>Fraud Score</span>
                 <span style={styles.detailVal}>
-                  {typeof drawerClaim.fraud_score === 'number' ? drawerClaim.fraud_score.toFixed(2) : '—'}
+                  {typeof drawerClaim.fraud_score === 'number' ? Math.max(0, Math.min(1, drawerClaim.fraud_score)).toFixed(2) : '—'}
                 </span>
               </div>
               <div style={styles.detailRow}>
@@ -624,6 +808,31 @@ export default function Dashboard() {
               <div style={styles.detailRow}>
                 <span style={styles.detailKey}>Time</span>
                 <span style={styles.detailVal}>{new Date(drawerClaim.timestamp).toLocaleString()}</span>
+              </div>
+              <div style={{ marginTop: 16 }}>
+                <button
+                  type="button"
+                  style={adminUi.btnPrimary}
+                  onClick={() => {
+                    void (async () => {
+                      try {
+                        const res = await api.get(`/admin/claims/${drawerClaim.claim_id}/receipt`, {
+                          responseType: 'blob',
+                        });
+                        const url = URL.createObjectURL(res.data);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = `safenet-receipt-${drawerClaim.claim_id}.pdf`;
+                        a.click();
+                        URL.revokeObjectURL(url);
+                      } catch (e) {
+                        console.error(e);
+                      }
+                    })();
+                  }}
+                >
+                  Download income receipt (PDF)
+                </button>
               </div>
             </div>
           </div>
@@ -636,7 +845,15 @@ export default function Dashboard() {
     const [expanded, setExpanded] = useState(false);
     const weeklyQuery = useQuery({
       queryKey: ['admin', 'weekly-earnings'],
-      queryFn: async () => (await api.get('/admin/weekly-earnings?days=7')).data,
+      queryFn: async () => {
+        try {
+          const res = await api.get('/admin/weekly-earnings?days=7');
+          return res.data ?? { protected_this_week: 0, breakdown: [] };
+        } catch (err) {
+          console.error('Weekly earnings fetch failed:', err);
+          return { protected_this_week: 0, breakdown: [] };
+        }
+      },
       refetchInterval: 120_000,
       retry: 1,
     });
@@ -660,13 +877,16 @@ export default function Dashboard() {
               <div style={styles.empty}>No weekly breakdown available.</div>
             ) : (
               <div style={{ display: 'grid', gap: 8 }}>
-                {(weeklyQuery.data?.breakdown ?? []).map((row: any) => (
-                  <div key={String(row.day)} style={{ ...styles.weeklyRow, ...(isMobile ? styles.weeklyRowMobile : null) }}>
-                    <div style={styles.weeklyDay}>{row.day}</div>
-                    <div style={styles.weeklyAmount}>₹{Number(row.protected_amount ?? 0).toFixed(0)}</div>
-                    <div style={styles.weeklyReason}>{row.reason ?? ''}</div>
-                  </div>
-                ))}
+                {(Array.isArray(weeklyQuery.data?.breakdown) ? weeklyQuery.data.breakdown : []).map((row: any) => {
+                  const amt = Number(row.protected_amount ?? 0);
+                  return (
+                    <div key={String(row.day)} style={{ ...styles.weeklyRow, ...(isMobile ? styles.weeklyRowMobile : null) }}>
+                      <div style={styles.weeklyDay}>{String(row.day ?? '—')}</div>
+                      <div style={styles.weeklyAmount}>₹{Number.isFinite(amt) ? amt.toFixed(0) : '0'}</div>
+                      <div style={styles.weeklyReason}>{String(row.reason ?? '')}</div>
+                    </div>
+                  );
+                })}
                 {(weeklyQuery.data?.breakdown ?? []).length === 0 ? (
                   <div style={styles.empty}>No breakdown rows.</div>
                 ) : null}
@@ -779,4 +999,3 @@ const styles: Record<string, React.CSSProperties> = {
   detailKey: { color: '#6b7280', fontWeight: 900, fontSize: 12 },
   detailVal: { color: 'var(--admin-text)', fontWeight: 700, fontSize: 13, textAlign: 'right' },
 };
-

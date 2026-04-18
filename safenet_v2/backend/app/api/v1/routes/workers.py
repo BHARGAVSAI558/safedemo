@@ -13,6 +13,7 @@ from app.db.session import get_db
 from app.models.claim import DecisionType, Simulation
 from app.models.device_fingerprint import DeviceFingerprint
 from app.models.policy import Policy
+from app.models.weekly_summary import WeeklySummary
 from app.models.worker import OccupationType as OrmOccupation
 from app.models.worker import Profile, RiskProfile as OrmRisk, User
 from app.schemas.earnings_dna import EarningsDnaOut
@@ -22,6 +23,7 @@ from app.services.cache_service import cache_invalidate
 from app.services.earnings_dna_service import build_worker_earnings_dna
 from app.services.onboarding_pricing import TIER_MAX_DAILY
 from app.services.zone_resolver import resolve_city_to_zone
+from app.engines.trust_payout import trust_score_points, trust_tier_label
 from app.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -83,6 +85,8 @@ def _profile_response_from_orm(profile: Profile) -> ProfileResponse:
     """Avoid from_attributes edge cases (NULL numerics, driver-specific enums)."""
     name = (profile.name or "").strip() or "Worker"
     city = (profile.city or "Hyderabad").strip()
+    loc = getattr(profile, "location_display", None)
+    loc = (str(loc).strip() or None) if loc else None
     return ProfileResponse(
         id=int(profile.id),
         user_id=int(profile.user_id),
@@ -91,21 +95,30 @@ def _profile_response_from_orm(profile: Profile) -> ProfileResponse:
         occupation=_enum_or_str(profile.occupation, "delivery"),
         avg_daily_income=float(profile.avg_daily_income) if profile.avg_daily_income is not None else 1000.0,
         risk_profile=_enum_or_str(profile.risk_profile, "medium"),
-        trust_score=float(profile.trust_score) if profile.trust_score is not None else 1.0,
+        trust_score=float(profile.trust_score) if profile.trust_score is not None else 0.0,
         total_claims=int(profile.total_claims) if profile.total_claims is not None else 0,
         total_payouts=float(profile.total_payouts) if profile.total_payouts is not None else 0.0,
         platform=profile.platform,
         zone_id=profile.zone_id,
+        location_display=loc,
         working_hours_preset=profile.working_hours_preset,
         coverage_tier=profile.coverage_tier,
         risk_score=float(profile.risk_score) if getattr(profile, "risk_score", None) is not None else None,
         weekly_premium=float(profile.weekly_premium) if getattr(profile, "weekly_premium", None) is not None else None,
+        bank_account_number=(str(getattr(profile, "bank_account_number", "") or "").strip() or None),
+        bank_ifsc=(str(getattr(profile, "bank_ifsc", "") or "").strip() or None),
+        bank_upi_id=(str(getattr(profile, "bank_upi_id", "") or "").strip() or None),
+        bank_account_name=(str(getattr(profile, "bank_account_name", "") or "").strip() or None),
         created_at=profile.created_at,
     )
 
 
 async def _worker_profile_payload(profile: Profile, current_user: User, db: AsyncSession) -> WorkerProfileOut:
-    zone_id, _lat, _lon = resolve_city_to_zone(profile.city or "")
+    stored_zone = str(profile.zone_id or "").strip()
+    if stored_zone and stored_zone.lower() not in ("default", "unknown"):
+        zone_id = stored_zone
+    else:
+        zone_id, _lat, _lon = resolve_city_to_zone(profile.city or "")
     start, end = _week_bounds_utc()
     weekly_protected = 0.0
     try:
@@ -177,6 +190,7 @@ async def _worker_profile_payload(profile: Profile, current_user: User, db: Asyn
     payload = base.model_dump()
     payload.pop("zone_id", None)
     complete = bool(str(profile.zone_id or "").strip()) and bool(str(profile.platform or "").strip())
+    tpts = trust_score_points(profile.trust_score)
     return WorkerProfileOut(
         **payload,
         zone_id=zone_id,
@@ -185,6 +199,8 @@ async def _worker_profile_payload(profile: Profile, current_user: User, db: Asyn
         policy_history=policy_history,
         is_profile_complete=complete,
         phone_number=_mask_phone(current_user.phone),
+        trust_score_points=round(tpts, 1),
+        trust_tier=trust_tier_label(tpts),
     )
 
 
@@ -233,6 +249,7 @@ async def _default_worker_profile_out(current_user: User, db: AsyncSession) -> W
     )
     payload = base.model_dump()
     payload.pop("zone_id", None)
+    tpts = trust_score_points(50.0)
     return WorkerProfileOut(
         **payload,
         zone_id=zone_id,
@@ -241,6 +258,8 @@ async def _default_worker_profile_out(current_user: User, db: AsyncSession) -> W
         policy_history=[],
         is_profile_complete=False,
         phone_number=_mask_phone(current_user.phone),
+        trust_score_points=round(tpts, 1),
+        trust_tier=trust_tier_label(tpts),
     )
 
 INDIA_LAT_MIN = 6.5
@@ -444,6 +463,37 @@ async def get_weekly_breakdown(
     }
 
 
+@router.get("/weekly-summaries")
+async def list_weekly_summaries(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    rows = (
+        await db.execute(
+            select(WeeklySummary)
+            .where(WeeklySummary.user_id == current_user.id)
+            .order_by(WeeklySummary.week_start.desc())
+            .limit(52)
+        )
+    ).scalars().all()
+    return [
+        {
+            "id": r.id,
+            "week_start": r.week_start.isoformat() if r.week_start else None,
+            "title": r.title,
+            "body": r.body,
+            "hours_protected": r.hours_protected,
+            "disruptions_in_zone": r.disruptions_in_zone,
+            "payout_inr": r.payout_inr,
+            "premium_peace_inr": r.premium_peace_inr,
+            "zone_risk_next_week": r.zone_risk_next_week,
+            "trust_delta_points": r.trust_delta_points,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        }
+        for r in rows
+    ]
+
+
 @router.get("/me", response_model=WorkerProfileOut)
 async def get_profile(
     current_user: User = Depends(get_current_user),
@@ -466,6 +516,52 @@ async def get_profile_alias(
     if not profile:
         return await _default_worker_profile_out(current_user, db)
     return await _worker_profile_payload(profile, current_user, db)
+
+
+@router.get("/{worker_id}/dashboard")
+async def get_worker_dashboard(
+    worker_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if worker_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="worker_id does not match JWT")
+
+    from app.api.v1.routes.claims import claim_history
+    from app.api.v1.routes.policies import build_policy_current
+
+    result = await db.execute(select(Profile).where(Profile.user_id == current_user.id))
+    profile = result.scalar_one_or_none()
+    profile_payload = (
+        await _worker_profile_payload(profile, current_user, db)
+        if profile is not None
+        else await _default_worker_profile_out(current_user, db)
+    )
+    policy_payload = await build_policy_current(current_user, db)
+    claims_payload = await claim_history(current_user=current_user, db=db, cursor=None, limit=20)
+    return {
+        "worker_id": current_user.id,
+        "profile": profile_payload,
+        "policy": policy_payload,
+        "claims": claims_payload.get("data", []),
+        "claims_total_count": claims_payload.get("total_count", 0),
+    }
+
+
+@router.get("/{worker_id}/claims")
+async def get_worker_claims(
+    worker_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    cursor: int | None = None,
+    limit: int = 50,
+):
+    if worker_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="worker_id does not match JWT")
+
+    from app.api.v1.routes.claims import claim_history
+
+    return await claim_history(current_user=current_user, db=db, cursor=cursor, limit=limit)
 
 
 @router.put("/update", response_model=ProfileResponse)

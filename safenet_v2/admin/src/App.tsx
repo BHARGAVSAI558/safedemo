@@ -64,7 +64,6 @@ function PageSkeleton() {
 const Dashboard = React.lazy(() => import('./pages/Dashboard'));
 const Workers = React.lazy(() => import('./pages/Workers'));
 const ZoneHeatmap = React.lazy(() => import('./pages/ZoneHeatmap'));
-const Simulations = React.lazy(() => import('./pages/Simulations'));
 const FraudInsights = React.lazy(() => import('./pages/FraudInsights'));
 const SupportQueries = React.lazy(() => import('./pages/SupportQueries'));
 
@@ -102,7 +101,6 @@ export default function App() {
             <Route index element={<React.Suspense fallback={<PageSkeleton />}><Dashboard /></React.Suspense>} />
             <Route path="zones" element={<React.Suspense fallback={<PageSkeleton />}><ZoneHeatmap /></React.Suspense>} />
             <Route path="workers" element={<React.Suspense fallback={<PageSkeleton />}><Workers /></React.Suspense>} />
-            <Route path="simulations" element={<React.Suspense fallback={<PageSkeleton />}><Simulations /></React.Suspense>} />
             <Route path="fraud" element={<React.Suspense fallback={<PageSkeleton />}><FraudInsights /></React.Suspense>} />
             <Route path="support" element={<React.Suspense fallback={<PageSkeleton />}><SupportQueries /></React.Suspense>} />
           </Route>

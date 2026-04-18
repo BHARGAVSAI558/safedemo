@@ -1,3 +1,4 @@
+import { BASE_URL } from '../api';
 import { useAdminConnectionStore } from '../stores/adminConnection';
 import { useClaimsFeedStore, type AdminClaimUpdate } from '../stores/claimsFeed';
 import { useFraudQueueStore, type AdminFraudAlert } from '../stores/fraudQueue';
@@ -28,11 +29,6 @@ let ws: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let isStopped = true;
 
-const BACKEND = (
-  (import.meta.env.VITE_BACKEND_URL as string | undefined) ||
-  'https://safenet-api-y4se.onrender.com'
-).replace(/\/$/, '');
-
 export function connectAdminWebSocket(jwt: string) {
   isStopped = false;
 
@@ -42,7 +38,7 @@ export function connectAdminWebSocket(jwt: string) {
   const zoneStore = useZoneEventsStore.getState();
   const poolStore = usePoolHealthStore.getState();
 
-  const httpBase = BACKEND;
+  const httpBase = BASE_URL;
 
   let attempt = 0;
   const maxDelayMs = 30_000;
@@ -154,4 +150,3 @@ export function connectAdminWebSocket(jwt: string) {
     ws = null;
   };
 }
-

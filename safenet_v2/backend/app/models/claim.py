@@ -16,7 +16,25 @@ if TYPE_CHECKING:
 class DecisionType(str, enum.Enum):
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
-    FRAUD = "FRAUD"
+    REVIEW   = "REVIEW"
+    FRAUD    = "FRAUD"
+
+
+class DisruptionEvent(Base):
+    """A confirmed environmental disruption in a zone."""
+    __tablename__ = "disruption_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    zone_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    disruption_type: Mapped[str] = mapped_column(String(32), nullable=False)  # rain/heat/aqi/curfew/outage
+    severity: Mapped[float] = mapped_column(Float, default=0.0)               # 0.0–1.0
+    confidence: Mapped[str] = mapped_column(String(16), default="LOW")        # HIGH/MIXED/LOW
+    api_source: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    raw_value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # mm/hr or °C or AQI
+    threshold_value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    started_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    ended_at: Mapped[Optional[DateTime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
 class Simulation(Base):
@@ -24,6 +42,7 @@ class Simulation(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    disruption_event_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("disruption_events.id"), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False)
     fraud_flag: Mapped[bool] = mapped_column(Boolean, default=False)
     fraud_score: Mapped[float] = mapped_column(Float, default=0.0)

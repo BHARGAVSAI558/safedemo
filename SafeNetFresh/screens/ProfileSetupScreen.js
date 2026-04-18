@@ -18,6 +18,8 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAuth } from '../contexts/AuthContext';
 import { usePolicy } from '../contexts/PolicyContext';
 import { gigProfile, workers, policies, formatApiError } from '../services/api';
+import { useGPSZoneDetection } from '../hooks/useGPSZoneDetection';
+import { formatShortLocation } from '../utils/locationDisplay';
 
 const BRAND = '#1A56DB';
 
@@ -25,24 +27,6 @@ const PLATFORMS = [
   { id: 'zomato', label: 'Zomato', color: '#E23744', earnMid: 780 },
   { id: 'swiggy', label: 'Swiggy', color: '#FC8019', earnMid: 720 },
   { id: 'other', label: 'Other', color: '#475569', earnMid: 650 },
-];
-
-const ZONES = [
-  { id: 'kukatpally', label: 'Kukatpally', badge: 'High risk', score: 81, riskLevel: 'high' },
-  { id: 'miyapur', label: 'Miyapur', badge: 'Medium', score: 70, riskLevel: 'medium' },
-  { id: 'hitec_city', label: 'HITEC City', badge: 'Low risk', score: 58, riskLevel: 'low' },
-  { id: 'madhapur', label: 'Madhapur', badge: 'Medium', score: 65, riskLevel: 'medium' },
-  { id: 'jubilee_hills', label: 'Jubilee Hills', badge: 'Low risk', score: 55, riskLevel: 'low' },
-  { id: 'banjara_hills', label: 'Banjara Hills', badge: 'Medium', score: 63, riskLevel: 'medium' },
-  { id: 'begumpet', label: 'Begumpet', badge: 'Medium', score: 68, riskLevel: 'medium' },
-  { id: 'secunderabad', label: 'Secunderabad', badge: 'Medium', score: 69, riskLevel: 'medium' },
-  { id: 'ameerpet', label: 'Ameerpet', badge: 'Medium', score: 71, riskLevel: 'medium' },
-  { id: 'gachibowli', label: 'Gachibowli', badge: 'Medium', score: 66, riskLevel: 'medium' },
-  { id: 'kondapur', label: 'Kondapur', badge: 'Medium', score: 67, riskLevel: 'medium' },
-  { id: 'uppal', label: 'Uppal', badge: 'Medium', score: 73, riskLevel: 'medium' },
-  { id: 'lb_nagar', label: 'LB Nagar', badge: 'High risk', score: 78, riskLevel: 'high' },
-  { id: 'old_city', label: 'Old City', badge: 'High risk', score: 76, riskLevel: 'high' },
-  { id: 'other', label: 'Other', badge: 'Medium', score: 72, riskLevel: 'medium' },
 ];
 
 const ZONE_RISK_COPY = {
@@ -101,11 +85,17 @@ export default function ProfileSetupScreen({ navigation }) {
   const [name, setName] = useState('');
   const [platform, setPlatform] = useState(null);
   const [zone, setZone] = useState(null);
+  const [placeQuery, setPlaceQuery] = useState('');
+  const [placeLoading, setPlaceLoading] = useState(false);
+  const [placeSuggestions, setPlaceSuggestions] = useState([]);
+  const [selectedPlaceId, setSelectedPlaceId] = useState('');
+  const [placeError, setPlaceError] = useState('');
   const [hoursPreset, setHoursPreset] = useState('full_day');
   const [tier, setTier] = useState('Standard');
   const [loading, setLoading] = useState(false);
   const [successPolicy, setSuccessPolicy] = useState(null);
   const tierRef = useRef('Standard');
+  const { detectZone, gpsLoading, gpsError } = useGPSZoneDetection();
 
   const shieldScale = useRef(new Animated.Value(0.3)).current;
 
@@ -132,11 +122,6 @@ export default function ProfileSetupScreen({ navigation }) {
   const zoneRiskLevel = zone?.riskLevel || 'medium';
   const zoneScore = zone?.score ?? 72;
 
-  const disruptionCover = useMemo(() => {
-    const t = TIERS.find((x) => x.id === tier) || TIERS[1];
-    return t.daily;
-  }, [tier]);
-
   const recommendedTier = useMemo(() => recommendedTierForZone(zoneRiskLevel), [zoneRiskLevel]);
 
   const selectedTier = TIERS.find((t) => t.id === tier) || TIERS[1];
@@ -161,27 +146,29 @@ export default function ProfileSetupScreen({ navigation }) {
       await gigProfile.submit({
         name: name.trim(),
         platform: platform.id,
-        city: 'Hyderabad',
+        city: zone?.city || zone?.label || 'India',
         zone_id: zone.id,
+        location_display: String(zone?.label || zone?.zone_name || zone?.placeName || zone?.city || '').trim() || undefined,
         avg_daily_income: platformMidpoint(platform),
         working_hours_preset: hoursPreset,
         coverage_tier: tier,
       });
       const chosenTierId = tierRef.current || tier;
       const chosenTier = TIERS.find((t) => t.id === chosenTierId) || selectedTier;
-      const activated = await policies.activate({ tier: chosenTierId });
+      const activated = await policies.activate({ tier: chosenTierId, zone_id: zone.id });
       const mergedSuccess = {
         ...activated,
         tier: chosenTierId,
-        weekly_premium: chosenTier.weekly,
-        zone_label: zone?.label || activated?.zone_label || 'Hyderabad',
+        weekly_premium: activated?.weekly_premium || chosenTier.weekly,
+        zone_label: zone?.label || activated?.zone_label || 'Selected zone',
         zone_risk_level:
           zone?.riskLevel === 'high'
             ? 'High Risk'
             : zone?.riskLevel === 'low'
               ? 'Low Risk'
               : activated?.zone_risk_level || 'Medium Risk',
-        max_coverage_per_day: chosenTier.daily,
+        max_coverage_per_day: activated?.max_coverage_per_day || chosenTier.daily,
+        premium_breakdown: activated?.premium_breakdown || null,
       };
       setSuccessPolicy(mergedSuccess);
       // Keep app state synced immediately with selected plan after activation.
@@ -193,7 +180,7 @@ export default function ProfileSetupScreen({ navigation }) {
           valid_until: activated?.valid_until,
           max_coverage_per_day: chosenTier.daily,
           risk_score: Number(activated?.risk_score ?? zoneScore),
-          zone: zone?.label || 'Hyderabad',
+          zone: zone?.label || 'Selected zone',
           policy_id: activated?.id,
         },
         'active'
@@ -231,6 +218,105 @@ export default function ProfileSetupScreen({ navigation }) {
   const canContinueStep1 = name.trim().length >= 2;
   const canContinueStep2 = Boolean(platform);
   const canContinueStep3 = Boolean(zone);
+  useEffect(() => {
+    const q = String(placeQuery || '').trim();
+    if (q.length < 2) {
+      setPlaceSuggestions([]);
+      setSelectedPlaceId('');
+      setPlaceError('');
+      return;
+    }
+    const timer = setTimeout(async () => {
+      setPlaceLoading(true);
+      setPlaceError('');
+      try {
+        const url =
+          `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}` +
+          '&format=json&countrycodes=in&limit=10&addressdetails=1';
+        const res = await fetch(url, {
+          headers: {
+            'Accept-Language': 'en',
+            'User-Agent': 'SafeNet-App/1.0',
+          },
+        });
+        if (!res.ok) throw new Error('Search failed');
+        const data = await res.json();
+        let features = Array.isArray(data) ? data : [];
+        if (!features.length) {
+          const purl = `https://photon.komoot.io/api/?q=${encodeURIComponent(q)}&limit=8&lang=en`;
+          const pres = await fetch(purl);
+          if (pres.ok) {
+            const pdata = await pres.json();
+            const list = Array.isArray(pdata?.features) ? pdata.features : [];
+            features = list
+              .map((f) => ({
+                place_id: f?.properties?.osm_id || Math.random(),
+                display_name: [
+                  f?.properties?.name,
+                  f?.properties?.city,
+                  f?.properties?.district,
+                  f?.properties?.state,
+                  'India',
+                ].filter(Boolean).join(', '),
+                name: f?.properties?.name,
+                lat: f?.geometry?.coordinates?.[1],
+                lon: f?.geometry?.coordinates?.[0],
+              }))
+              .filter((x) => Number.isFinite(Number(x.lat)) && Number.isFinite(Number(x.lon)));
+          }
+        }
+        const seen = new Set();
+        setPlaceSuggestions(
+          features
+            .map((f) => ({
+              id: String(f.place_id || Math.random()),
+              label: formatShortLocation(String(f.display_name || '')) || String(f.display_name || ''),
+              name: String(f.name || f.display_name || ''),
+              lat: Number(f.lat),
+              lng: Number(f.lon),
+            }))
+            .filter((it) => {
+              const key = `${Math.round(it.lat * 1000)}:${Math.round(it.lng * 1000)}`;
+              if (seen.has(key)) return false;
+              seen.add(key);
+              return true;
+            })
+        );
+      } catch (e) {
+        setPlaceSuggestions([]);
+        setPlaceError('Location not found. Try nearby town/zone name or use current location.');
+      } finally {
+        setPlaceLoading(false);
+      }
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [placeQuery]);
+
+  const selectSuggestedPlace = async (item) => {
+    const lat = Number(item?.lat);
+    const lng = Number(item?.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      Alert.alert('Location error', 'Could not resolve selected location.');
+      return;
+    }
+    try {
+      const detected = await detectZone({ lat, lng, placeName: item?.label || item?.name });
+      if (detected) {
+        const chosen = String(item?.label || item?.name || '').trim();
+        setZone({
+          ...detected,
+          placeName: chosen || detected.placeName,
+          label: chosen || detected.label,
+        });
+        setSelectedPlaceId(String(item?.id || ''));
+        setPlaceQuery(item?.label || '');
+        setPlaceSuggestions([]);
+      }
+    } catch {
+      Alert.alert('Location error', 'Unable to detect zone for selected place.');
+    }
+  };
+
 
   const headerBlue = (
     <View style={styles.blueHeader}>
@@ -338,30 +424,74 @@ export default function ProfileSetupScreen({ navigation }) {
           <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
             {headerBlue}
             <Text style={styles.stepTitle}>Where do you mainly deliver?</Text>
-            <Text style={styles.stepSub}>Hyderabad — your zone shapes risk, pricing, and payouts.</Text>
+            <Text style={styles.stepSub}>Search any place in India or use GPS. SafeNet maps it to the nearest zone.</Text>
 
             <View style={[styles.mapPlaceholder, { width: w - 36 }]}>
               <Text style={styles.mapEmoji}>🗺️</Text>
-              <Text style={styles.mapHint}>Zone grid · Hyderabad</Text>
+              <Text style={styles.mapHint}>Search or use current location</Text>
             </View>
 
-            <View style={styles.chipWrap}>
-              {ZONES.map((z) => (
-                <TouchableOpacity
-                  key={z.id}
-                  style={[styles.chip, zone?.id === z.id && styles.chipOn]}
-                  onPress={() => setZone(z)}
-                >
-                  <Text style={[styles.chipText, zone?.id === z.id && styles.chipTextOn]}>{z.label}</Text>
-                  <Text style={styles.chipBadge}>{z.badge}</Text>
-                </TouchableOpacity>
-              ))}
+            <View style={styles.searchBox}>
+              <TextInput
+                style={styles.searchInput}
+                placeholder="Select zone (e.g. Gachibowli, Vijayawada)"
+                placeholderTextColor="#94a3b8"
+                value={placeQuery}
+                onChangeText={setPlaceQuery}
+                autoCorrect={false}
+                autoCapitalize="words"
+                editable
+              />
+              {placeLoading ? <ActivityIndicator size="small" color={BRAND} /> : null}
             </View>
+            {zone?.placeName ? (
+              <View style={styles.selectedPlaceCard}>
+                <Text style={styles.selectedPlaceTitle}>Chosen location</Text>
+                <Text style={styles.selectedPlaceValue}>{zone.placeName}</Text>
+              </View>
+            ) : null}
+            {placeError ? <Text style={styles.gpsError}>{placeError}</Text> : null}
+            {placeSuggestions.length > 0 ? (
+              <View style={styles.suggestionsWrap}>
+                {placeSuggestions.map((item) => (
+                  <TouchableOpacity
+                    key={item.id}
+                    style={[
+                      styles.suggestionItem,
+                      selectedPlaceId === String(item.id) && styles.suggestionItemSelected,
+                    ]}
+                    onPress={() => selectSuggestedPlace(item)}
+                  >
+                    <Text style={styles.suggestionLabel}>{item.label}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            ) : null}
+
+            <TouchableOpacity
+              style={[styles.gpsBtn, gpsLoading && { opacity: 0.6 }]}
+              onPress={async () => {
+                const detected = await detectZone();
+                if (detected) setZone(detected);
+              }}
+              disabled={gpsLoading}
+            >
+              {gpsLoading
+                ? <ActivityIndicator color={BRAND} size="small" />
+                : <Text style={styles.gpsBtnText}>Use current location</Text>}
+            </TouchableOpacity>
+            {gpsError ? <Text style={styles.gpsError}>{gpsError}</Text> : null}
 
             {zone ? (
               <View style={styles.riskExplain}>
                 <Text style={styles.riskExplainTitle}>How we see your zone</Text>
                 <Text style={styles.riskExplainBody}>{ZONE_RISK_COPY[zone.riskLevel]}</Text>
+                <Text style={styles.riskExplainBody}>
+                  Detected place: {zone.placeName || zone.label}
+                </Text>
+                <Text style={[styles.riskExplainBody, { marginTop: 6 }]}>
+                  Mapped zone: {zone.label} · Risk: {String(zone.badge || '').toUpperCase()}
+                </Text>
               </View>
             ) : null}
 
@@ -393,15 +523,6 @@ export default function ProfileSetupScreen({ navigation }) {
                   <Text style={[styles.hourChipSub, hoursPreset === h.id && styles.hourChipSubOn]}>{h.sub}</Text>
                 </TouchableOpacity>
               ))}
-            </View>
-
-            <View style={styles.premiumDarkCard}>
-              <Text style={styles.premiumDarkLabel}>Next step</Text>
-              <Text style={styles.premiumDarkValue}>Choose your tier</Text>
-              <Text style={styles.premiumDarkSub}>
-                Up to ₹{disruptionCover.toLocaleString('en-IN')} per disruption day with your selected plan
-              </Text>
-              <Text style={styles.premiumDarkHint}>Final weekly premium is set when you pick Basic, Standard, or Pro</Text>
             </View>
 
             <View style={styles.rowNav}>
@@ -505,7 +626,9 @@ export default function ProfileSetupScreen({ navigation }) {
                 <Text style={styles.summaryBold}>Trust level: </Text>
                 {successPolicy.trust_level || 'Newcomer'}
               </Text>
-              <Text style={styles.summaryFootnote}>Risk score {successPolicy.risk_score}/100 · builds as you ride with SafeNet</Text>
+              <Text style={styles.summaryFootnote}>
+                AI risk calculation 0/100 · updates live as you ride with SafeNet
+              </Text>
             </View>
 
             <TouchableOpacity style={styles.successPrimaryBtn} onPress={goDashboard}>
@@ -609,6 +732,64 @@ const styles = StyleSheet.create({
   },
   mapEmoji: { fontSize: 40 },
   mapHint: { marginTop: 6, color: '#4338ca', fontWeight: '600' },
+  gpsBtn: {
+    alignSelf: 'center',
+    marginBottom: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+    borderRadius: 14,
+    borderWidth: 2,
+    borderColor: BRAND,
+    backgroundColor: '#eff6ff',
+  },
+  gpsBtnText: { color: BRAND, fontWeight: '800', fontSize: 15 },
+  gpsError: { color: '#b91c1c', fontSize: 12, fontWeight: '600', textAlign: 'center', marginBottom: 8 },
+  searchBox: {
+    borderWidth: 1.5,
+    borderColor: '#cbd5e1',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    marginBottom: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  searchInput: { flex: 1, fontSize: 16, fontWeight: '700', color: '#0f172a', minHeight: 28 },
+  selectedPlaceCard: {
+    marginTop: 10,
+    marginBottom: 8,
+    borderWidth: 1.5,
+    borderColor: '#93c5fd',
+    backgroundColor: '#eff6ff',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  selectedPlaceTitle: { color: '#1d4ed8', fontSize: 12, fontWeight: '800', marginBottom: 4, textTransform: 'uppercase' },
+  selectedPlaceValue: { color: '#0f172a', fontSize: 14, fontWeight: '700' },
+  suggestionsWrap: {
+    maxHeight: 220,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    borderRadius: 12,
+    marginBottom: 10,
+    overflow: 'hidden',
+    backgroundColor: '#fff',
+  },
+  suggestionItem: {
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+  },
+  suggestionItemSelected: {
+    backgroundColor: '#eff6ff',
+    borderLeftWidth: 3,
+    borderLeftColor: BRAND,
+  },
+  suggestionLabel: { color: '#0f172a', fontWeight: '600', fontSize: 13 },
   chipWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
   chip: {
     paddingVertical: 10,
@@ -659,16 +840,6 @@ const styles = StyleSheet.create({
   hourChipTitleOn: { color: BRAND },
   hourChipSub: { fontSize: 13, color: '#94a3b8', marginTop: 2 },
   hourChipSubOn: { color: '#64748b' },
-  premiumDarkCard: {
-    marginTop: 22,
-    padding: 20,
-    borderRadius: 16,
-    backgroundColor: '#0f172a',
-  },
-  premiumDarkLabel: { color: '#94a3b8', fontSize: 13, fontWeight: '600' },
-  premiumDarkValue: { color: '#fff', fontSize: 34, fontWeight: '800', marginTop: 6 },
-  premiumDarkSub: { color: '#e2e8f0', fontSize: 15, fontWeight: '600', marginTop: 8 },
-  premiumDarkHint: { color: '#64748b', fontSize: 12, marginTop: 10 },
   tierCard: {
     backgroundColor: '#fff',
     borderRadius: 16,
@@ -732,11 +903,15 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#dbeafe',
     marginBottom: 24,
-    shadowColor: '#1d4ed8',
-    shadowOpacity: 0.08,
-    shadowRadius: 14,
-    shadowOffset: { width: 0, height: 6 },
-    elevation: 3,
+    ...(Platform.OS === 'web'
+      ? { boxShadow: '0 6px 14px rgba(29, 78, 216, 0.08)' }
+      : {
+          shadowColor: '#1d4ed8',
+          shadowOpacity: 0.08,
+          shadowRadius: 14,
+          shadowOffset: { width: 0, height: 6 },
+          elevation: 3,
+        }),
   },
   summaryCardTitle: { fontSize: 12, fontWeight: '800', color: '#64748b', letterSpacing: 1, marginBottom: 12 },
   summaryLine: { fontSize: 15, color: '#334155', marginBottom: 10, lineHeight: 22 },
@@ -748,11 +923,15 @@ const styles = StyleSheet.create({
     minWidth: 190,
     paddingVertical: 14,
     alignItems: 'center',
-    shadowColor: '#1d4ed8',
-    shadowOpacity: 0.28,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 5 },
-    elevation: 3,
+    ...(Platform.OS === 'web'
+      ? { boxShadow: '0 5px 12px rgba(29, 78, 216, 0.28)' }
+      : {
+          shadowColor: '#1d4ed8',
+          shadowOpacity: 0.28,
+          shadowRadius: 12,
+          shadowOffset: { width: 0, height: 5 },
+          elevation: 3,
+        }),
   },
   successPrimaryBtnText: { color: '#fff', fontWeight: '900', fontSize: 20 },
   logout: { marginTop: 14 },

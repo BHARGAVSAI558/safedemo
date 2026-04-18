@@ -1,5 +1,5 @@
 import React from 'react';
-import { TouchableOpacity, Text, StyleSheet } from 'react-native';
+import { TouchableOpacity, Text, StyleSheet, Platform } from 'react-native';
 
 export default function AssistantWidget({ onPress }) {
   return (
@@ -22,10 +22,14 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    shadowColor: '#000',
-    shadowOpacity: 0.2,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 3 },
+    ...(Platform.OS === 'web'
+      ? { boxShadow: '0px 3px 10px rgba(0,0,0,0.20)' }
+      : {
+          shadowColor: '#000',
+          shadowOpacity: 0.2,
+          shadowRadius: 8,
+          shadowOffset: { width: 0, height: 3 },
+        }),
     elevation: 6,
     zIndex: 100,
   },

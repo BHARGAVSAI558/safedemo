@@ -31,13 +31,13 @@
       "favicon": "./assets/icon.png"
     },
     "extra": {
-      "BACKEND_URL": "https://safenet-api-y4se.onrender.com",
-      "BACKEND_URL_DEV": "remote",
-      "DEMO_MODE": true,
+      "EXPO_PUBLIC_API_URL": "https://safenet-api-y4se.onrender.com",
+      "DEMO_MODE": false,
       "eas": {
         "projectId": "2d45889e-9415-4966-be7f-ba2711a57f13"
       }
     },
+    "jsEngine": "hermes",
     "plugins": [
       "expo-secure-store",
       [
@@ -47,7 +47,9 @@
             "usesCleartextTraffic": true
           }
         }
-      ]
+      ],
+      "expo-localization",
+      "expo-speech-recognition"
     ],
     "runtimeVersion": {
       "policy": "appVersion"

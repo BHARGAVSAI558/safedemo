@@ -29,8 +29,7 @@ export default function AppModal({
 
   return (
     <View
-      pointerEvents="box-none"
-      style={[StyleSheet.absoluteFillObject, styles.webLayer]}
+      style={[StyleSheet.absoluteFillObject, styles.webLayer, { pointerEvents: 'box-none' }]}
       accessibilityViewIsModal
     >
       {children}

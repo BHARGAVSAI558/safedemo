@@ -100,11 +100,6 @@ class Layer3Cluster:
         if homogeneous:
             checks.append("homogeneous")
 
-        suppress = confidence_level == "HIGH"
-        if suppress:
-            checks = []
-            density_spike = sync_spike = homogeneous = False
-
         triggered = sum([density_spike, sync_spike, homogeneous])
         ring: RingConfidence = "NONE"
         freeze = False

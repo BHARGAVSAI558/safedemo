@@ -1,5 +1,6 @@
 import time
 import uuid
+from collections import defaultdict
 from typing import Callable
 
 from fastapi import Request, Response
@@ -7,6 +8,26 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.utils.logger import bind_request_context, logger
+
+
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app, requests_per_minute: int = 100):
+        super().__init__(app)
+        self.requests_per_minute = requests_per_minute
+        self.request_times: dict[str, list[float]] = defaultdict(list)
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        client_ip = request.client.host if request.client else "unknown"
+        now = time.time()
+        cutoff = now - 60.0
+        
+        self.request_times[client_ip] = [t for t in self.request_times[client_ip] if t > cutoff]
+        
+        if len(self.request_times[client_ip]) >= self.requests_per_minute:
+            return JSONResponse(status_code=429, content={"detail": "Rate limit exceeded"})
+        
+        self.request_times[client_ip].append(now)
+        return await call_next(request)
 
 
 class RequestIDMiddleware(BaseHTTPMiddleware):

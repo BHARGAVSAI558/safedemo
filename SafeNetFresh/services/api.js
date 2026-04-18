@@ -5,29 +5,61 @@ import { Platform } from 'react-native';
 
 import { getCurrentTokenStore, clearTokenStore } from './tokenStore';
 
+const inferExpoHostURL = () => {
+  const hostUri =
+    Constants.expoConfig?.hostUri ||
+    Constants.expoGoConfig?.debuggerHost ||
+    Constants.manifest2?.extra?.expoClient?.hostUri ||
+    Constants.manifest?.debuggerHost ||
+    '';
+  const host = String(hostUri || '').split(':')[0].trim();
+  return host ? `http://${host}:8000` : null;
+};
+
 const getBackendURL = () => {
+  // 1. Explicit env var override
   try {
     const envPublic =
-      typeof process !== 'undefined' && process.env && process.env.EXPO_PUBLIC_BACKEND_URL;
+      typeof process !== 'undefined' && process.env && process.env.EXPO_PUBLIC_API_URL;
     if (envPublic && String(envPublic).trim().startsWith('http')) {
-      return String(envPublic).trim().replace(/\/$/, '');
+      const normalized = String(envPublic).trim().replace(/\/$/, '');
+      // If phone app is configured with localhost/127, it cannot reach PC loopback.
+      if (
+        Platform.OS !== 'web' &&
+        /localhost|127\.0\.0\.1/i.test(normalized)
+      ) {
+        const inferred = inferExpoHostURL();
+        if (inferred) return inferred;
+      }
+      return normalized;
     }
-  } catch (_) {
-    /* ignore */
-  }
-  const devMode = Constants.expoConfig?.extra?.BACKEND_URL_DEV;
-  const prodURL =
-    Constants.expoConfig?.extra?.BACKEND_URL ||
-    'https://safenet-api-y4se.onrender.com';
+  } catch (_) { /* ignore */ }
 
-  if (__DEV__ && devMode === 'local') {
-    return 'http://192.168.1.100:8000';
+  // 2. app.json extra
+  const extraUrl =
+    Constants.expoConfig?.extra?.EXPO_PUBLIC_API_URL ||
+    Constants.expoConfig?.extra?.API_URL ||
+    Constants.expoConfig?.extra?.BACKEND_URL;
+  if (extraUrl && String(extraUrl).trim().startsWith('http')) {
+    const normalized = String(extraUrl).trim().replace(/\/$/, '');
+    if (
+      Platform.OS !== 'web' &&
+      /localhost|127\.0\.0\.1/i.test(normalized)
+    ) {
+      const inferred = inferExpoHostURL();
+      if (inferred) return inferred;
+    }
+    return normalized;
   }
-  return String(prodURL).trim().replace(/\/$/, '');
+
+  // 3. Production fallback
+  return 'https://safenet-api-y4se.onrender.com';
 };
 
 export const BASE_URL = getBackendURL();
 export const BACKEND_URL = BASE_URL;
+// eslint-disable-next-line no-console
+console.log('API URL:', BASE_URL);
 
 function _isLikelyLocalApi(url) {
   if (!url || typeof url !== 'string') return false;
@@ -48,6 +80,16 @@ const TIMEOUT_MS = /onrender\.com|render\.com|amazonaws\.com|vercel\.app/i.test(
 if (__DEV__) {
   // eslint-disable-next-line no-console
   console.log('[API] BACKEND_URL =', BACKEND_URL, '| timeout', TIMEOUT_MS, 'ms');
+  if (
+    Platform.OS === 'web' &&
+    _isLikelyLocalApi(BACKEND_URL) &&
+    !/localhost|127\.0\.0\.1/i.test(BACKEND_URL)
+  ) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      '[API] Expo Web runs in this browser. If you see ERR_CONNECTION_TIMED_OUT, try EXPO_PUBLIC_API_URL=http://127.0.0.1:8000 when uvicorn is on the same PC, or confirm the LAN IP + Windows firewall (npm run windows:firewall-api).'
+    );
+  }
   if (Platform.OS === 'ios' && _isLikelyLocalApi(BACKEND_URL)) {
     // eslint-disable-next-line no-console
     console.warn(
@@ -112,13 +154,13 @@ api.interceptors.response.use(
 );
 
 axiosRetry(api, {
-  retries: 2,
+  retries: 1,
   retryDelay: axiosRetry.exponentialDelay,
   retryCondition: (error) => {
     const code = error?.code;
     const msg = String(error?.message || '');
     if (code === 'ECONNABORTED' || msg.toLowerCase().includes('timeout')) {
-      return false;
+      return true;
     }
     const status = error?.response?.status;
     const isRetryableStatus = [502, 503, 504].includes(status);
@@ -159,8 +201,14 @@ export function formatApiError(error) {
     return 'SafeNet is temporarily unavailable. Please try again in a moment.';
   }
   if (!error?.response) {
-    if (error?.code === 'ECONNABORTED' || String(error?.message || '').includes('timeout')) {
-      return `No response from ${BACKEND_URL}.\n\n• Local: uvicorn must use --host 0.0.0.0 --port 8000. Windows: npm run windows:firewall-api (Admin). Test in Safari on the phone: ${BACKEND_URL}/\n• Hosted (Render): service may be waking up — wait and retry, or use BACKEND_URL_DEV "local" with PC running.\n• Tunnel Expo: set BACKEND_URL_LOCAL or BACKEND_URL_DEV "remote".`;
+    const msg = String(error?.message || '');
+    const noTcp =
+      error?.code === 'ECONNABORTED' ||
+      msg.toLowerCase().includes('timeout') ||
+      error?.code === 'ERR_NETWORK' ||
+      msg.toLowerCase().includes('network error');
+    if (noTcp) {
+      return `No response from ${BACKEND_URL}.\n\n• Same PC + Expo Web: use http://127.0.0.1:8000 in EXPO_PUBLIC_API_URL.\n• Phone / another device: uvicorn --host 0.0.0.0 --port 8000, correct LAN IP in .env, Windows: npm run windows:firewall-api (Admin). Open ${BACKEND_URL}/docs in that device’s browser.\n• Hosted: cold start — retry or use the hosted URL.\n• React DevTools message is optional; it is unrelated to this error.`;
     }
     return 'We could not reach SafeNet. Check your internet connection and try again.';
   }
@@ -193,78 +241,18 @@ export const auth = {
 
 /** Gig-worker onboarding profile + policy activation (POST /api/v1/profile) */
 export const gigProfile = {
-  submit: async (body) => {
-    try {
-      return unwrap(await api.post('/profile', body));
-    } catch (e) {
-      if (shouldTreatAsUnauthorized(e)) throw e;
-      // Backward compatibility: some deployed backends don't expose /api/v1/profile yet.
-      if (e?.response?.status !== 404) throw e;
-
-      const fallbackCreateBody = {
-        name: body?.name,
-        city: body?.city || 'Hyderabad',
-        occupation: 'delivery',
-        avg_daily_income: Number(body?.avg_daily_income || 650),
-        risk_profile: 'medium',
-      };
-
-      try {
-        const created = unwrap(await api.post('/workers/create', fallbackCreateBody));
-        return {
-          success: true,
-          profile_id: created?.id,
-          // Keep a response shape compatible with onboarding callers.
-          risk_score: Number(created?.risk_score ?? 72),
-          weekly_premium: Number(created?.weekly_premium ?? 35),
-          coverage_tier: body?.coverage_tier,
-          zone_id: body?.zone_id,
-          zone_risk_level: 'Medium Risk',
-          max_coverage_per_day: body?.coverage_tier === 'Pro' ? 700 : body?.coverage_tier === 'Standard' ? 500 : 350,
-          platform: body?.platform,
-          working_hours_preset: body?.working_hours_preset,
-          name: body?.name,
-          city: body?.city || 'Hyderabad',
-        };
-      } catch (createErr) {
-        if (shouldTreatAsUnauthorized(createErr)) throw createErr;
-        const detail = String(createErr?.response?.data?.detail || '');
-        if (createErr?.response?.status === 400 && detail.toLowerCase().includes('already exists')) {
-          const updated = unwrap(
-            await api.put('/workers/update', {
-              name: body?.name,
-              city: body?.city || 'Hyderabad',
-              occupation: 'delivery',
-              avg_daily_income: Number(body?.avg_daily_income || 650),
-              risk_profile: 'medium',
-            })
-          );
-          return {
-            success: true,
-            profile_id: updated?.id,
-            risk_score: Number(updated?.risk_score ?? 72),
-            weekly_premium: Number(updated?.weekly_premium ?? 35),
-            coverage_tier: body?.coverage_tier,
-            zone_id: body?.zone_id,
-            zone_risk_level: 'Medium Risk',
-            max_coverage_per_day: body?.coverage_tier === 'Pro' ? 700 : body?.coverage_tier === 'Standard' ? 500 : 350,
-            platform: body?.platform,
-            working_hours_preset: body?.working_hours_preset,
-            name: body?.name,
-            city: body?.city || 'Hyderabad',
-          };
-        }
-        throw createErr;
-      }
-    }
-  },
+  submit: async (body) => unwrap(await api.post('/profile', body)),
 };
 
 export const workers = {
   createProfile: async (body) => unwrap(await api.post('/workers/create', body)),
   getProfile: async () => unwrap(await api.get('/workers/me')),
+  getDashboard: async (workerId) => unwrap(await api.get(`/workers/${workerId}/dashboard`)),
+  getClaims: async (workerId, params = {}) =>
+    unwrap(await api.get(`/workers/${workerId}/claims`, { params })),
   updateProfile: async (body) => unwrap(await api.put('/workers/update', body)),
   getWeeklyBreakdown: async () => unwrap(await api.get('/workers/weekly-breakdown')),
+  listWeeklySummaries: async () => unwrap(await api.get('/workers/weekly-summaries')),
   getEarningsDna: async (workerId) =>
     workerId != null
       ? unwrap(await api.get(`/workers/${workerId}/earnings-dna`))
@@ -278,6 +266,8 @@ export const policies = {
   getCurrent: async () => unwrap(await api.get('/policies/current')),
   /** Legacy list (optional) */
   list: async () => unwrap(await api.get('/policies')),
+  quote: async (workerId, tier) =>
+    unwrap(await api.get('/policies/quote', { params: { worker_id: workerId, tier } })),
   activate: async (body) => unwrap(await api.post('/policies/activate', body)),
 };
 
@@ -288,17 +278,30 @@ export const pools = {
 export const claims = {
   runSimulation: async ({ is_active, fraud_flag }) =>
     unwrap(await api.post('/simulation/run', { is_active, fraud_flag })),
-  /** Live claims come from WebSocket / ClaimContext — not from history API. */
-  getActive: async () => [],
+  getActive: async () => {
+    try {
+      const raw = unwrap(await api.get('/claims/active'));
+      // Backend returns flat array directly
+      if (Array.isArray(raw)) return raw;
+      // Legacy: wrapped in disruptions key
+      if (Array.isArray(raw?.disruptions)) return raw.disruptions;
+      return [];
+    } catch { return []; }
+  },
   getHistory: async () => {
     const raw = unwrap(await api.get('/claims/history'));
     return Array.isArray(raw) ? raw : raw?.data ?? [];
   },
-  /** Dashboard recent payouts: [{ date, disruption_type, amount, status, icon, claim_id }] */
+  getWorkerHistory: async (workerId, params = {}) => {
+    const raw = unwrap(await api.get(`/workers/${workerId}/claims`, { params }));
+    return Array.isArray(raw) ? raw : raw?.data ?? [];
+  },
   getPayouts: async (limit = 10) => {
     const raw = unwrap(await api.get('/claims/payouts', { params: { limit } }));
     return Array.isArray(raw) ? raw : raw?.data ?? [];
   },
+  downloadReceipt: async (claimId) =>
+    api.get(`/claims/${encodeURIComponent(claimId)}/receipt`, { responseType: 'arraybuffer' }),
 };
 
 export const payouts = {
@@ -309,13 +312,33 @@ export const payouts = {
 };
 
 export const simulation = {
-  run: async (body) => unwrap(await api.post('/simulation/run', body)),
+  run: async (body) => unwrap(await api.post('/simulation/disruptions/simulate', body)),
 };
 
-/** Proactive forecast windows + current weather (JWT). */
 export const zones = {
   getForecastShield: async (zoneId) =>
     unwrap(await api.get(`/zones/${encodeURIComponent(zoneId)}/forecast-shield`)),
+  getForecastDaily: async (zoneId) =>
+    unwrap(await api.get(`/zones/${encodeURIComponent(zoneId)}/forecast-daily`)),
+  detectFromGPS: async (lat, lng) =>
+    unwrap(await api.get('/zones/detect', { params: { lat, lng } })),
+  getActiveDisruptions: async (zoneId) =>
+    unwrap(await api.get(`/zones/${encodeURIComponent(zoneId)}/disruptions/active`)),
+};
+
+export const payments = {
+  createPremiumOrder: async (tier, policyId = null) =>
+    unwrap(await api.post('/payments/premium/order', { tier, policy_id: policyId })),
+  verifyPremium: async (razorpayOrderId, razorpayPaymentId, razorpaySignature) =>
+    unwrap(
+      await api.post('/payments/premium/verify', {
+        razorpay_order_id: razorpayOrderId,
+        razorpay_payment_id: razorpayPaymentId,
+        razorpay_signature: razorpaySignature,
+      })
+    ),
+  getHistory: async (page = 1, limit = 20) =>
+    unwrap(await api.get('/payments/history', { params: { page, limit } })),
 };
 
 export const support = {

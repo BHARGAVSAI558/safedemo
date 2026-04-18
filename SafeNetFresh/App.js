@@ -4,13 +4,16 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { View, ActivityIndicator, Text, Platform, StyleSheet } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Ionicons } from '@expo/vector-icons';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { AuthProvider, useAuth } from './contexts/AuthContext';
+import { AuthProvider, useAuth, setQueryClientRef } from './contexts/AuthContext';
 import { WsConnectionProvider } from './contexts/WsConnectionContext';
 import { ClaimProvider } from './contexts/ClaimContext';
 import { PolicyProvider } from './contexts/PolicyContext';
+import { LocalizationProvider } from './contexts/LocalizationContext';
 import WebSocketBridge from './components/WebSocketBridge';
 import DisruptionModal from './components/DisruptionModal';
 import PremiumDueModal from './components/PremiumDueModal';
@@ -40,6 +43,21 @@ const queryClient = new QueryClient({
   },
 });
 
+const INSTALL_MARKER_KEY = 'safenet.install.marker.v1';
+
+async function ensureFreshInstallStorageReset() {
+  try {
+    const marker = await AsyncStorage.getItem(INSTALL_MARKER_KEY);
+    if (!marker) {
+      await AsyncStorage.clear();
+      await AsyncStorage.setItem(INSTALL_MARKER_KEY, 'initialized');
+    }
+  } catch (_) {}
+}
+
+// Wire QueryClient into AuthContext so signIn can clear stale cache
+setQueryClientRef(queryClient);
+
 async function startScreenVisitSafe(name) {
   try {
     const svc = await import('./services/device_fingerprint.service');
@@ -54,9 +72,9 @@ async function endScreenVisitSafe(name) {
   } catch (_) {}
 }
 
-function tabIcon(emoji, focused) {
+function tabIcon(name, focused) {
   return (
-    <Text style={{ fontSize: 20, opacity: focused ? 1 : 0.45 }}>{emoji}</Text>
+    <Ionicons name={name} size={20} color={focused ? '#1a73e8' : '#94a3b8'} />
   );
 }
 
@@ -84,7 +102,7 @@ function MainTabs() {
         component={DashboardScreen}
         options={{
           tabBarLabel: 'Home',
-          tabBarIcon: ({ focused }) => tabIcon('🏠', focused),
+          tabBarIcon: ({ focused }) => tabIcon('home', focused),
         }}
       />
       <Tabs.Screen
@@ -92,7 +110,7 @@ function MainTabs() {
         component={ClaimsScreen}
         options={{
           tabBarLabel: 'Claims',
-          tabBarIcon: ({ focused }) => tabIcon('📋', focused),
+          tabBarIcon: ({ focused }) => tabIcon('document-text', focused),
         }}
       />
       <Tabs.Screen
@@ -100,7 +118,7 @@ function MainTabs() {
         component={PolicyScreen}
         options={{
           tabBarLabel: 'Coverage',
-          tabBarIcon: ({ focused }) => tabIcon('🛡️', focused),
+          tabBarIcon: ({ focused }) => tabIcon('shield-checkmark', focused),
         }}
       />
       <Tabs.Screen
@@ -108,7 +126,7 @@ function MainTabs() {
         component={ProfileScreen}
         options={{
           tabBarLabel: 'Account',
-          tabBarIcon: ({ focused }) => tabIcon('👤', focused),
+          tabBarIcon: ({ focused }) => tabIcon('person', focused),
         }}
       />
     </Tabs.Navigator>
@@ -225,22 +243,27 @@ function RootNavigator() {
 }
 
 export default function App() {
+  useEffect(() => {
+    void ensureFreshInstallStorageReset();
+  }, []);
   return (
     <SafeAreaProvider>
       <GestureHandlerRootView
         style={[appGhStyles.flex, Platform.OS === 'web' && appGhStyles.flexWeb]}
       >
         <QueryClientProvider client={queryClient}>
-          <AuthProvider>
-            <WsConnectionProvider>
-              <ClaimProvider>
-                <PolicyProvider>
-                  <NotificationInitializer />
-                  <RootNavigator />
-                </PolicyProvider>
-              </ClaimProvider>
-            </WsConnectionProvider>
-          </AuthProvider>
+          <LocalizationProvider>
+            <AuthProvider>
+              <WsConnectionProvider>
+                <ClaimProvider>
+                  <PolicyProvider>
+                    <NotificationInitializer />
+                    <RootNavigator />
+                  </PolicyProvider>
+                </ClaimProvider>
+              </WsConnectionProvider>
+            </AuthProvider>
+          </LocalizationProvider>
         </QueryClientProvider>
       </GestureHandlerRootView>
     </SafeAreaProvider>

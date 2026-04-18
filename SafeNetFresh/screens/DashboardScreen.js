@@ -15,6 +15,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { LinearGradient } from 'expo-linear-gradient';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import Svg, { Circle, Rect } from 'react-native-svg';
 
@@ -32,48 +33,20 @@ import NotificationBell from '../components/NotificationBell';
 import { logButtonTap, logClaimStatusView } from '../services/device_fingerprint.service';
 import { trustBadge } from '../utils/trustBadge';
 import { canonicalTierLabel } from '../utils/tierDisplay';
-import { formatPayoutWhen, formatIstTodayLong } from '../utils/istFormat';
+import { formatPayoutWhen } from '../utils/istFormat';
+import { useLocalization } from '../contexts/LocalizationContext';
+import { formatShortLocation } from '../utils/locationDisplay';
+import { stripDailyLimitPrefix } from '../utils/liveClaimCopy';
 
-function getTimeGreeting(now = new Date()) {
+function getGreetingKey(now = new Date()) {
   const h = now.getHours();
-  if (h < 12) return 'Good morning';
-  if (h < 17) return 'Good afternoon';
-  return 'Good evening';
+  if (h < 12) return 'morning';
+  if (h < 17) return 'afternoon';
+  return 'evening';
 }
 
-/** Maps profile.city (and common variants) to backend zone_id in zone_coordinates.json */
-const CITY_TO_ZONE_ID = {
-  hyderabad: 'hyd_central',
-  'hyderabad central': 'hyd_central',
-  kukatpally: 'kukatpally',
-  miyapur: 'miyapur',
-  madhapur: 'madhapur',
-  'jubilee hills': 'jubilee_hills',
-  'banjara hills': 'banjara_hills',
-  begumpet: 'begumpet',
-  uppal: 'uppal',
-  kondapur: 'kondapur',
-  'old city': 'old_city',
-  ameerpet: 'ameerpet',
-  'hitec city': 'hitec_city',
-  hitec: 'hitec_city',
-  secunderabad: 'secunderabad',
-  gachibowli: 'gachibowli',
-  'lb nagar': 'lb_nagar',
-  'l.b. nagar': 'lb_nagar',
-  bengaluru: 'blr_central',
-  bangalore: 'blr_central',
-  mumbai: 'bom_central',
-  delhi: 'del_central',
-};
-
 function resolveZoneIdFromCity(city) {
-  const raw = String(city || '').trim().toLowerCase();
-  if (!raw) return 'unknown';
-  if (CITY_TO_ZONE_ID[raw]) return CITY_TO_ZONE_ID[raw];
-  const slug = raw.replace(/\s+/g, '_');
-  if (CITY_TO_ZONE_ID[slug]) return CITY_TO_ZONE_ID[slug];
-  return slug;
+  return String(city || '').trim();
 }
 
 function weatherEmojiFromIconCode(iconCode) {
@@ -81,8 +54,8 @@ function weatherEmojiFromIconCode(iconCode) {
   if (k === 'rain') return '☔';
   if (k === 'sunny') return '☀️';
   if (k === 'cloudy') return '⛅';
-  if (k === 'hot') return '🔥';
-  return '⛅';
+  if (k === 'hot') return '☀️';
+  return '☀️';
 }
 
 function aqiHexFromCategoryLabel(label) {
@@ -113,7 +86,7 @@ function aqiCategory(aqi) {
 
 const DNA_DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const DNA_DAY_NAMES_LONG = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
-/** IST hours shown in heatmap: 6 → 22 (17 columns) */
+/** IST hours shown in heatmap: 6 -> 22 (17 columns) */
 const DNA_H_START = 6;
 const DNA_H_END = 22;
 const DNA_GRID_COLS = DNA_H_END - DNA_H_START + 1;
@@ -174,30 +147,8 @@ const DEMO_SCENARIOS = [
   { label: 'Heavy Rain', value: 'HEAVY_RAIN', emoji: '🌧️', hint: 'Most common disruption' },
   { label: 'Extreme Heat', value: 'EXTREME_HEAT', emoji: '🌡️', hint: 'Summer peak risk' },
   { label: 'Air Quality Alert', value: 'AQI_SPIKE', emoji: '🏭', hint: 'Hazardous AQI >300' },
-  { label: 'Zone Curfew', value: 'CURFEW', emoji: '🚫', hint: 'Social disruption' },
+  { label: 'Others', value: 'CURFEW', emoji: '🚫', hint: 'Other disruption types' },
 ];
-
-function getActiveScenarioNow(userId) {
-  const list = ['HEAVY_RAIN', 'EXTREME_HEAT', 'AQI_SPIKE', 'CURFEW'];
-  const now = new Date();
-  const ymd = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Kolkata',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(now);
-  const hh = Number(
-    new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Kolkata', hour: 'numeric', hour12: false }).format(now)
-  );
-  const [year, month, day] = String(ymd).split('-').map((v) => Number(v));
-  const current = Date.UTC(Number.isFinite(year) ? year : 2026, (Number.isFinite(month) ? month : 1) - 1, Number.isFinite(day) ? day : 1);
-  const jan1 = Date.UTC(Number.isFinite(year) ? year : 2026, 0, 1);
-  const dayOfYear = Math.max(1, Math.floor((current - jan1) / (24 * 60 * 60 * 1000)) + 1);
-  const h = Number.isFinite(hh) ? hh : 0;
-  const uid = Number.isFinite(Number(userId)) ? Number(userId) : 1;
-  const idx = (uid * 17 + dayOfYear + h) % list.length;
-  return list[idx];
-}
 
 function demoCompletedSteps(status) {
   const s = String(status || '').toUpperCase();
@@ -251,7 +202,7 @@ function DemoClaimProgress({ status, colors, primary }) {
                 <Text style={{ fontSize: 11, color: colors.muted, marginTop: 2 }}>Working…</Text>
               ) : null}
             </View>
-            {decisionFail ? <Text style={{ fontSize: 18 }}>✗</Text> : null}
+            {decisionFail ? <Text style={{ fontSize: 18 }}>✕</Text> : null}
           </View>
         );
       })}
@@ -420,13 +371,24 @@ export default function DashboardScreen({ navigation }) {
   const qc = useQueryClient();
   const { userId, workerProfile } = useAuth();
   const { status: wsStatus } = useWsConnection();
+  const { t, language, setLanguage } = useLocalization();
 
   const { disruptionAlert, lastClaimUpdate, activeClaims } = useClaims();
   const { coverageStatus, policy } = usePolicy();
-  const homePlanTier = useMemo(() => canonicalTierLabel(policy?.tier), [policy?.tier]);
+  const dashboardQuery = useQuery({
+    queryKey: ['workerDashboard', userId],
+    enabled: Boolean(userId),
+    queryFn: () => workersApi.getDashboard(userId),
+    staleTime: 1000 * 30,
+    refetchInterval: 1000 * 30,
+  });
+  const homePlanTier = useMemo(
+    () => canonicalTierLabel(dashboardQuery.data?.policy?.tier || policy?.tier),
+    [dashboardQuery.data?.policy?.tier, policy?.tier]
+  );
   const { data: profileQueryData, isLoading: profileQueryLoading } = useWorkerProfile();
-  const profile = profileQueryData ?? workerProfile ?? null;
-  const profileLoading = Boolean(profileQueryLoading && !workerProfile);
+  const profile = dashboardQuery.data?.profile ?? profileQueryData ?? workerProfile ?? null;
+  const profileLoading = Boolean((profileQueryLoading || dashboardQuery.isLoading) && !workerProfile);
   const payoutsQuery = usePayoutHistory();
   const [assistantOpen, setAssistantOpen] = useState(false);
   const [selectedPayment, setSelectedPayment] = useState(null);
@@ -441,6 +403,20 @@ export default function DashboardScreen({ navigation }) {
   const trust = profile?.trust_score;
   const tb = trustBadge(trust);
   const cb = coverageBadge(coverageStatus || policy?.status);
+
+  const trustPts = useMemo(() => {
+    const raw = profile?.trust_score_points;
+    if (raw != null && Number.isFinite(Number(raw))) return Math.round(Number(raw));
+    const ts = profile?.trust_score;
+    if (ts == null || ts === '') return 50;
+    const n = Number(ts);
+    if (!Number.isFinite(n)) return 50;
+    return n <= 1 ? Math.round(n * 100) : Math.round(n);
+  }, [profile?.trust_score_points, profile?.trust_score]);
+
+  const trustTierUi =
+    profile?.trust_tier ||
+    (trustPts >= 91 ? 'Elite' : trustPts >= 71 ? 'Trusted' : trustPts >= 41 ? 'Reliable' : 'Emerging');
 
   const firstName = useMemo(() => {
     const raw = String(profile?.name || '').trim();
@@ -458,11 +434,11 @@ export default function DashboardScreen({ navigation }) {
     return 'there 👋';
   }, [firstName, profileLoading]);
 
-  const zoneId = useMemo(() => resolveZoneIdFromCity(profile?.city), [profile?.city]);
+  const zoneId = useMemo(() => resolveZoneIdFromCity(profile?.zone_id), [profile?.zone_id]);
   const effectiveZoneId = useMemo(() => {
     const z = profile?.zone_id;
     if (z && String(z) !== 'default' && String(z) !== 'unknown') return String(z);
-    return zoneId && zoneId !== 'unknown' ? zoneId : 'hyd_central';
+    return zoneId || null;
   }, [profile?.zone_id, zoneId]);
 
   const zoneStatusQuery = useQuery({
@@ -472,7 +448,8 @@ export default function DashboardScreen({ navigation }) {
       const res = await api.get(`/zones/${encodeURIComponent(effectiveZoneId)}/status`);
       return res.data;
     },
-    staleTime: 1000 * 60 * 5,
+    staleTime: 1000 * 90,
+    refetchInterval: 1000 * 120,
   });
 
   const forecastShieldQuery = useQuery({
@@ -483,12 +460,11 @@ export default function DashboardScreen({ navigation }) {
   });
 
   const zoneStatus = zoneStatusQuery.data || null;
-  const disruptionActive =
-    Boolean(disruptionAlert?.visible) ||
-    Boolean(zoneStatus?.disruption_active) ||
-    String(zoneStatus?.status || '').toLowerCase() === 'disruption';
+  /** Weather/AQI / gov heuristic from zone status (amber “watch”, not a billed disruption). */
+  const disruptionAmbient =
+    Boolean(zoneStatus?.disruption_active) || String(zoneStatus?.status || '').toLowerCase() === 'disruption';
 
-  /** Amber = live socket (fintech “connected” cue); muted when offline */
+  /** Amber = live socket connected cue; muted when offline */
   const wsDotColor =
     wsStatus === 'connected' ? '#FBBF24' : wsStatus === 'reconnecting' ? '#F59E0B' : 'rgba(255,255,255,0.35)';
 
@@ -497,6 +473,7 @@ export default function DashboardScreen({ navigation }) {
   const lastApprovedIdRef = useRef(null);
   const lastNotifToastIdRef = useRef(null);
   const approvalHideTimerRef = useRef(null);
+  const [dismissBankPrompt, setDismissBankPrompt] = useState(false);
   const zoneStressAnim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
@@ -527,7 +504,7 @@ export default function DashboardScreen({ navigation }) {
         approvalSlide.setValue(-140);
       });
     };
-    // Primary auto-hide + hard safety hide (prevents “stuck” toast).
+      // Primary auto-hide + hard safety hide (prevents "stuck" toast).
     approvalHideTimerRef.current = setTimeout(hide, 3200);
     const safety = setTimeout(hide, 9000);
     return () => {
@@ -541,6 +518,9 @@ export default function DashboardScreen({ navigation }) {
     if (!Array.isArray(rows) || rows.length === 0) return;
     const latestPayout = rows.find((n) => String(n?.type || '').toLowerCase() === 'payout');
     if (!latestPayout) return;
+    const createdMs = Date.parse(String(latestPayout.created_at || ''));
+    if (Number.isFinite(createdMs) && Date.now() - createdMs > 120000) return;
+    if (!String(latestPayout.title || '').toLowerCase().includes('credited')) return;
     const nid = String(latestPayout.id || '');
     if (!nid || lastNotifToastIdRef.current === nid) return;
     const amount = Number(String(latestPayout.title || '').replace(/[^\d.]/g, '')) || 0;
@@ -564,7 +544,7 @@ export default function DashboardScreen({ navigation }) {
   }, [notificationsQuery.data, approvalSlide, qc]);
 
   useEffect(() => {
-    // If backend/UI sends follow-up statuses, don’t leave the toast pinned.
+    // If backend/UI sends follow-up statuses, do not leave the toast pinned.
     const st = String(lastClaimUpdate?.status || '').toUpperCase();
     if (!approvalToast) return;
     if (st && st !== 'APPROVED' && st !== 'PAYOUT_DONE' && st !== 'PAYOUT_CREDITED') {
@@ -573,24 +553,7 @@ export default function DashboardScreen({ navigation }) {
     }
   }, [lastClaimUpdate?.status, approvalToast, approvalSlide]);
 
-  useEffect(() => {
-    if (!disruptionAlert?.visible) return;
-    zoneStressAnim.setValue(0);
-    const pulse = Animated.sequence([
-      Animated.timing(zoneStressAnim, { toValue: 1, duration: 260, useNativeDriver: false }),
-      Animated.timing(zoneStressAnim, { toValue: 0, duration: 260, useNativeDriver: false }),
-    ]);
-    Animated.sequence([pulse, pulse, pulse]).start();
-  }, [disruptionAlert?.received_at, disruptionAlert?.visible, zoneStressAnim]);
-
   const safeLevel = zoneStatus?.safe_level;
-  const zonePulseTone = disruptionAlert?.visible
-    ? 'danger'
-    : safeLevel === 'DISRUPTED'
-      ? 'danger'
-      : safeLevel === 'WATCH'
-        ? 'warn'
-        : 'success';
   const aqiVal = zoneStatus?.aqi?.value ?? zoneStatus?.aqi_value ?? null;
   const aqiNum = typeof aqiVal === 'number' ? aqiVal : Number(aqiVal);
   const aqi = aqiCategory(Number.isFinite(aqiNum) ? aqiNum : null);
@@ -605,21 +568,24 @@ export default function DashboardScreen({ navigation }) {
     typeof zoneStatus?.active_alerts_count === 'number' ? zoneStatus.active_alerts_count : 0;
 
   const protectedMax = useMemo(() => {
-    const cap = Number(profile?.max_weekly_coverage);
-    if (Number.isFinite(cap) && cap > 0) return cap;
+    const cap = Number(policy?.max_coverage_per_day);
+    if (Number.isFinite(cap) && cap > 0) return cap * 7;
     return 3500;
-  }, [profile?.max_weekly_coverage]);
+  }, [policy?.max_coverage_per_day]);
 
   const protectedThisWeek = useMemo(() => {
-    const v = Number(profile?.earnings_protected_this_week);
-    if (Number.isFinite(v) && v >= 0) return v;
-    return 0;
-  }, [profile?.earnings_protected_this_week]);
+    const rows = payoutsQuery.data;
+    if (!Array.isArray(rows) || rows.length === 0) return 0;
+    return rows.reduce((sum, r) => {
+      const amt = Number(r?.amount ?? r?.payout_amount ?? r?.payout ?? 0);
+      return sum + (Number.isFinite(amt) ? amt : 0);
+    }, 0);
+  }, [payoutsQuery.data]);
 
   const trend = useMemo(() => {
-    // Backend doesn’t provide last-week baseline yet, so keep deterministic UX.
-    // If you add last_week_payouts, we’ll compute real trend.
-    return protectedThisWeek > 0 ? { dir: 'up', pct: 8 } : { dir: 'flat', pct: 0 };
+    // Backend does not provide last-week baseline yet, so keep deterministic UX.
+    // If you add last_week_payouts, we will compute real trend.
+    return protectedThisWeek > 0 ? { dir: 'up', pct: 0 } : { dir: 'flat', pct: 0 };
   }, [protectedThisWeek]);
 
   const breakdownQuery = useQuery({
@@ -635,8 +601,9 @@ export default function DashboardScreen({ navigation }) {
     return rows.some((r) => Number(r?.amount) > 0);
   }, [breakdownQuery.data]);
 
+  const [activeDisruptions, setActiveDisruptions] = useState([]);
   const [dnaExpanded, setDnaExpanded] = useState(false);
-  const [coverageExpanded, setCoverageExpanded] = useState(false);
+  const [coverageExpanded, setCoverageExpanded] = useState(true);
   const [tick, setTick] = useState(0);
   const [dnaTick, setDnaTick] = useState(0);
   const [dnaTooltip, setDnaTooltip] = useState({
@@ -650,6 +617,28 @@ export default function DashboardScreen({ navigation }) {
   const zoneBgPulse = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
+    const fetchActiveDisruptions = async () => {
+      try {
+        const data = effectiveZoneId
+          ? await zonesApi.getActiveDisruptions(effectiveZoneId)
+          : [];
+        const arr = Array.isArray(data) ? data : [];
+        setActiveDisruptions(
+          arr.map((d) => ({
+            ...d,
+            disruption_type: d.disruption_type || d.type,
+          }))
+        );
+      } catch {
+        // Silent - disruption banner is non-critical.
+      }
+    };
+    fetchActiveDisruptions();
+    const id = setInterval(fetchActiveDisruptions, 30000);
+    return () => clearInterval(id);
+  }, [effectiveZoneId]);
+
+  useEffect(() => {
     const id = setInterval(() => setTick((x) => x + 1), 30000);
     return () => clearInterval(id);
   }, []);
@@ -659,8 +648,12 @@ export default function DashboardScreen({ navigation }) {
     return () => clearInterval(id);
   }, []);
 
+  const inFlight = useMemo(() => isInFlightClaim(lastClaimUpdate, activeClaims), [lastClaimUpdate, activeClaims]);
+  const severeDisruptionUi = Boolean(activeDisruptions?.length) || inFlight;
+  const disruptionActive = severeDisruptionUi;
+
   useEffect(() => {
-    if (!disruptionActive) {
+    if (!severeDisruptionUi) {
       zoneBgPulse.setValue(0);
       return;
     }
@@ -672,9 +665,24 @@ export default function DashboardScreen({ navigation }) {
     );
     loop.start();
     return () => loop.stop();
-  }, [disruptionActive, zoneBgPulse]);
+  }, [severeDisruptionUi, zoneBgPulse]);
 
-  const inFlight = useMemo(() => isInFlightClaim(lastClaimUpdate, activeClaims), [lastClaimUpdate, activeClaims]);
+  useEffect(() => {
+    if (!severeDisruptionUi) return;
+    zoneStressAnim.setValue(0);
+    const pulse = Animated.sequence([
+      Animated.timing(zoneStressAnim, { toValue: 1, duration: 260, useNativeDriver: false }),
+      Animated.timing(zoneStressAnim, { toValue: 0, duration: 260, useNativeDriver: false }),
+    ]);
+    Animated.sequence([pulse, pulse, pulse]).start();
+  }, [severeDisruptionUi, activeDisruptions, zoneStressAnim]);
+
+  const zonePulseTone = severeDisruptionUi
+    ? 'danger'
+    : safeLevel === 'WATCH' || disruptionAmbient
+      ? 'warn'
+      : 'success';
+
   const flagged = useMemo(() => String(lastClaimUpdate?.status || '').toUpperCase().includes('FLAG'), [lastClaimUpdate?.status]);
   const step = useMemo(() => statusToStep(lastClaimUpdate?.status), [lastClaimUpdate?.status]);
 
@@ -733,9 +741,9 @@ export default function DashboardScreen({ navigation }) {
     return Number(row?.[hr] || 0);
   }, [dnaData?.dna]);
   const liveBand = useMemo(() => {
-    if (currentHourRate >= 120) return { tone: '🟢 High earning window', min: 120, max: 150 };
-    if (currentHourRate >= 80) return { tone: '🟡 Moderate demand', min: 70, max: 95 };
-    return { tone: '🔵 Lower demand window', min: 45, max: 70 };
+    if (currentHourRate >= 120) return { tone: '🟢 High earning window', min: Math.round(currentHourRate * 0.9), max: Math.round(currentHourRate * 1.1) };
+    if (currentHourRate >= 80) return { tone: '🟡 Moderate demand', min: Math.round(currentHourRate * 0.85), max: Math.round(currentHourRate * 1.1) };
+    return { tone: '🔵 Lower demand window', min: Math.max(1, Math.round(currentHourRate * 0.85)), max: Math.max(2, Math.round(currentHourRate * 1.1)) };
   }, [currentHourRate]);
   const todayPotential = useMemo(() => {
     const row = dnaData?.dna?.[getIstWeekdayMon0()] || [];
@@ -755,6 +763,8 @@ export default function DashboardScreen({ navigation }) {
   const istHighlightCol = istDnaHour >= DNA_H_START && istDnaHour <= DNA_H_END ? istDnaHour - DNA_H_START : -1;
 
   const [disruptionSheetVisible, setDisruptionSheetVisible] = useState(false);
+  const [langSheetVisible, setLangSheetVisible] = useState(false);
+  const simulationEnabled = true;
   const [sheetPhase, setSheetPhase] = useState('scenarios');
   const [payoutCelebration, setPayoutCelebration] = useState(null);
   const [displayWeeklyProtected, setDisplayWeeklyProtected] = useState(null);
@@ -762,12 +772,18 @@ export default function DashboardScreen({ navigation }) {
   const demoStepStatusRef = useRef(null);
   const weeklyBeforeDemoRef = useRef(null);
 
+  useEffect(() => {
+    celebratedClaimIdRef.current = null;
+    demoStepStatusRef.current = null;
+    weeklyBeforeDemoRef.current = null;
+    setPayoutCelebration(null);
+    setDisplayWeeklyProtected(null);
+  }, [userId]);
+
   const shownWeeklyProtected =
     displayWeeklyProtected != null && Number.isFinite(displayWeeklyProtected)
       ? displayWeeklyProtected
       : protectedThisWeek;
-  const activeScenario = useMemo(() => getActiveScenarioNow(userId), [userId, tick]);
-
   const simMutation = useMutation({
     mutationFn: async (scenario) =>
       simulation.run({
@@ -795,19 +811,16 @@ export default function DashboardScreen({ navigation }) {
   }, [lastClaimUpdate?.status, disruptionSheetVisible, sheetPhase]);
 
   useEffect(() => {
+    if (!lastClaimUpdate) return;
     const st = String(lastClaimUpdate?.status || '').toUpperCase();
     const cid = lastClaimUpdate?.claim_id;
-    if (!['APPROVED', 'PAYOUT_DONE', 'PAYOUT_CREDITED'].includes(st)) return;
-    if (cid == null) return;
     const evtTs = Date.parse(String(lastClaimUpdate?.timestamp || lastClaimUpdate?.created_at || ''));
     const isFreshEvent = Number.isFinite(evtTs) ? Date.now() - evtTs < 45_000 : false;
+    const amt = Number(lastClaimUpdate?.payout_amount ?? 0);
 
-    // Only show the celebration modal on final approval (not on payout lifecycle states).
-    if (st === 'APPROVED' && isFreshEvent) {
-      if (celebratedClaimIdRef.current === cid) return;
+    // Celebration: real credit only (positive payout + fresh APPROVED).
+    if (cid != null && st === 'APPROVED' && isFreshEvent && amt > 0 && celebratedClaimIdRef.current !== cid) {
       celebratedClaimIdRef.current = cid;
-
-      const amt = Number(lastClaimUpdate?.payout_amount ?? 0);
       const breakdown = lastClaimUpdate?.payout_breakdown;
       const expected =
         typeof breakdown === 'object' && breakdown !== null && breakdown.expected != null
@@ -851,11 +864,21 @@ export default function DashboardScreen({ navigation }) {
     }
 
     // Always refresh history after terminal states so Claims tab matches Notifications.
-    if (['APPROVED', 'PAYOUT_DONE', 'PAYOUT_CREDITED', 'CLAIM_REJECTED', 'DECISION_REJECTED', 'BLOCKED', 'REJECTED'].includes(st)) {
+    if (
+      [
+        'APPROVED',
+        'PAYOUT_DONE',
+        'PAYOUT_CREDITED',
+        'NO_PAYOUT',
+        'CLAIM_REJECTED',
+        'DECISION_REJECTED',
+        'BLOCKED',
+        'REJECTED',
+      ].includes(st)
+    ) {
       qc.invalidateQueries({ queryKey: ['claimsHistory'] });
     }
     // Refresh payouts only when credited.
-    const amt = Number(lastClaimUpdate?.payout_amount ?? 0);
     if (Number.isFinite(amt) && amt > 0) {
       qc.invalidateQueries({ queryKey: ['payoutHistory'] });
     }
@@ -867,13 +890,9 @@ export default function DashboardScreen({ navigation }) {
     qc.invalidateQueries({ queryKey: ['earningsDna'] });
     qc.invalidateQueries({ queryKey: ['zoneStatus'] });
     qc.invalidateQueries({ queryKey: ['forecastShield'] });
+    qc.invalidateQueries({ queryKey: ['forecastDaily'] });
     return () => clearTimeout(delayed);
   }, [lastClaimUpdate, qc]);
-
-  const forecastShields = Array.isArray(forecastShieldQuery.data?.shields)
-    ? forecastShieldQuery.data.shields
-    : [];
-  const primaryForecastShield = forecastShields[0];
 
   const refreshing = manualRefreshing;
   const onRefresh = useCallback(() => {
@@ -881,16 +900,16 @@ export default function DashboardScreen({ navigation }) {
     Promise.allSettled([
       payoutsQuery.refetch(),
       zoneStatusQuery.refetch(),
-      dnaQuery.refetch(),
       forecastShieldQuery.refetch(),
+      dnaQuery.refetch(),
       breakdownQuery.refetch(),
     ]).finally(() => setManualRefreshing(false));
   }, [
     setManualRefreshing,
     payoutsQuery.refetch,
     zoneStatusQuery.refetch,
-    dnaQuery.refetch,
     forecastShieldQuery.refetch,
+    dnaQuery.refetch,
     breakdownQuery.refetch,
   ]);
 
@@ -912,27 +931,53 @@ export default function DashboardScreen({ navigation }) {
 
   const payouts = (payoutsQuery.data || []).slice(0, 3);
 
-  const zoneDisplayName = zoneStatus?.zone_name || profile?.city || 'Your zone';
-  const timeGreeting = getTimeGreeting();
+  const zoneDisplayName = useMemo(() => {
+    const loc = String(profile?.location_display || '').trim();
+    if (loc) return formatShortLocation(loc) || loc;
+    const zn = String(zoneStatus?.zone_name || '').trim();
+    if (zn) return formatShortLocation(zn) || zn;
+    const c = String(profile?.city || '').trim();
+    if (c) return formatShortLocation(c) || c;
+    return t('dashboard.zone_fallback');
+  }, [profile?.location_display, zoneStatus?.zone_name, profile?.city, t]);
+
+  const isColdProfile = useMemo(() => {
+    const claims = Number(profile?.total_claims ?? 0);
+    const payouts = Number(profile?.total_payouts ?? 0);
+    return claims === 0 && payouts === 0;
+  }, [profile?.total_claims, profile?.total_payouts]);
+  const dnaMatrix = useMemo(() => {
+    if (isColdProfile) {
+      return Array.from({ length: 7 }, () =>
+        Array.from({ length: DNA_GRID_COLS }, () => 0)
+      );
+    }
+    return Array.isArray(dnaQuery.data?.dna) ? dnaQuery.data.dna : [];
+  }, [isColdProfile, dnaQuery.data?.dna]);
+  const primaryForecastShield = Array.isArray(forecastShieldQuery.data?.shields)
+    ? forecastShieldQuery.data.shields[0]
+    : null;
+
+  const timeGreeting = t(`dashboard.greeting_${getGreetingKey()}`);
 
   const zoneUpdatedText = useMemo(() => {
-    const t = zoneStatusQuery.dataUpdatedAt;
-    if (!t) return '';
+    const updatedAt = zoneStatusQuery.dataUpdatedAt;
+    if (!updatedAt) return '';
     void tick;
-    const sec = Math.floor((Date.now() - t) / 1000);
-    if (sec < 8) return 'Updated just now';
-    if (sec < 60) return `Updated ${sec}s ago`;
+    const sec = Math.floor((Date.now() - updatedAt) / 1000);
+    if (sec < 8) return t('dashboard.updated_just_now');
+    if (sec < 60) return `${t('dashboard.updated_prefix')} ${sec}s`;
     const m = Math.floor(sec / 60);
-    if (m < 120) return `Updated ${m}m ago`;
-    return 'Updated earlier';
-  }, [zoneStatusQuery.dataUpdatedAt, tick]);
+    if (m < 120) return `${t('dashboard.updated_prefix')} ${m}m`;
+    return t('dashboard.updated_earlier');
+  }, [zoneStatusQuery.dataUpdatedAt, tick, t]);
 
   const dnaUpdatedText = useMemo(() => {
-    const t = dnaQuery.dataUpdatedAt;
-    if (!t) return '';
+    const updatedAt = dnaQuery.dataUpdatedAt;
+    if (!updatedAt) return '';
     void dnaTick;
     if (dnaQuery.isRefetching || dnaQuery.isFetching) return 'Live · refreshing pattern…';
-    const sec = Math.floor((Date.now() - t) / 1000);
+    const sec = Math.floor((Date.now() - updatedAt) / 1000);
     if (sec < 6) return 'Live · pattern just synced';
     if (sec < 60) return `Live · synced ${sec}s ago`;
     const m = Math.floor(sec / 60);
@@ -940,14 +985,12 @@ export default function DashboardScreen({ navigation }) {
     return 'Pattern last synced from server';
   }, [dnaQuery.dataUpdatedAt, dnaQuery.isRefetching, dnaQuery.isFetching, dnaTick]);
 
-  const istTodayLine = useMemo(() => formatIstTodayLong(), []);
-
   const rideStatus = useMemo(() => {
-    if (disruptionActive) return { key: 'red', label: 'Disruption active', bar: '#dc2626' };
-    if (safeLevel === 'WATCH' || (Number.isFinite(aqiNum) && aqiNum > 150))
-      return { key: 'amber', label: 'Be careful', bar: '#d97706' };
-    return { key: 'green', label: 'Safe to ride', bar: '#16a34a' };
-  }, [disruptionActive, safeLevel, aqiNum]);
+    if (disruptionActive) return { key: 'red', label: t('dashboard.disruption_active_bar'), bar: '#dc2626' };
+    if (safeLevel === 'WATCH' || disruptionAmbient || (Number.isFinite(aqiNum) && aqiNum > 150))
+      return { key: 'amber', label: t('dashboard.watch_ride'), bar: '#d97706' };
+    return { key: 'green', label: t('dashboard.safe_ride'), bar: '#16a34a' };
+  }, [disruptionActive, safeLevel, aqiNum, disruptionAmbient, t]);
 
   const zonePulseOverlayOpacity = zoneBgPulse.interpolate({
     inputRange: [0, 1],
@@ -972,9 +1015,8 @@ export default function DashboardScreen({ navigation }) {
         <Animated.View
           style={[
             styles.approvalToastOuter,
-            { transform: [{ translateY: approvalSlide }] },
+            { transform: [{ translateY: approvalSlide }], pointerEvents: 'none' },
           ]}
-          pointerEvents="none"
         >
           <LinearGradient
             colors={['#1b5e20', '#2e7d32']}
@@ -985,6 +1027,9 @@ export default function DashboardScreen({ navigation }) {
             <Text style={styles.approvalToastText}>
               ₹{Math.round(approvalToast.amount)} credited — {approvalToast.disruption}
             </Text>
+            <TouchableOpacity style={styles.toastCloseBtn} onPress={() => setApprovalToast(null)}>
+              <Text style={styles.toastCloseText}>✕</Text>
+            </TouchableOpacity>
             {approvalToast.shieldLine ? (
               <Text style={styles.approvalToastSub}>{approvalToast.shieldLine}</Text>
             ) : null}
@@ -1000,6 +1045,38 @@ export default function DashboardScreen({ navigation }) {
         ]}
         refreshControl={<RefreshControl refreshing={Boolean(refreshing)} onRefresh={onRefresh} />}
       >
+      {!dismissBankPrompt && !(profile?.bank_upi_id || profile?.bank_account_number) ? (
+        <View style={styles.bankPromptCard}>
+          <TouchableOpacity style={styles.bankPromptClose} onPress={() => setDismissBankPrompt(true)}>
+            <Text style={styles.bankPromptCloseText}>✕</Text>
+          </TouchableOpacity>
+          <Text style={styles.bankPromptTitle}>Update bank details to receive payouts</Text>
+          <TouchableOpacity
+            style={styles.bankPromptBtn}
+            onPress={() => navigation.navigate('Account')}
+          >
+            <Text style={styles.bankPromptBtnText}>Update bank details</Text>
+          </TouchableOpacity>
+        </View>
+      ) : null}
+      {severeDisruptionUi ? (
+        <View style={[styles.card, { backgroundColor: colors.dangerBg, borderColor: '#c62828', marginBottom: 12 }]}>
+          <Text style={[styles.disruptionTitle, { color: scheme === 'dark' ? '#ff8a80' : '#b71c1c' }]}>
+            {activeDisruptions.length > 0 ? (
+              <>
+                {formatDisruptionLabel(activeDisruptions[0].disruption_type)} {t('dashboard.disruption_detected_suffix')}
+                {activeDisruptions[0].confidence
+                  ? ` (${activeDisruptions[0].confidence} ${t('dashboard.confidence_suffix')})`
+                  : ''}
+                {` — ${t('dashboard.claim_processing_suffix')}`}
+              </>
+            ) : (
+              t('dashboard.claim_pipeline_banner')
+            )}
+          </Text>
+        </View>
+      ) : null}
+
       <LinearGradient
         colors={scheme === 'dark' ? ['#0b1f4a', '#1e3a8a', '#172554'] : ['#1557C7', '#2563eb', '#38bdf8']}
         start={{ x: 0, y: 0 }}
@@ -1029,23 +1106,72 @@ export default function DashboardScreen({ navigation }) {
           >
             <Text style={styles.pillText}>{cb.label}</Text>
           </TouchableOpacity>
-          <View
-            style={[
-              styles.pill,
-              tb.tone === 'premium' ? styles.pillPremium : tb.tone === 'trusted' ? styles.pillTrusted : styles.pillNeutral,
-            ]}
+          {tb.tone === 'premium' || tb.tone === 'trusted' ? (
+            <View
+              style={[
+                styles.pill,
+                tb.tone === 'premium' ? styles.pillPremium : styles.pillTrusted,
+              ]}
+            >
+              <Text style={styles.pillText}>{tb.label}</Text>
+            </View>
+          ) : null}
+          <TouchableOpacity
+            onPress={() => setLangSheetVisible(true)}
+            style={styles.headerLangBtn}
+            accessibilityRole="button"
+            accessibilityLabel={t('dashboard.language_picker')}
           >
-            <Text style={styles.pillText}>{tb.label}</Text>
-          </View>
+            <MaterialCommunityIcons name="earth" size={22} color="#fff" />
+          </TouchableOpacity>
         </View>
         {homePlanTier && homePlanTier !== '—' ? (
           <Text style={styles.headerPlanLine} numberOfLines={1}>
-            Plan: {homePlanTier}
+            {`${t('dashboard.plan_prefix')} ${homePlanTier}`}
           </Text>
         ) : null}
       </LinearGradient>
 
-      {/* Zone status — innovation #1: real-time zone intelligence */}
+      <View
+        style={[
+          styles.card,
+          styles.cardElevated,
+          { backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border || 'rgba(0,0,0,0.06)', marginBottom: 14 },
+        ]}
+      >
+        <Text style={[styles.zoneCardTitle, { color: colors.text }]}>SafeNet Trust Score</Text>
+        <Text style={[styles.cardSub, { color: colors.muted, marginBottom: 4 }]}>
+          Real actuarial pricing adjusts your weekly premium; trust tier affects payout speed after approval.
+        </Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 8, gap: 14 }}>
+          <Svg width={96} height={96} viewBox="0 0 100 100">
+            <Circle cx="50" cy="50" r="42" stroke={colors.muted} strokeWidth="8" fill="none" opacity={0.2} />
+            <Circle
+              cx="50"
+              cy="50"
+              r="42"
+              stroke="#1a73e8"
+              strokeWidth="8"
+              fill="none"
+              strokeDasharray={`${(Math.max(0, Math.min(100, trustPts)) / 100) * 264} 264`}
+              strokeLinecap="round"
+              transform="rotate(-90 50 50)"
+            />
+          </Svg>
+          <View style={{ flex: 1 }}>
+            <Text style={{ fontSize: 30, fontWeight: '900', color: colors.text }}>{trustPts}</Text>
+            <Text style={{ color: '#1a73e8', fontWeight: '800', fontSize: 16, marginTop: 2 }}>{trustTierUi}</Text>
+            <Text style={{ color: colors.muted, fontSize: 12, marginTop: 8, lineHeight: 18 }}>
+              On-time premium payments +5 · Clean claim history +10 · Zone verified ✓
+            </Text>
+            <Text style={{ color: colors.muted, fontSize: 12, marginTop: 4, lineHeight: 18 }}>
+              Elite members get 15% faster payout processing.
+            </Text>
+          </View>
+        </View>
+      </View>
+
+      {/* Zone status - real-time zone intelligence */}
       <Animated.View
         style={[
           styles.card,
@@ -1060,58 +1186,42 @@ export default function DashboardScreen({ navigation }) {
       >
         {disruptionActive ? (
           <Animated.View
-            pointerEvents="none"
             style={[
               StyleSheet.absoluteFillObject,
-              { backgroundColor: '#fecaca', opacity: zonePulseOverlayOpacity },
+              { backgroundColor: '#fecaca', opacity: zonePulseOverlayOpacity, pointerEvents: 'none' },
             ]}
           />
         ) : null}
         <View style={styles.cardHeaderRow}>
           <View style={{ flex: 1 }}>
-            <Text style={[styles.zoneCardTitle, { color: colors.text }]}>Your Zone · {zoneDisplayName}</Text>
-            <Text style={[styles.cardSub, { color: colors.muted }]} numberOfLines={1}>
-              {zoneUpdatedText || 'Pull down on Home to refresh'}
+            <Text style={[styles.zoneCardTitle, { color: colors.text }]}>
+              {t('dashboard.zone_title')} · {zoneDisplayName}
             </Text>
-            {disruptionAlert?.visible && disruptionAlert?.disruption_type ? (
+            <Text style={[styles.cardSub, { color: colors.muted }]} numberOfLines={1}>
+              {zoneUpdatedText || t('dashboard.pull_to_refresh_hint')}
+            </Text>
+            {severeDisruptionUi && disruptionAlert?.visible && disruptionAlert?.disruption_type ? (
               <Text style={[styles.liveDisruptionLine, { color: scheme === 'dark' ? '#ff8a80' : '#b71c1c' }]}>
-                Live: {formatDisruptionLabel(disruptionAlert.disruption_type)}
+                {t('dashboard.live_prefix')} {formatDisruptionLabel(disruptionAlert.disruption_type)}
               </Text>
             ) : null}
-            {!primaryForecastShield &&
-            !forecastShieldQuery.isLoading &&
-            !forecastShieldQuery.isError &&
-            effectiveZoneId ? (
-              <View style={styles.forecastClearChipInline}>
-                <Text
-                  style={[
-                    styles.forecastClearChipText,
-                    { color: scheme === 'dark' ? '#4ade80' : '#15803d' },
-                  ]}
-                >
-                  48h forecast clear 🛡️
-                </Text>
-              </View>
-            ) : null}
           </View>
-          <ZonePulseDot tone={zoneStatus ? zonePulseTone : disruptionActive ? 'danger' : 'success'} />
+          <ZonePulseDot tone={zonePulseTone} />
         </View>
 
         {zoneStatusQuery.isLoading ? (
           <View style={styles.loadingRow}>
             <ActivityIndicator color={colors.primary} />
-            <Text style={[styles.loadingText, { color: colors.muted }]}>Loading zone status…</Text>
+            <Text style={[styles.loadingText, { color: colors.muted }]}>{t('dashboard.loading_zone')}</Text>
           </View>
         ) : zoneStatusQuery.isError ? (
           <View style={styles.errorBox}>
-            <Text style={[styles.errorText, { color: colors.muted }]}>
-              Couldn’t load zone status. Pull down to retry.
-            </Text>
+            <Text style={[styles.errorText, { color: colors.muted }]}>{t('dashboard.zone_status_error')}</Text>
           </View>
         ) : (
           <View style={styles.zoneGrid}>
             <View style={styles.zoneCell}>
-              <Text style={[styles.zoneLabel, { color: colors.muted }]}>Weather</Text>
+              <Text style={[styles.zoneLabel, { color: colors.muted }]}>{t('dashboard.weather_label')}</Text>
               <Text style={[styles.zoneValue, { color: colors.text }]} numberOfLines={2}>
                 {weatherEmoji}
                 {'\n'}
@@ -1119,14 +1229,14 @@ export default function DashboardScreen({ navigation }) {
               </Text>
             </View>
             <View style={styles.zoneCell}>
-              <Text style={[styles.zoneLabel, { color: colors.muted }]}>AQI</Text>
+              <Text style={[styles.zoneLabel, { color: colors.muted }]}>{t('dashboard.aqi_label')}</Text>
               <Text style={[styles.zoneValue, { color: aqiHex }]} numberOfLines={3}>
                 {aqiLabel}
                 {Number.isFinite(aqiNum) ? `\n${Math.round(aqiNum)}` : ''}
               </Text>
             </View>
             <View style={styles.zoneCell}>
-              <Text style={[styles.zoneLabel, { color: colors.muted }]}>Alerts</Text>
+              <Text style={[styles.zoneLabel, { color: colors.muted }]}>{t('dashboard.alerts_label')}</Text>
               <Text
                 style={[
                   styles.zoneValue,
@@ -1143,37 +1253,36 @@ export default function DashboardScreen({ navigation }) {
           <Text style={styles.zoneStatusBarLabel}>{rideStatus.label}</Text>
         </View>
 
-        {disruptionActive ? (
-          <View style={styles.disruptionBanner}>
-            <Text style={[styles.disruptionTitle, { color: scheme === 'dark' ? '#ffd6d6' : '#b71c1c' }]}>
-              Disruption active — claim in progress
-            </Text>
-          </View>
-        ) : null}
       </Animated.View>
 
       {primaryForecastShield && !forecastShieldQuery.isError ? (
-        <LinearGradient
-          colors={['#0f172a', '#1d4ed8', '#3b82f6']}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 1 }}
-          style={styles.forecastShieldCardHero}
+        <TouchableOpacity
+          activeOpacity={0.9}
+          onPress={() => navigation.navigate('Coverage')}
+          style={{ marginBottom: 14 }}
         >
-          <Text style={styles.forecastShieldHeroIcon}>🛡️</Text>
-          <Text style={styles.forecastShieldHeroTitle}>Forecast Shield Active</Text>
-          <Text style={styles.forecastShieldHeroSubtitle}>
-            {primaryForecastShield.subtitle || 'Heavy rain predicted tomorrow 3–7 PM'}
-          </Text>
-          <Text style={styles.forecastShieldHeroFooter}>
-            {primaryForecastShield.coverage_line || 'Your coverage auto-upgraded to Pro'}
-          </Text>
-          <View style={styles.forecastShieldBadge}>
-            <Text style={styles.forecastShieldBadgeText}>Proactive · no extra cost</Text>
-          </View>
-        </LinearGradient>
+          <LinearGradient
+            colors={['#0f172a', '#1d4ed8', '#3b82f6']}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={styles.forecastShieldCardHero}
+          >
+            <Text style={styles.forecastShieldHeroIcon}>🛡️</Text>
+            <Text style={styles.forecastShieldHeroTitle}>Forecast Shield Active</Text>
+            <Text style={styles.forecastShieldHeroSubtitle}>
+              {primaryForecastShield.subtitle || 'Weather risk expected tomorrow'}
+            </Text>
+            <Text style={styles.forecastShieldHeroFooter}>
+              Tap to view 14-day weather outlook in Coverage
+            </Text>
+            <View style={styles.forecastShieldBadge}>
+              <Text style={styles.forecastShieldBadgeText}>Live · Tap for full forecast</Text>
+            </View>
+          </LinearGradient>
+        </TouchableOpacity>
       ) : null}
 
-      {/* Earnings DNA — hour × day heatmap */}
+      {/* Earnings DNA - hour x day heatmap */}
       <View style={[styles.card, styles.cardElevated, { backgroundColor: colors.card, borderColor: colors.border }]}>
         <TouchableOpacity
           style={[
@@ -1187,7 +1296,9 @@ export default function DashboardScreen({ navigation }) {
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
               <Text style={[styles.sectionTitle, { color: colors.text }]}>Earnings DNA</Text>
             </View>
-            <Text style={[styles.cardSub, { color: colors.muted }]}>🟢 Live • updated just now</Text>
+            <Text style={[styles.cardSub, { color: colors.muted }]}>
+              {isColdProfile ? t('dashboard.dna_cold_collapsed') : dnaUpdatedText}
+            </Text>
           </View>
           <Text style={[styles.dnaChevron, { color: colors.primary }]}>{dnaExpanded ? '▲' : '▼'}</Text>
         </TouchableOpacity>
@@ -1200,12 +1311,19 @@ export default function DashboardScreen({ navigation }) {
           <Text style={[styles.cardSub, { color: colors.muted }]}>Could not load Earnings DNA.</Text>
         ) : dnaQuery.data && dnaExpanded ? (
           <>
-            <View style={styles.dnaLiveCard}>
-              <Text style={styles.dnaLiveTone}>{liveBand.tone}</Text>
-              <Text style={styles.dnaLiveAmt}>
-                ₹{liveBand.min}–₹{liveBand.max}/hr expected in your zone
-              </Text>
-            </View>
+            {isColdProfile ? (
+              <View style={[styles.dnaLiveCard, { backgroundColor: scheme === 'dark' ? '#0f2742' : '#eff6ff' }]}>
+                <Text style={styles.dnaLiveTone}>{t('dashboard.dna_cold_title')}</Text>
+                <Text style={styles.dnaLiveAmt}>{t('dashboard.dna_cold_body')}</Text>
+              </View>
+            ) : (
+              <View style={styles.dnaLiveCard}>
+                <Text style={styles.dnaLiveTone}>{liveBand.tone}</Text>
+                <Text style={styles.dnaLiveAmt}>
+                  ₹{liveBand.min}-₹{liveBand.max}/hr expected in your zone
+                </Text>
+              </View>
+            )}
             <View style={{ flexDirection: 'row', marginTop: 4 }}>
               <View style={{ width: 34, justifyContent: 'flex-end', paddingBottom: 18, paddingRight: 4 }}>
                 {DNA_DAY_LABELS.map((L, yi) => (
@@ -1227,7 +1345,7 @@ export default function DashboardScreen({ navigation }) {
               <View>
                 <View style={{ width: DNA_GRID_PIX_W, height: DNA_GRID_PIX_H, position: 'relative' }}>
                   <Svg width={DNA_GRID_PIX_W} height={DNA_GRID_PIX_H}>
-                    {(dnaQuery.data.dna || []).flatMap((row, di) =>
+                    {dnaMatrix.flatMap((row, di) =>
                       Array.from({ length: DNA_GRID_COLS }, (_, ci) => {
                         const hour = DNA_H_START + ci;
                         const v = Number(row[hour]) || 0;
@@ -1251,7 +1369,7 @@ export default function DashboardScreen({ navigation }) {
                       })
                     )}
                   </Svg>
-                  {(dnaQuery.data.dna || []).flatMap((row, di) =>
+                  {dnaMatrix.flatMap((row, di) =>
                     Array.from({ length: DNA_GRID_COLS }, (_, ci) => {
                       const hour = DNA_H_START + ci;
                       const v = Number(row[hour]) || 0;
@@ -1290,10 +1408,18 @@ export default function DashboardScreen({ navigation }) {
                 </View>
               </View>
             </View>
-            <Text style={[styles.dnaInsightLine, { color: colors.text }]}>{nextBestLabel}</Text>
-            <Text style={[styles.dnaTodayPotential, { color: colors.text }]}>₹{todayPotential.low}–₹{todayPotential.high} today</Text>
             <Text style={[styles.dnaInsightLine, { color: colors.text }]}>
-              ₹{Math.round(Number(dnaQuery.data.weekly_actual || 0))} / ₹{Math.round(Number(dnaQuery.data.weekly_expected || 0))} expected
+              {isColdProfile ? t('dashboard.dna_cold_collapsed') : nextBestLabel}
+            </Text>
+            <Text style={[styles.dnaTodayPotential, { color: colors.text }]}>
+              {isColdProfile
+                ? '—'
+                : `₹${todayPotential.low}-₹${todayPotential.high} today`}
+            </Text>
+            <Text style={[styles.dnaInsightLine, { color: colors.text }]}>
+              {isColdProfile
+                ? t('dashboard.protection_cold_hint')
+                : `₹${Math.round(Number(dnaQuery.data.weekly_actual || 0))} / ₹${Math.round(Number(dnaQuery.data.weekly_expected || 0))} expected`}
             </Text>
             <View style={[styles.dnaProgressTrack, { backgroundColor: colors.border }]}>
               <View
@@ -1316,50 +1442,60 @@ export default function DashboardScreen({ navigation }) {
         ) : null}
       </View>
 
-      {/* Coverage ring — weekly protection */}
+      {/* Coverage ring - weekly protection */}
       <View style={[styles.card, styles.cardElevated, { backgroundColor: colors.card, borderColor: colors.border }]}>
         <View style={styles.coverageRingRow}>
           <View style={{ flex: 1, paddingRight: 8 }}>
-            <Text style={[styles.sectionTitle, { color: colors.text }]}>Weekly protection</Text>
+            <Text style={[styles.sectionTitle, { color: colors.text }]}>{t('dashboard.weekly_protection')}</Text>
             <Text style={[styles.coverageRingAmount, { color: colors.text }]}>
               ₹{Math.round(shownWeeklyProtected).toLocaleString('en-IN')} protected this week
             </Text>
             <Text style={[styles.fingerprintHint, { color: colors.muted }]}>
-              {fingerprintPct != null
-                ? `↗ ${fingerprintPct}% of your earning fingerprint`
-                : `${trend.dir === 'up' ? '↗' : trend.dir === 'down' ? '↘' : '→'} ${trend.pct}% vs typical week`}
+              {isColdProfile && Math.round(shownWeeklyProtected) === 0
+                ? t('dashboard.protection_cold_hint')
+                : fingerprintPct != null
+                  ? `↗ ${fingerprintPct}% of your earning fingerprint`
+                  : `${trend.dir === 'up' ? '↗' : trend.dir === 'down' ? '↘' : '→'} ${trend.pct}% vs typical week`}
             </Text>
             <Text style={[styles.cardSub, { color: colors.muted, marginTop: 6 }]}>
               Weekly cap ₹{Math.round(protectedMax).toLocaleString('en-IN')}
             </Text>
-            {breakdownHasData ? (
-              <TouchableOpacity onPress={() => setCoverageExpanded((x) => !x)} style={{ marginTop: 10 }}>
-                <Text style={[styles.linkText, { color: colors.primary }]}>
-                  {coverageExpanded ? 'Hide' : 'Show'} week breakdown
-                </Text>
-              </TouchableOpacity>
-            ) : null}
+            <TouchableOpacity onPress={() => setCoverageExpanded((x) => !x)} style={{ marginTop: 10 }}>
+              <Text style={[styles.linkText, { color: colors.primary }]}>
+                {coverageExpanded ? 'Hide' : 'Show'} week breakdown
+              </Text>
+            </TouchableOpacity>
           </View>
           <View style={styles.coverageRingWrap}>
             <ProgressRing value={shownWeeklyProtected} max={protectedMax} size={104} stroke={10} scheme={scheme} />
           </View>
         </View>
-        {coverageExpanded && breakdownHasData ? (
+        {coverageExpanded ? (
           <View style={styles.breakdownWrap}>
-            {(breakdownQuery.data?.weekly_breakdown || []).map((row) => (
-              <View
-                key={String(row.day)}
-                style={[styles.breakdownRow, { borderColor: colors.border }]}
-              >
-                <Text style={[styles.breakdownDay, { color: colors.text }]}>{row.day}</Text>
+            {breakdownHasData ? (
+              (breakdownQuery.data?.weekly_breakdown || []).map((row) => (
+                <View
+                  key={String(row.day)}
+                  style={[styles.breakdownRow, { borderColor: colors.border }]}
+                >
+                  <Text style={[styles.breakdownDay, { color: colors.text }]}>{row.day}</Text>
+                  <Text style={[styles.breakdownReason, { color: colors.muted }]} numberOfLines={1}>
+                    {row.disruption || '—'}
+                  </Text>
+                  <Text style={[styles.breakdownAmt, { color: colors.text }]}>
+                    ₹{Math.round(Number(row.amount || 0))}
+                  </Text>
+                </View>
+              ))
+            ) : (
+              <View style={[styles.breakdownRow, { borderColor: colors.border }]}>
+                <Text style={[styles.breakdownDay, { color: colors.text }]}>This week</Text>
                 <Text style={[styles.breakdownReason, { color: colors.muted }]} numberOfLines={1}>
-                  {row.disruption || '—'}
+                  No verified payouts yet
                 </Text>
-                <Text style={[styles.breakdownAmt, { color: colors.text }]}>
-                  ₹{Math.round(Number(row.amount || 0))}
-                </Text>
+                <Text style={[styles.breakdownAmt, { color: colors.text }]}>₹0</Text>
               </View>
-            ))}
+            )}
           </View>
         ) : null}
       </View>
@@ -1375,9 +1511,17 @@ export default function DashboardScreen({ navigation }) {
           <View style={styles.cardHeaderRow}>
             <View style={{ flex: 1 }}>
               <Text style={[styles.cardTitle, { color: colors.text }]}>Active claim</Text>
-              <Text style={[styles.cardSub, { color: colors.muted }]} numberOfLines={2}>
-                {lastClaimUpdate?.message ? String(lastClaimUpdate.message) : 'Processing in real-time…'}
-              </Text>
+              {lastClaimUpdate?.message ? (
+                <View style={styles.liveClaimHighlight}>
+                  <Text style={[styles.liveClaimHighlightText, { color: colors.text }]}>
+                    {stripDailyLimitPrefix(lastClaimUpdate.message)}
+                  </Text>
+                </View>
+              ) : (
+                <Text style={[styles.cardSub, { color: colors.muted }]} numberOfLines={2}>
+                  Processing in real-time…
+                </Text>
+              )}
             </View>
             <Text style={[styles.etaText, { color: colors.muted }]}>{etaSeconds ? `${etaSeconds}s` : '—'}</Text>
           </View>
@@ -1392,11 +1536,11 @@ export default function DashboardScreen({ navigation }) {
         </View>
       ) : null}
 
-      {/* Simulate disruption — primary demo CTA */}
-      {!inFlight ? (
+      {/* Simulate disruption - primary demo CTA */}
+      {simulationEnabled && !inFlight ? (
         <View style={styles.simulateBlock}>
           <TouchableOpacity
-            style={[styles.simulateCta, { backgroundColor: colors.primary }]}
+            style={[styles.simulateCta, styles.simulateCtaHighlight, { backgroundColor: colors.primary }]}
             activeOpacity={0.9}
             onPress={() => {
               logButtonTap('simulate_disruption_open');
@@ -1406,10 +1550,10 @@ export default function DashboardScreen({ navigation }) {
               setDisruptionSheetVisible(true);
             }}
           >
-            <Text style={styles.simulateCtaText}>Simulate disruption — watch a live claim end-to-end</Text>
+            <Text style={styles.simulateCtaText}>Simulate disruption - watch a live claim end-to-end</Text>
           </TouchableOpacity>
           <Text style={[styles.simulateCtaHint, { color: colors.muted }]}>
-            Full fraud + payout pipeline — best for judge demos. Use Coverage & Claims tabs for more.
+            Full fraud + payout pipeline - best for judge demos. Use Coverage & Claims tabs for more.
           </Text>
         </View>
       ) : null}
@@ -1429,7 +1573,7 @@ export default function DashboardScreen({ navigation }) {
           </View>
         ) : payouts.length === 0 ? (
           <Text style={[styles.emptyPayouts, { color: colors.muted }]}>
-            {"No disruptions yet — you're all set ✅"}
+            {"No disruptions yet - you're all set ✅"}
           </Text>
         ) : (
           payouts.map((p) => {
@@ -1530,7 +1674,7 @@ export default function DashboardScreen({ navigation }) {
                     <Text style={styles.scenarioEmoji}>{s.emoji}</Text>
                     <View style={{ flex: 1 }}>
                       <Text style={[styles.scenarioTitle, { color: colors.text }]}>
-                        {s.label} {s.value === activeScenario ? '🔴' : '🟢'}
+                        {s.label} 🟢
                       </Text>
                       <Text style={[styles.scenarioHint, { color: colors.muted }]}>{s.hint}</Text>
                     </View>
@@ -1548,9 +1692,17 @@ export default function DashboardScreen({ navigation }) {
             ) : (
               <>
                 <Text style={[styles.cardTitle, { color: colors.text }]}>Live claim</Text>
-                <Text style={[styles.cardSub, { color: colors.muted, marginBottom: 4 }]} numberOfLines={2}>
-                  {lastClaimUpdate?.message || 'Starting…'}
-                </Text>
+                {lastClaimUpdate?.message ? (
+                  <View style={[styles.liveClaimHighlight, { marginBottom: 8 }]}>
+                    <Text style={[styles.liveClaimHighlightText, { color: colors.text }]}>
+                      {stripDailyLimitPrefix(lastClaimUpdate.message)}
+                    </Text>
+                  </View>
+                ) : (
+                  <Text style={[styles.cardSub, { color: colors.muted, marginBottom: 4 }]} numberOfLines={2}>
+                    Starting…
+                  </Text>
+                )}
                 <DemoClaimProgress status={lastClaimUpdate?.status} colors={colors} primary={colors.primary} />
               </>
             )}
@@ -1559,6 +1711,45 @@ export default function DashboardScreen({ navigation }) {
               onPress={() => !simMutation.isPending && setDisruptionSheetVisible(false)}
             >
               <Text style={[styles.linkText, { color: colors.primary }]}>Close</Text>
+            </TouchableOpacity>
+          </Pressable>
+        </Pressable>
+      </AppModal>
+
+      <AppModal
+        visible={langSheetVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setLangSheetVisible(false)}
+      >
+        <Pressable style={styles.modalBackdrop} onPress={() => setLangSheetVisible(false)}>
+          <Pressable style={[styles.modalSheet, { backgroundColor: colors.card, borderColor: colors.border }]} onPress={(e) => e.stopPropagation()}>
+            <Text style={[styles.cardTitle, { color: colors.text, marginBottom: 10 }]}>{t('dashboard.language_picker')}</Text>
+            {[
+              { code: 'en', label: 'English' },
+              { code: 'hi', label: 'हिंदी' },
+              { code: 'te', label: 'తెలుగు' },
+            ].map((lang) => {
+              const active = language === lang.code;
+              return (
+                <TouchableOpacity
+                  key={lang.code}
+                  style={[
+                    styles.scenarioCard,
+                    { borderColor: active ? colors.primary : colors.border, borderWidth: active ? 2 : 1 },
+                  ]}
+                  onPress={() => {
+                    void setLanguage(lang.code);
+                    setLangSheetVisible(false);
+                  }}
+                >
+                  <Text style={[styles.scenarioTitle, { color: colors.text }]}>{lang.label}</Text>
+                  {active ? <Text style={{ color: colors.primary, fontWeight: '800' }}>✓</Text> : null}
+                </TouchableOpacity>
+              );
+            })}
+            <TouchableOpacity style={{ marginTop: 14, alignItems: 'center' }} onPress={() => setLangSheetVisible(false)}>
+              <Text style={[styles.linkText, { color: colors.primary }]}>{t('common.close')}</Text>
             </TouchableOpacity>
           </Pressable>
         </Pressable>
@@ -1625,9 +1816,9 @@ export default function DashboardScreen({ navigation }) {
               {
                 left: Math.max(16, dnaTooltip.x - 140),
                 top: Math.max(120, dnaTooltip.y - 72),
+                pointerEvents: 'box-none',
               },
             ]}
-            pointerEvents="box-none"
           >
             <Text style={styles.dnaTooltipText}>
               {dnaTooltip.dayName} {dnaTooltip.hour} · typical ~₹{dnaTooltip.amount}/hr
@@ -1677,6 +1868,47 @@ const styles = StyleSheet.create({
     lineHeight: 17,
     paddingHorizontal: 4,
   },
+  toastCloseBtn: {
+    position: 'absolute',
+    right: 10,
+    top: 8,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.2)',
+  },
+  toastCloseText: { color: '#fff', fontWeight: '900', fontSize: 12 },
+  bankPromptCard: {
+    backgroundColor: '#fff7ed',
+    borderColor: '#fdba74',
+    borderWidth: 1.5,
+    borderRadius: 14,
+    padding: 12,
+    marginBottom: 12,
+  },
+  bankPromptClose: {
+    position: 'absolute',
+    right: 8,
+    top: 8,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  bankPromptCloseText: { color: '#9a3412', fontWeight: '900' },
+  bankPromptTitle: { color: '#9a3412', fontSize: 13, fontWeight: '800', marginRight: 22 },
+  bankPromptBtn: {
+    marginTop: 10,
+    alignSelf: 'flex-start',
+    backgroundColor: '#ea580c',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  bankPromptBtnText: { color: '#fff', fontWeight: '900', fontSize: 12 },
 
   headerGradient: {
     borderRadius: 20,
@@ -1750,6 +1982,16 @@ const styles = StyleSheet.create({
   },
   liveDisruptionLine: { fontSize: 12, fontWeight: '900', marginTop: 6 },
   headerBadgeRow: { marginTop: 12, flexDirection: 'row', gap: 8, flexWrap: 'wrap', alignItems: 'center' },
+  headerLangBtn: {
+    width: 40,
+    height: 36,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.35)',
+  },
   headerPlanLine: {
     marginTop: 10,
     fontSize: 13,
@@ -1810,7 +2052,17 @@ const styles = StyleSheet.create({
 
   bigMoney: { fontSize: 16, fontWeight: '900' },
   breakdownWrap: { marginTop: 12 },
-  breakdownRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 10, borderBottomWidth: 1 },
+  breakdownRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 11,
+    borderBottomWidth: 1,
+    backgroundColor: 'rgba(255,255,255,0.02)',
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    marginBottom: 4,
+  },
   breakdownDay: { width: 42, fontWeight: '900' },
   breakdownReason: { flex: 1, paddingHorizontal: 10 },
   breakdownAmt: { width: 70, textAlign: 'right', fontWeight: '900' },
@@ -1964,6 +2216,14 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 6 },
     elevation: 6,
   },
+  simulateCtaHighlight: {
+    borderWidth: 2,
+    borderColor: '#fbbf24',
+    shadowColor: '#fbbf24',
+    shadowOpacity: 0.5,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 0 },
+  },
   simulateCtaText: { color: '#fff', fontSize: 16, fontWeight: '900', textAlign: 'center', lineHeight: 22 },
 
   scenarioCard: {
@@ -1979,6 +2239,20 @@ const styles = StyleSheet.create({
   scenarioTitle: { fontSize: 15, fontWeight: '900' },
   scenarioHint: { fontSize: 12, marginTop: 2 },
 
+  liveClaimHighlight: {
+    marginTop: 6,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    backgroundColor: 'rgba(37, 99, 235, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(37, 99, 235, 0.35)',
+  },
+  liveClaimHighlightText: {
+    fontSize: 14,
+    lineHeight: 21,
+    fontWeight: '700',
+  },
   celebrationBackdrop: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.55)',
@@ -2038,4 +2312,3 @@ const styles = StyleSheet.create({
   },
   paymentDetailBtnText: { color: '#fff', fontWeight: '900', fontSize: 13 },
 });
-

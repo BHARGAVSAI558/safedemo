@@ -102,6 +102,7 @@ async def publish_claim_update(
     payout_breakdown: Optional[Any] = None,
     disruption_hours: Optional[float] = None,
     daily_coverage: Optional[float] = None,
+    payout_countdown_seconds: Optional[int] = None,
 ) -> None:
     channel_personal = f"claim_updates:{worker_id}"
     payload_data: Dict[str, Any] = {
@@ -124,6 +125,8 @@ async def publish_claim_update(
         payload_data["disruption_hours"] = disruption_hours
     if daily_coverage is not None:
         payload_data["daily_coverage"] = daily_coverage
+    if payout_countdown_seconds is not None:
+        payload_data["payout_countdown_seconds"] = int(payout_countdown_seconds)
     payload = _event_envelope("CLAIM_UPDATE", payload_data, correlation_id=correlation_id)
 
     ok_personal = await _redis_publish_safe(redis, channel_personal, payload)

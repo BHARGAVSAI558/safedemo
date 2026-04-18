@@ -1,4 +1,5 @@
-import React, { createContext, useCallback, useContext, useMemo, useReducer } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useReducer } from 'react';
+import { registerClaimResetHandler } from '../services/claimResetBridge';
 
 const ClaimContext = createContext(null);
 
@@ -50,7 +51,14 @@ function reducer(state, action) {
 
       let nextPayoutHistory = state.payoutHistory;
       const payoutAmount = claimUpdate?.payout_amount ?? claimUpdate?.payoutAmount ?? null;
-      if (claimId && payoutAmount !== null && payoutAmount !== undefined) {
+      const stRaw = String(status || '');
+      const payoutHistoryStatuses = new Set(['PAYOUT_CREDITED', 'PAYOUT_DONE', 'APPROVED']);
+      if (
+        claimId &&
+        payoutAmount !== null &&
+        payoutAmount !== undefined &&
+        payoutHistoryStatuses.has(stRaw)
+      ) {
         const entry = {
           id: claimId,
           claim_id: claimId,
@@ -115,6 +123,11 @@ export function ClaimProvider({ children }) {
   const resetClaims = useCallback(() => {
     dispatch({ type: 'RESET' });
   }, []);
+
+  useEffect(() => {
+    registerClaimResetHandler(resetClaims);
+    return () => registerClaimResetHandler(null);
+  }, [resetClaims]);
 
   const value = useMemo(
     () => ({

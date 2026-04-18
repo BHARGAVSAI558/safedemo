@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -25,3 +25,16 @@ class FraudSignal(Base):
 
     user: Mapped["User"] = relationship("User", back_populates="fraud_signals")
     simulation: Mapped["Simulation"] = relationship("Simulation", back_populates="fraud_signals")
+
+
+class FraudFlag(Base):
+    """Human-readable fraud flag attached to a specific claim/worker."""
+    __tablename__ = "fraud_flags"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), index=True, nullable=False)
+    simulation_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("simulations.id"), nullable=True)
+    flag_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    # repeated_claim / timing_anomaly / location_mismatch / ring_detection
+    flag_detail: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now())

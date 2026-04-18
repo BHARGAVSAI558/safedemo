@@ -1,0 +1,412 @@
+SAFENET BACKEND — COMPLETE END-TO-END FLOWS
+============================================
+
+FLOW 1: WORKER ONBOARDING → POLICY ACTIVATION
+──────────────────────────────────────────────
+
+1. Worker registers via POST /api/v1/auth/register
+   ├─ Creates User row (is_active=True)
+   ├─ Creates Profile row (zone_id, city, risk_profile)
+   └─ Returns JWT token
+
+2. Worker creates policy via POST /api/v1/policies/create
+   ├─ Validates active profile exists
+   ├─ Creates Policy row (status="active", valid_until=now+30 days)
+   ├─ Calculates premium via PremiumEngine.calculate()
+   │  └─ XGBoost model trained on historical claims
+   ├─ Creates PaymentRecord (status="pending")
+   └─ Returns policy details
+
+3. Worker initiates payment via POST /api/v1/payments/initiate
+   ├─ Calls Razorpay test mode API
+   ├─ Creates Order in Razorpay
+   ├─ Returns order_id + payment link
+   └─ Worker completes payment (test mode shows OTP on screen)
+
+4. Payment webhook received via POST /api/v1/payments/webhook
+   ├─ Verifies Razorpay signature
+   ├─ Updates PaymentRecord (status="completed")
+   ├─ Updates Policy (status="active")
+   ├─ Creates PoolContribution row (premium added to zone pool)
+   └─ Publishes POOL_UPDATE event to admin feed
+
+5. Worker now eligible for claims
+   ├─ Appears in scheduler's _get_eligible_workers() query
+   ├─ Can receive disruption alerts
+   └─ Can file claims when disruptions occur
+
+
+FLOW 2: DISRUPTION DETECTION → CLAIMS PIPELINE → PAYOUT
+────────────────────────────────────────────────────────
+
+SCHEDULER TRIGGER (every 30 min, 6 AM–11 PM IST):
+  disruption_scan() job runs
+  └─ For each zone in DB:
+     ├─ Calls check_disruptions_for_zone(zone)
+     │  ├─ Fetches live weather (Open-Meteo API)
+     │  │  └─ Temperature, precipitation
+     │  ├─ Fetches live AQI (OpenAQ API)
+     │  │  └─ PM2.5 value
+     │  ├─ Queries admin-managed social events (curfew/strike)
+     │  ├─ Evaluates thresholds:
+     │  │  ├─ Rain: > 15 mm/hr
+     │  │  ├─ Heat: > 42°C
+     │  │  ├─ AQI: PM2.5 > 300
+     │  │  └─ Social: curfew/strike/zone_closure
+     │  ├─ Computes weighted confidence score
+     │  ├─ Creates/updates DisruptionEvent rows
+     │  └─ Returns list of active events
+     │
+     ├─ If confidence = HIGH:
+     │  └─ For each DisruptionEvent:
+     │     └─ Calls initiate_claims_for_disruption(event)
+     │        │
+     │        ├─ STEP 1: Get eligible workers
+     │        │  └─ Query: User.is_active=True + Policy.status="active" + same zone
+     │        │
+     │        ├─ STEP 2: For each eligible worker:
+     │        │  │
+     │        │  ├─ Check for duplicate claim (prevent double-payout)
+     │        │  │  └─ Query: Simulation where user_id + disruption_event_id
+     │        │  │
+     │        │  ├─ STEP 3: Calculate disruption duration
+     │        │  │  └─ hours = (event.ended_at - event.started_at) / 3600
+     │        │  │     (clamped 0.5–12 hours)
+     │        │  │
+     │        │  ├─ STEP 4: Calculate payout
+     │        │  │  └─ PayoutEngine.compute_db_payout()
+     │        │  │     ├─ Fetches worker's Earnings DNA (7×24 matrix)
+     │        │  │     ├─ Gets hourly earning rate for disruption time
+     │        │  │     ├─ Multiplies by disruption_hours
+     │        │  │     ├─ Applies severity factor (0.3–1.0)
+     │        │  │     ├─ Applies pool factor (based on zone pool health)
+     │        │  │     ├─ Applies zone risk factor
+     │        │  │     ├─ Caps at policy tier maximum
+     │        │  │     └─ Returns payout_amount + breakdown
+     │        │  │
+     │        │  ├─ STEP 5: Fraud check (4-layer engine)
+     │        │  │  └─ check_fraud()
+     │        │  │     ├─ LAYER 4: Enrollment timing anomaly
+     │        │  │     │  └─ Did multiple workers sign up before this storm?
+     │        │  │     ├─ LAYER 1: GPS signal integrity
+     │        │  │     │  ├─ Teleportation check (3km in 20 sec?)
+     │        │  │     │  ├─ Static spoof (GPS variance = 0?)
+     │        │  │     │  └─ Cell tower mismatch
+     │        │  │     ├─ LAYER 2: Cross-signal corroboration
+     │        │  │     │  ├─ S1: GPS inside disrupted zone?
+     │        │  │     │  ├─ S2: Weather/AQI APIs confirm disruption?
+     │        │  │     │  ├─ S3: App activity low/absent?
+     │        │  │     │  ├─ S4: Platform order volume dropped?
+     │        │  │     │  └─ 3/4 agree = APPROVE, 2/4 = FLAG, 1/4 = BLOCK\n     │        │  │     └─ LAYER 3: Fraud ring detection\n     │        │  │        ├─ Zone density spike (8+ flagged in 1 hour?)\n     │        │  │        ├─ Timestamp sync (5+ within 3 min?)\n     │        │  │        └─ Pattern homogeneity (identical inactivity?)\n     │        │  │\n     │        │  ├─ STEP 6: Status decision\n     │        │  │  ├─ fraud_score < 0.3 → APPROVED\n     │        │  │  ├─ fraud_score 0.3–0.6 → REVIEW (held, not paid yet)\n     │        │  │  └─ fraud_score > 0.6 → REJECTED\n     │        │  │\n     │        │  ├─ STEP 7: Store Simulation row\n     │        │  │  ├─ user_id, disruption_event_id, decision, payout\n     │        │  │  ├─ fraud_score, fraud_flag\n     │        │  │  ├─ expected_income, actual_income, loss\n     │        │  │  └─ reason (human-readable)\n     │        │  │\n     │        │  ├─ STEP 8: Link fraud rows\n     │        │  │  ├─ FraudFlag (flag_type, flag_detail)\n     │        │  │  └─ FraudSignal (score, reason_code)\n     │        │  │\n     │        │  ├─ STEP 9: Disburse payout (if approved)\n     │        │  │  ├─ Check pool balance (don't exceed available)\n     │        │  │  ├─ Create PayoutRecord\n     │        │  │  ├─ Call Razorpay test mode (best-effort)\n     │        │  │  ├─ Update pool balance\n     │        │  │  └─ Publish PAYOUT_CREDITED event\n     │        │  │\n     │        │  ├─ STEP 10: Update trust score\n     │        │  │  ├─ Approved + clean (fraud_score < 0.1) → +6 points\n     │        │  │  ├─ Approved + medium (fraud_score 0.1–0.3) → +3 points\n     │        │  │  ├─ Review → +2 points\n     │        │  │  └─ Rejected → -18 points\n     │        │  │\n     │        │  ├─ Update ClaimLifecycle row\n     │        │  │  └─ status = PAYOUT / REVALIDATING / CLAIM_REJECTED\n     │        │  │\n     │        │  └─ Publish CLAIM_UPDATE event\n     │        │     └─ Sent to worker's WebSocket + admin feed\n     │        │\n     │        └─ Return results list\n     │
+     └─ Publish DISRUPTION_DETECTED event to admin feed
+        └─ Admin sees zone event in real-time
+
+
+WEBSOCKET NOTIFICATIONS (real-time):
+
+Worker receives on /ws/claims/{worker_id}:
+  ├─ CLAIM_UPDATE
+  │  ├─ status: INITIATED → VERIFYING → FRAUD_CHECK → DECISION → PAYOUT
+  │  ├─ message: human-readable status
+  │  ├─ payout_amount: ₹ credited (if approved)
+  │  └─ fraud_score: 0.0–1.0
+  │
+  ├─ DISRUPTION_ALERT
+  │  ├─ zone_id, disruption_type
+  │  └─ affected_workers: [worker_ids]
+  │
+  └─ PAYOUT_CREDITED
+     ├─ claim_id, payout_amount
+     └─ message: "✅ ₹{amount} credited — disruption verified"
+
+Admin receives on /ws/admin/feed (multiplexed):
+  ├─ all_claims_feed
+  │  └─ All CLAIM_UPDATE + PAYOUT_CREDITED events
+  │
+  ├─ fraud_alerts
+  │  └─ FRAUD_ALERT (fraud ring detected)
+  │
+  ├─ zone_events
+  │  ├─ DISRUPTION_DETECTED
+  │  ├─ DISRUPTION_CLEARED
+  │  ├─ REINSURANCE_TRIGGER (pool utilization > 80%)
+  │  └─ ADMIN_JOB_ALERT (scheduler job failed)
+  │
+  └─ pool_health
+     └─ POOL_UPDATE (balance, utilization_pct, risk_level)
+
+
+FLOW 3: ADMIN CREATES SOCIAL EVENT (CURFEW/STRIKE)
+───────────────────────────────────────────────────
+
+1. Admin creates event via POST /api/v1/admin/events/create
+   ├─ Validates admin JWT
+   ├─ Creates DisruptionEvent row
+   │  ├─ disruption_type = "curfew" / "strike" / "zone_closure"
+   │  ├─ zone_id, started_at, ended_at
+   │  ├─ is_active = True
+   │  └─ severity = 1.0 (admin-managed, always high)
+   │
+   ├─ Publishes ZONE_EVENT to admin feed
+   └─ Returns event details
+
+2. Next disruption_scan job run (within 30 min):
+   ├─ Detects active social event
+   ├─ Includes in confidence score calculation
+   ├─ Triggers claims pipeline (same as FLOW 2)
+   └─ Workers in zone receive claims + payouts
+
+3. Admin ends event via POST /api/v1/admin/events/{event_id}/end
+   ├─ Sets is_active = False
+   ├─ Sets ended_at = now
+   ├─ Publishes DISRUPTION_CLEARED event
+   └─ Next scan won't trigger new claims
+
+
+FLOW 4: STALE CLAIM RESOLVER (every 5 minutes)
+───────────────────────────────────────────────
+
+1. Query ClaimLifecycle rows stuck in REVALIDATING > 2 hours
+   ├─ Auto-approve them
+   ├─ Publish CLAIM_UPDATE (APPROVED)
+   └─ Trigger payout
+
+2. Query Simulation rows with decision=REJECTED + created < 2 hours ago
+   ├─ Check if flagged (fraud payload in weather_data)
+   ├─ Check if strong fraud evidence exists
+   │  └─ Query FraudSignal where score >= FRAUD_THRESHOLD
+   │
+   ├─ If no strong evidence:
+   │  ├─ Auto-approve
+   │  ├─ Create PayoutRecord
+   │  ├─ Update trust score
+   │  ├─ Publish CLAIM_UPDATE (APPROVED)
+   │  └─ Publish PAYOUT_CREDITED
+   │
+   └─ If strong evidence: leave as REJECTED
+
+
+FLOW 5: PREMIUM RECALCULATION (every Monday 00:00 IST)
+──────────────────────────────────────────────────────
+
+1. For each active user:
+   ├─ Fetch last 7 days of claims
+   ├─ Calculate new premium via PremiumEngine.calculate()
+   │  └─ XGBoost model considers:
+   │     ├─ Claims count
+   │     ├─ Fraud flags
+   │     ├─ Trust score
+   │     ├─ Zone risk tier
+   │     └─ Tenure (days since signup)
+   │
+   ├─ Update Policy.weekly_premium
+   ├─ Send push notification
+   └─ Log update
+
+2. Premium deducted from worker's account (test mode: simulated)
+
+
+FLOW 6: POOL HEALTH AUDIT (every Sunday 23:59 IST)
+──────────────────────────────────────────────────
+
+1. For each zone:
+   ├─ Aggregate payouts from this week
+   ├─ Load or create ZonePoolBalance snapshot
+   │  ├─ pool_balance_start_of_week (baseline)
+   │  ├─ total_payouts_this_week
+   │  ├─ utilization_pct = payouts / balance * 100
+   │  └─ flagged_reinsurance = utilization_pct > 80%
+   │
+   ├─ If utilization > 80%:
+   │  ├─ Publish REINSURANCE_TRIGGER event
+   │  └─ Alert admin (pool needs top-up)
+   │
+   └─ Store snapshot for historical tracking
+
+
+FLOW 7: TRUST SCORE UPDATE (daily 02:00 IST)
+─────────────────────────────────────────────
+
+1. For each active user:
+   ├─ Check if policy active for > 7 days
+   ├─ Count rejected claims in last 7 days
+   │
+   ├─ If policy active + no rejections:
+   │  └─ +0.02 trust (max 1.0)
+   │
+   ├─ Check last activity (last claim)
+   ├─ If inactive > 14 days:
+   │  └─ -0.01 trust (min 0.5)
+   │
+   └─ Update Profile.trust_score
+
+
+FLOW 8: FORECAST SHIELD (every 6 hours + startup)
+──────────────────────────────────────────────────
+
+1. Fetch 48-hour forecast from OpenWeatherMap
+   ├─ For each zone
+   ├─ Identify rain risk windows
+   └─ Store in app.state.forecast_shields
+
+2. Used by Forecast Shield feature:
+   ├─ If rain predicted in next 24 hours
+   ├─ Auto-upgrade worker's coverage tier
+   ├─ No extra cost to worker
+   └─ Notify worker: "Forecast Shield Active"
+
+3. When disruption occurs during predicted window:
+   ├─ Payout calculated at upgraded tier
+   ├─ Message: "SafeNet predicted this risk 18 hours ago"
+   └─ Higher payout than base tier
+
+
+FLOW 9: WEATHER ALERT NOTIFIER (daily 07:10 IST)
+─────────────────────────────────────────────────
+
+1. Check forecast shields for rain risk
+2. For each worker in affected zone:
+   ├─ Create Notification row
+   ├─ Send push notification
+   └─ Message: "Heavy rain expected tomorrow. Stay prepared."
+
+
+DATABASE SCHEMA CONNECTIONS
+────────────────────────────
+
+User
+  ├─ 1:1 → Profile (user_id)
+  ├─ 1:N → Policy (user_id)
+  ├─ 1:N → Simulation (user_id)
+  ├─ 1:N → ClaimLifecycle (user_id)
+  ├─ 1:N → FraudFlag (user_id)
+  ├─ 1:N → FraudSignal (user_id)
+  └─ 1:N → PaymentRecord (user_id)
+
+Policy
+  ├─ N:1 → User (user_id)
+  └─ 1:N → Simulation (policy_id)
+
+DisruptionEvent
+  ├─ 1:N → Simulation (disruption_event_id)
+  └─ 1:N → ClaimLifecycle (disruption_event_id)
+
+Simulation
+  ├─ N:1 → User (user_id)
+  ├─ N:1 → DisruptionEvent (disruption_event_id)
+  ├─ N:1 → Policy (policy_id)
+  ├─ 1:N → PayoutRecord (simulation_id)
+  ├─ 1:N → FraudFlag (simulation_id)
+  └─ 1:N → FraudSignal (simulation_id)
+
+PayoutRecord
+  ├─ N:1 → Simulation (simulation_id)
+  └─ N:1 → User (user_id)
+
+FraudFlag
+  ├─ N:1 → User (user_id)
+  └─ N:1 → Simulation (simulation_id)
+
+FraudSignal
+  ├─ N:1 → User (user_id)
+  └─ N:1 → Simulation (simulation_id)
+
+ClaimLifecycle
+  ├─ N:1 → User (user_id)
+  └─ N:1 → DisruptionEvent (disruption_event_id)
+
+ZonePoolBalance
+  └─ Tracks weekly pool health per zone
+
+
+REDIS CHANNELS (pub/sub)
+────────────────────────
+
+Worker channels:
+  claim_updates:{worker_id}
+    └─ CLAIM_UPDATE, DISRUPTION_ALERT, PAYOUT_CREDITED
+
+Admin channels:
+  all_claims_feed
+    └─ All claim updates + payouts
+  fraud_alerts
+    └─ Fraud ring detections
+  zone_events
+    └─ Disruption detected/cleared, reinsurance triggers, job alerts
+  pool_health
+    └─ Pool balance updates
+
+
+EXTERNAL API INTEGRATIONS
+──────────────────────────
+
+OpenWeatherMap (weather):
+  ├─ Endpoint: https://api.open-meteo.com/v1/forecast
+  ├─ Called by: disruption_scan, forecast_shield_job
+  ├─ Data: temperature, precipitation
+  └─ Fallback: safe zeros on failure
+
+OpenAQ (air quality):
+  ├─ Endpoint: https://api.openaq.org/v2/latest
+  ├─ Called by: disruption_scan
+  ├─ Data: PM2.5 value
+  └─ Fallback: 0.0 on failure
+
+Razorpay (payments):
+  ├─ Endpoint: https://api.razorpay.com/v1/orders
+  ├─ Called by: claims_engine (payout disbursement)
+  ├─ Mode: test (no real money)
+  └─ Fallback: payment_status = "pending" on failure
+
+
+MONITORING & OBSERVABILITY
+────────────────────────────
+
+Structured logging:
+  ├─ All jobs log start/end with reason_code
+  ├─ All errors logged with full traceback
+  ├─ Request timing logged (method, path, duration_ms)
+  └─ Correlation IDs for tracing events
+
+Health check:
+  ├─ GET /health
+  ├─ Returns: database, redis, mongodb, scheduler status
+  └─ Overall status: healthy / degraded / unhealthy
+
+Demo status:
+  ├─ GET /api/v1/demo/status
+  ├─ Returns: workers_registered, claims_processed, approval_rate, fraud_blocked
+  └─ Public endpoint (no auth)
+
+Rate limiting:
+  ├─ 100 requests/minute per IP
+  ├─ Returns 429 if exceeded
+  └─ In-memory tracking (per-instance)
+
+
+DEPLOYMENT CHECKLIST
+─────────────────────
+
+✓ Database: PostgreSQL or SQLite (async driver)
+✓ Redis: Optional (falls back to in-process event bus)
+✓ MongoDB: Optional (for fraud signal storage)
+✓ Environment variables:
+  ├─ JWT_SECRET
+  ├─ ADMIN_JWT_SECRET
+  ├─ OPENWEATHER_API_KEY (optional, uses free tier)
+  ├─ OPENAQ_API_KEY (optional, uses free tier)
+  ├─ RAZORPAY_KEY_ID + RAZORPAY_KEY_SECRET (test mode)
+  ├─ DATABASE_URL
+  ├─ REDIS_URL (optional)
+  └─ MONGODB_URI (optional)
+
+✓ Start backend:
+  python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+✓ Verify:
+  curl http://localhost:8000/health
+  curl http://localhost:8000/api/v1/demo/status
+
+✓ Connect WebSocket:
+  ws://localhost:8000/ws/claims/{worker_id}?token={jwt}
+  ws://localhost:8000/ws/admin/feed?token={admin_jwt}

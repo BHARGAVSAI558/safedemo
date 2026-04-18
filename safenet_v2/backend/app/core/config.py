@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import List, Optional
 
-from pydantic import AliasChoices, Field, computed_field
+from pydantic import AliasChoices, Field, computed_field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,12 +15,21 @@ class Settings(BaseSettings):
     APP_NAME: str = "SafeNet"
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = False
-    DEMO_MODE: bool = True
+    DEMO_MODE: bool = False
 
     # Comma-separated origins for browser clients (admin Vite = http://localhost:5173).
     # On Render, set e.g. ALLOWED_ORIGINS=http://localhost:5173,https://your-admin.example.com
     # Use * alone to allow any origin (no credentials).
-    ALLOWED_ORIGINS: str = "*"
+    ALLOWED_ORIGINS: str = (
+        "http://localhost:3000,"
+        "http://localhost:5173,"
+        "http://localhost:8081,"
+        "http://127.0.0.1:3000,"
+        "http://127.0.0.1:5173,"
+        "http://127.0.0.1:8081,"
+        "exp://127.0.0.1:8081,"
+        "exp://localhost:8081"
+    )
 
     # SQLite fallback so the app starts without a Postgres instance
     DATABASE_URL: str = "sqlite+aiosqlite:///./safenet.db"
@@ -34,7 +43,7 @@ class Settings(BaseSettings):
     )
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(
-        default=240,
+        default=1440,  # 24 hours
         validation_alias=AliasChoices("ACCESS_TOKEN_EXPIRE_MINUTES", "JWT_EXPIRY_MINUTES"),
     )
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
@@ -62,9 +71,11 @@ class Settings(BaseSettings):
     WEATHERAPI_KEY: str = ""
     OPENAQ_API_KEY: str = ""
     OPENAQ_LOCATION_ID: str = ""
+    OPENAI_API_KEY: str = ""
 
     RAZORPAY_KEY_ID: str = ""
     RAZORPAY_KEY_SECRET: str = ""
+    RAZORPAY_WEBHOOK_SECRET: str = Field(default="", validation_alias=AliasChoices("RAZORPAY_WEBHOOK_SECRET", "RZP_WEBHOOK_SECRET"))
 
     FIREBASE_CREDENTIALS_PATH: str = ""
 
@@ -72,6 +83,19 @@ class Settings(BaseSettings):
     MONGODB_URI: Optional[str] = None
     MONGODB_DB_NAME: str = "safenet"
     GOVERNMENT_ALERTS_SEED_PATH: str = ""
+    ADMIN_API_KEY: str = Field(default="", validation_alias=AliasChoices("ADMIN_API_KEY", "ADMIN_KEY"))
+
+    @field_validator("DEBUG", "DEMO_MODE", mode="before")
+    @classmethod
+    def _parse_boolish(cls, value: object) -> bool:
+        if isinstance(value, bool):
+            return value
+        raw = str(value or "").strip().lower()
+        if raw in {"1", "true", "yes", "on", "debug", "development", "dev"}:
+            return True
+        if raw in {"0", "false", "no", "off", "release", "prod", "production", ""}:
+            return False
+        return bool(value)
 
     @computed_field
     @property

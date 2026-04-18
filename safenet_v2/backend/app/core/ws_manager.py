@@ -15,6 +15,12 @@ class ConnectionManager:
         self._connections: Dict[int, WebSocket] = {}
 
     async def connect(self, worker_id: int, websocket: WebSocket) -> None:
+        existing: Optional[WebSocket] = self._connections.get(worker_id)
+        if existing is not None:
+            try:
+                await existing.close(code=1001)
+            except Exception:
+                pass
         await websocket.accept()
         self._connections[worker_id] = websocket
 

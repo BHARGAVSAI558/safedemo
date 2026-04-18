@@ -14,8 +14,12 @@ class ZonePoolBalance(Base):
     zone_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
     week_start: Mapped[DateTime] = mapped_column(DateTime(timezone=True), index=True, nullable=False)
     pool_balance_start_of_week: Mapped[float] = mapped_column(Float, default=0.0)
+    total_premiums_collected: Mapped[float] = mapped_column(Float, default=0.0)
     total_payouts_this_week: Mapped[float] = mapped_column(Float, default=0.0)
+    total_payouts_disbursed: Mapped[float] = mapped_column(Float, default=0.0)
+    current_balance: Mapped[float] = mapped_column(Float, default=0.0)
     utilization_pct: Mapped[float] = mapped_column(Float, default=0.0)
+    loss_ratio: Mapped[float] = mapped_column(Float, default=0.0)  # payouts / premiums
     flagged_reinsurance: Mapped[bool] = mapped_column(default=False)
     risk_note: Mapped[str] = mapped_column(String(256), default="")
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now())

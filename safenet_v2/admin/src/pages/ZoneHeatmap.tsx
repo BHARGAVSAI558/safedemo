@@ -1,6 +1,6 @@
 import React, { useMemo, useState, type CSSProperties } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { GeoJSON, MapContainer, Popup, TileLayer } from 'react-leaflet';
+import { CircleMarker, GeoJSON, MapContainer, Popup, TileLayer } from 'react-leaflet';
 import type { FeatureCollection } from 'geojson';
 import 'leaflet/dist/leaflet.css';
 
@@ -9,9 +9,15 @@ import { adminUi } from '../theme/adminUi';
 import { useZoneEventsStore } from '../stores/zoneEvents';
 
 type ZoneSummary = {
-  zone_id: string;
+  zone_id: string | number;
+  city_code?: string;
+  zone_name?: string;
   city: string;
+  lat?: number;
+  lng?: number;
   active_workers: number;
+  claims_count?: number;
+  avg_payout?: number;
   pool_balance: number;
   utilization_pct: number;
   last_disruption: string;
@@ -23,36 +29,80 @@ export default function ZoneHeatmap() {
   const [showAqi, setShowAqi] = useState(true);
   const [showFraudClusters, setShowFraudClusters] = useState(true);
   const zoneEvents = useZoneEventsStore((s) => s.latestByZone);
+  const [center, setCenter] = useState<[number, number]>([20.5937, 78.9629]);
+  const [zoom, setZoom] = useState(5);
 
   const geoQuery = useQuery({
     queryKey: ['admin', 'zones', 'geojson'],
-    queryFn: async (): Promise<FeatureCollection> => (await api.get('/admin/zones/geojson')).data,
+    queryFn: async (): Promise<FeatureCollection> => {
+      try {
+        const res = await api.get('/admin/zones/geojson');
+        return res.data as FeatureCollection;
+      } catch (err) {
+        console.error('GeoJSON fetch failed:', err);
+        return { type: 'FeatureCollection', features: [] };
+      }
+    },
+    retry: 1,
   });
 
   const summaryQuery = useQuery({
     queryKey: ['admin', 'zones', 'summary'],
-    queryFn: async (): Promise<ZoneSummary[]> => (await api.get('/admin/zones/summary')).data,
+    queryFn: async (): Promise<ZoneSummary[]> => {
+      try {
+        const res = await api.get('/admin/zones/summary');
+        return Array.isArray(res.data) ? res.data : [];
+      } catch (err) {
+        console.error('Zone summary fetch failed:', err);
+        return [];
+      }
+    },
     refetchInterval: 30_000,
+    retry: 1,
   });
 
   const summaryByZone = useMemo(() => {
-    const by: Record<string, ZoneSummary> = {};
-    for (const row of summaryQuery.data ?? []) by[row.zone_id] = row;
-    return by;
+    try {
+      const by: Record<string, ZoneSummary> = {};
+      const data = Array.isArray(summaryQuery.data) ? summaryQuery.data : [];
+      for (const row of data) by[String(row.zone_id)] = row;
+      return by;
+    } catch {
+      return {};
+    }
   }, [summaryQuery.data]);
 
   const fillForFeature = (feature: { properties?: Record<string, unknown> }) => {
-    const p = feature?.properties ?? {};
-    const risk = String(p.risk_level ?? '').toUpperCase();
-    if (risk === 'HIGH') return '#dc2626';
-    if (risk === 'MEDIUM') return '#d97706';
-    if (risk === 'LOW') return '#16a34a';
-    const cc = Number(p.claim_count ?? summaryByZone[String(p.zone_id)]?.claim_density_per_hr ?? 0);
-    const util = Number(p.utilization_pct ?? summaryByZone[String(p.zone_id)]?.utilization_pct ?? 0);
-    if (util >= 80 || cc >= 8) return '#dc2626';
-    if (util >= 55 || cc >= 3) return '#d97706';
-    return '#16a34a';
+    try {
+      const p = feature?.properties ?? {};
+      const risk = String(p.risk_level ?? '').toUpperCase();
+      if (risk === 'HIGH') return '#dc2626';
+      if (risk === 'MEDIUM') return '#d97706';
+      if (risk === 'LOW') return '#16a34a';
+      const cc = Number(p.claim_count ?? summaryByZone[String(p.zone_id)]?.claim_density_per_hr ?? 0);
+      const util = Number(p.utilization_pct ?? summaryByZone[String(p.zone_id)]?.utilization_pct ?? 0);
+      if (util >= 80 || cc >= 8) return '#dc2626';
+      if (util >= 55 || cc >= 3) return '#d97706';
+      return '#16a34a';
+    } catch {
+      return '#16a34a';
+    }
   };
+
+  React.useEffect(() => {
+    if (!navigator.geolocation) return;
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setCenter([pos.coords.latitude, pos.coords.longitude]);
+        setZoom(7);
+      },
+      () => {
+        setCenter([20.5937, 78.9629]);
+        setZoom(5);
+      },
+      { enableHighAccuracy: true, timeout: 5000 }
+    );
+  }, []);
 
   if (geoQuery.isLoading || summaryQuery.isLoading) {
     return (
@@ -110,7 +160,7 @@ export default function ZoneHeatmap() {
           boxShadow: 'var(--admin-shadow-sm)',
         }}
       >
-        <MapContainer center={[17.385, 78.4867]} zoom={10} style={{ height: '100%', width: '100%' }} scrollWheelZoom>
+        <MapContainer center={center} zoom={zoom} style={{ height: '100%', width: '100%' }} scrollWheelZoom>
           <TileLayer attribution="&copy; OpenStreetMap contributors" url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
           <GeoJSON
             data={geoQuery.data as object}
@@ -141,6 +191,32 @@ export default function ZoneHeatmap() {
               );
             }}
           />
+          {summaryQuery.data?.map((zone) => {
+            const zLat = Number(zone.lat ?? 0);
+            const zLng = Number(zone.lng ?? 0);
+            if (!Number.isFinite(zLat) || !Number.isFinite(zLng) || (zLat === 0 && zLng === 0)) return null;
+            const risk = String((zone as any).risk_level ?? '').toUpperCase();
+            const color = risk === 'HIGH' ? '#dc2626' : risk === 'MEDIUM' ? '#d97706' : '#16a34a';
+            const workers = Number(zone.active_workers ?? 0);
+            const radius = Math.max(6, Math.min(24, 6 + workers * 1.3));
+            return (
+              <CircleMarker
+                key={String(zone.city_code ?? zone.zone_id)}
+                center={[zLat, zLng]}
+                radius={radius}
+                pathOptions={{ color, fillColor: color, fillOpacity: 0.45, weight: 2 }}
+              >
+                <Popup>
+                  <div style={{ fontSize: 13, lineHeight: 1.5 }}>
+                    <div style={{ fontWeight: 800 }}>{zone.zone_name ?? zone.city ?? zone.city_code}</div>
+                    <div>Workers: <b>{workers}</b></div>
+                    <div>Claims: <b>{Number((zone as any).claims_count ?? 0)}</b></div>
+                    <div>Avg payout: <b>₹{Number((zone as any).avg_payout ?? 0).toFixed(0)}</b></div>
+                  </div>
+                </Popup>
+              </CircleMarker>
+            );
+          })}
         </MapContainer>
       </div>
     </div>

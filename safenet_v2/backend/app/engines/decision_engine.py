@@ -16,7 +16,6 @@ from app.engines.premium_engine import PremiumEngine
 from app.engines.trust_engine import TrustEngine
 from app.models.claim import DecisionType, Log, Simulation
 from app.models.fraud import FraudSignal
-from app.models.payout import PayoutRecord
 from app.models.worker import Profile, User
 from app.schemas.claim import DisruptionData, SimulationRequest, SimulationResponse
 from app.services.event_service import TrafficService, default_event_signals
@@ -164,6 +163,9 @@ class DecisionEngine:
 
         reason_code = "DECISION"
         publish_status = "REJECTED"
+        disruption_hours: float = 1.0
+        severity: float = 0.5
+        payout_breakdown: dict[str, Any] = {}
 
         if fraud_blocked:
             decision = DecisionType.FRAUD
@@ -192,8 +194,15 @@ class DecisionEngine:
         else:
             decision = DecisionType.APPROVED
             reason = f"Payout approved — {', '.join(disruption_reasons)}"
-            payout, reason_code = PayoutEngine.compute(loss, profile.trust_score)
+            avg_daily = max(50.0, float(profile.avg_daily_income or 600.0))
+            hourly_proxy = avg_daily / 8.0
+            disruption_hours = round(loss / hourly_proxy, 2) if hourly_proxy > 0 else 1.0
+            disruption_hours = max(0.5, min(12.0, disruption_hours))
+            severity = max(0.1, min(1.0, conf.score))
             publish_status = "APPROVED"
+            reason_code = "PAYOUT_DB_FORMULA"
+            # payout computed after flush (needs sim.id) — set placeholder
+            payout = 0.0
 
         log.info(
             "decision_final",
@@ -246,8 +255,19 @@ class DecisionEngine:
 
         if decision == DecisionType.APPROVED:
             profile.total_claims = int(profile.total_claims) + 1
+            payout, payout_breakdown, reason_code = await PayoutEngine.compute_db_payout(
+                db=db,
+                user_id=user_id,
+                profile=profile,
+                zone_id=zone_id,
+                disruption_hours=disruption_hours,
+                severity=severity,
+                simulation_id=sim.id,
+                disruption_type=conf.disruption_type,
+                correlation_id=correlation_id,
+            )
+            sim.payout = payout
             profile.total_payouts = float(profile.total_payouts) + payout
-            db.add(PayoutRecord(simulation_id=sim.id, amount=payout, currency="INR", status="completed"))
 
         TrustEngine.penalize_fraud(profile, fraud_score, FRAUD_THRESHOLD)
 

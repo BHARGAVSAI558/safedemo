@@ -9,11 +9,12 @@ class GigProfileUpsert(BaseModel):
     platform: str = Field(..., min_length=1, max_length=32)
     city: str = Field(default="Hyderabad", max_length=100)
     zone_id: str = Field(..., min_length=1, max_length=64)
+    location_display: str | None = Field(default=None, max_length=255)
     avg_daily_income: float = Field(..., gt=0)
     working_hours_preset: str = Field(..., min_length=1, max_length=64)
     coverage_tier: Literal["Basic", "Standard", "Pro"]
 
-    @field_validator("name", "platform", "city", "zone_id", "working_hours_preset")
+    @field_validator("name", "platform", "city", "zone_id", "working_hours_preset", "location_display")
     @classmethod
     def sanitize(cls, v: str) -> str:
         s = (v or "").strip()
@@ -35,6 +36,7 @@ class GigProfileResponse(BaseModel):
     working_hours_preset: str
     name: str
     city: str
+    location_display: str | None = None
 
 
 class ProfileBootstrapResponse(BaseModel):
@@ -46,6 +48,7 @@ class ProfileBootstrapResponse(BaseModel):
     city: str | None = None
     zone_id: str | None = None
     platform: str | None = None
+    location_display: str | None = None
     avg_daily_income: float = 650.0
     trust_score: float = 50.0
     is_profile_complete: bool = False

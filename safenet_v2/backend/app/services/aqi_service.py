@@ -168,10 +168,57 @@ class AQIService(AQIServiceProtocol):
                 )
         return None, None
 
-    async def get_aqi(self, city: str, zone_id: str) -> AQIFetchResult:
-        return await self.fetch_aqi(city, zone_id)
+    async def _open_meteo_fetch(
+        self,
+        client: httpx.AsyncClient,
+        lat: float,
+        lon: float,
+    ) -> Tuple[Optional[float], Optional[float]]:
+        url = "https://air-quality-api.open-meteo.com/v1/air-quality"
+        r = await client.get(
+            url,
+            params={
+                "latitude": lat,
+                "longitude": lon,
+                "hourly": "pm2_5,pm10",
+                "timezone": "auto",
+                "forecast_days": 1,
+            },
+        )
+        if r.status_code != 200:
+            return None, None
+        data = r.json()
+        hourly = data.get("hourly") or {}
+        pm25_arr = hourly.get("pm2_5") or []
+        pm10_arr = hourly.get("pm10") or []
+        pm25 = None
+        pm10 = None
+        for v in reversed(pm25_arr):
+            if isinstance(v, (int, float)):
+                pm25 = float(v)
+                break
+        for v in reversed(pm10_arr):
+            if isinstance(v, (int, float)):
+                pm10 = float(v)
+                break
+        return pm25, pm10
 
-    async def fetch_aqi(self, city: str, zone_id: str) -> AQIFetchResult:
+    async def get_aqi(
+        self,
+        city: str,
+        zone_id: str,
+        lat: Optional[float] = None,
+        lon: Optional[float] = None,
+    ) -> AQIFetchResult:
+        return await self.fetch_aqi(city, zone_id, lat=lat, lon=lon)
+
+    async def fetch_aqi(
+        self,
+        city: str,
+        zone_id: str,
+        lat: Optional[float] = None,
+        lon: Optional[float] = None,
+    ) -> AQIFetchResult:
         ck = _cache_key(city, zone_id)
         cached, _ttl = await self._cache_get(ck)
         if cached and cached.get("kind") == "aqi":
@@ -206,6 +253,29 @@ class AQIService(AQIServiceProtocol):
                     engine_name="aqi_service",
                     decision="mock",
                     reason_code="OPENAQ_ERROR",
+                    error=str(exc),
+                )
+
+        # Real AQI by coordinates (and nearby fallback) without API key.
+        if (pm25 is None and pm10 is None) and lat is not None and lon is not None:
+            try:
+                if self._http is not None:
+                    pm25, pm10 = await self._open_meteo_fetch(self._http, float(lat), float(lon))
+                    if pm25 is None and pm10 is None:
+                        pm25, pm10 = await self._open_meteo_fetch(self._http, float(lat) + 0.08, float(lon) + 0.08)
+                else:
+                    async with httpx.AsyncClient(timeout=self._timeout()) as c:
+                        pm25, pm10 = await self._open_meteo_fetch(c, float(lat), float(lon))
+                        if pm25 is None and pm10 is None:
+                            pm25, pm10 = await self._open_meteo_fetch(c, float(lat) + 0.08, float(lon) + 0.08)
+                if pm25 is not None or pm10 is not None:
+                    source = "open-meteo"
+            except Exception as exc:
+                log.info(
+                    "open_meteo_aqi_failed",
+                    engine_name="aqi_service",
+                    decision="fallback",
+                    reason_code="OPEN_METEO_ERROR",
                     error=str(exc),
                 )
 

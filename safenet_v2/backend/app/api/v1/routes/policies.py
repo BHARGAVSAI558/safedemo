@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.routes.workers import get_current_user
 from app.db.session import get_db
+from app.engines.pool_engine import calculate_weekly_premium, update_pool_on_premium
 from app.engines.premium_engine import PremiumEngine
 from app.models.policy import Policy
 from app.models.pool_balance import ZonePoolBalance
@@ -172,6 +173,12 @@ async def build_policy_current(
         pool_balance=pool_balance,
         pool_utilization_pct=pool_util,
         policy_id=pol.id,
+        premium_breakdown={
+            "base_tier_premium": TIER_LIST_WEEKLY.get(tier, 49.0),
+            "zone_risk_multiplier": round(float(pol.zone_risk_multiplier or 1.0), 4),
+            "worker_adjustment": round(float(pol.worker_risk_adjustment or 1.0), 4),
+            "final_premium": round(float(pol.weekly_premium or 0.0), 2),
+        },
     )
 
 
@@ -208,6 +215,34 @@ async def list_policies(
     return rows
 
 
+@router.get("/quote")
+async def get_premium_quote(
+    worker_id: int,
+    tier: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Premium quote endpoint for mobile onboarding/policy flow.
+    """
+    if worker_id != current_user.id:
+        raise HTTPException(status_code=403, detail="worker_id does not match JWT")
+    normalized_tier = str(tier or "").strip().title()
+    if normalized_tier not in {"Basic", "Standard", "Pro"}:
+        raise HTTPException(status_code=422, detail="Invalid tier")
+    calc = await calculate_weekly_premium(db, worker_id, normalized_tier)
+    return {
+        "worker_id": worker_id,
+        "tier": normalized_tier,
+        "base": calc["base"],
+        "zone_multiplier": calc["zone_risk_multiplier"],
+        "worker_adjustment": calc["worker_adjustment"],
+        "final_premium": calc["weekly_premium"],
+        "weekly_premium": calc["weekly_premium"],
+        "coverage_cap": calc["coverage_cap"],
+    }
+
+
 @router.post("/activate", response_model=PolicyActivatedFullResponse, status_code=201)
 async def activate_policy(
     request: Request,
@@ -224,14 +259,23 @@ async def activate_policy(
     if not product_code:
         raise HTTPException(status_code=422, detail="Invalid tier")
 
+    # Update zone_id on profile if provided (onboarding flow)
+    if body.zone_id and body.zone_id.strip():
+        prof.zone_id = body.zone_id.strip()
+
     zone_key = normalize_zone(prof.zone_id or "other")
     hours = (prof.working_hours_preset or "flexible").strip()
     platform = (prof.platform or "other").strip()
     risk_score = compute_risk_score(zone_key, hours, platform)
-    # Keep plan pricing synced with selected tier card values in app/web.
-    weekly = float(TIER_LIST_WEEKLY.get(tier, compute_weekly_premium(zone_key, hours, tier)))
+
+    # Use pool_engine for actuarially-grounded premium + coverage cap
+    premium_calc = await calculate_weekly_premium(db, current_user.id, tier)
+    weekly = premium_calc["weekly_premium"]
+    coverage_cap = premium_calc["coverage_cap"]
+    zone_risk_multiplier = premium_calc["zone_risk_multiplier"]
+    worker_risk_adjustment = premium_calc["worker_adjustment"]
     monthly = round(weekly * 4.33, 2)
-    max_day = TIER_MAX_DAILY.get(tier, 500.0)
+    max_day = TIER_MAX_DAILY.get(tier, coverage_cap)
 
     now = datetime.now(timezone.utc)
     valid_until_dt = now + timedelta(days=7)
@@ -251,8 +295,12 @@ async def activate_policy(
 
     if existing:
         existing.product_code = product_code
+        existing.tier = tier
         existing.weekly_premium = weekly
         existing.monthly_premium = monthly
+        existing.coverage_cap = coverage_cap
+        existing.zone_risk_multiplier = zone_risk_multiplier
+        existing.worker_risk_adjustment = worker_risk_adjustment
         existing.status = "active"
         existing.valid_from = now
         existing.valid_until = valid_until_dt
@@ -262,9 +310,13 @@ async def activate_policy(
         pol = Policy(
             user_id=current_user.id,
             product_code=product_code,
+            tier=tier,
             status="active",
             monthly_premium=monthly,
             weekly_premium=weekly,
+            coverage_cap=coverage_cap,
+            zone_risk_multiplier=zone_risk_multiplier,
+            worker_risk_adjustment=worker_risk_adjustment,
             valid_from=now,
             valid_until=valid_until_dt,
             updated_at=now,
@@ -273,6 +325,19 @@ async def activate_policy(
 
     await db.commit()
     await db.refresh(pol)
+
+    # Record premium in zone pool
+    zone_id_for_pool = (prof.zone_id or zone_key).strip()
+    try:
+        await update_pool_on_premium(db, zone_id_for_pool, weekly)
+    except Exception as _pool_exc:
+        log.warning(
+            "pool_premium_update_failed",
+            engine_name="policies_route",
+            reason_code="POOL_UPDATE_FAIL",
+            error=str(_pool_exc),
+            worker_id=current_user.id,
+        )
     await cache_invalidate(getattr(request.app.state, "redis", None), f"policy_active:{current_user.id}")
     await cache_invalidate(getattr(request.app.state, "redis", None), f"trust:{current_user.id}")
 
@@ -305,6 +370,12 @@ async def activate_policy(
         city=(prof.city or "Hyderabad").strip(),
         name=(prof.name or "Worker").strip(),
         trust_level="Newcomer",
+        premium_breakdown={
+            "base_tier_premium": TIER_LIST_WEEKLY.get(tier, 49.0),
+            "zone_risk_multiplier": round(zone_risk_multiplier, 4),
+            "worker_adjustment": round(worker_risk_adjustment, 4),
+            "final_premium": round(weekly, 2),
+        },
     )
 
 
@@ -321,20 +392,42 @@ async def create_policy(
         raise HTTPException(status_code=400, detail="Create a worker profile before adding a policy")
 
     premium, _ = PremiumEngine.monthly_premium(profile)
-    calc = await PremiumEngine.calculate(current_user.id, db=db, profile=profile, user=current_user)
-    weekly = float(calc.get("weekly_premium") or 35.0)
+    tier = _product_to_tier(body.product_code)
+    calc = await calculate_weekly_premium(db, current_user.id, tier)
+    weekly = float(calc["weekly_premium"])
+    coverage_cap = float(calc["coverage_cap"])
+    zone_risk_multiplier = float(calc["zone_risk_multiplier"])
+    worker_risk_adjustment = float(calc["worker_adjustment"])
     now = datetime.now(timezone.utc)
     policy = Policy(
         user_id=current_user.id,
         product_code=body.product_code,
+        tier=tier,
         status="active",
         monthly_premium=premium,
         weekly_premium=weekly,
+        coverage_cap=coverage_cap,
+        zone_risk_multiplier=zone_risk_multiplier,
+        worker_risk_adjustment=worker_risk_adjustment,
+        valid_from=now,
+        valid_until=now + timedelta(days=7),
         updated_at=now,
     )
     db.add(policy)
     await db.commit()
     await db.refresh(policy)
+
+    zone_id_for_pool = (profile.zone_id or "other").strip()
+    try:
+        await update_pool_on_premium(db, zone_id_for_pool, weekly)
+    except Exception as _pool_exc:
+        log.warning(
+            "pool_premium_update_failed",
+            engine_name="policies_route",
+            reason_code="POOL_UPDATE_FAIL",
+            error=str(_pool_exc),
+            worker_id=current_user.id,
+        )
     await cache_invalidate(getattr(request.app.state, "redis", None), f"policy_active:{current_user.id}")
     log.info(
         "policy_created",

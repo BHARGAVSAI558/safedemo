@@ -24,8 +24,17 @@ export default function Simulations() {
 
   const simulationsQuery = useQuery({
     queryKey: ['admin', 'simulations'],
-    queryFn: async () => (await api.get('/admin/simulations?limit=100')).data,
+    queryFn: async () => {
+      try {
+        const res = await api.get('/admin/simulations?limit=100');
+        return Array.isArray(res.data) ? res.data : [];
+      } catch (err) {
+        console.error('Simulations fetch failed:', err);
+        return [];
+      }
+    },
     refetchInterval: 20_000,
+    retry: 1,
   });
 
   const runSimulation = async () => {
@@ -43,7 +52,7 @@ export default function Simulations() {
     }
   };
 
-  const sims = useMemo(() => simulationsQuery.data ?? [], [simulationsQuery.data]);
+  const sims = useMemo(() => Array.isArray(simulationsQuery.data) ? simulationsQuery.data : [], [simulationsQuery.data]);
 
   return (
     <div style={adminUi.page}>
@@ -108,45 +117,49 @@ export default function Simulations() {
             </tr>
           </thead>
           <tbody>
-            {sims.map((s: { id: number; transaction_id?: string; user_id: number; decision: string; payout: number; fraud_score: number; reason?: string; created_at: string }) => (
-              <tr key={s.id}>
-                <td style={adminUi.td}>{s.id}</td>
-                <td style={adminUi.td}>{s.transaction_id || fallbackTxn(s.id)}</td>
-                <td style={adminUi.td}>{s.user_id}</td>
-                <td style={adminUi.td}>
-                  <span
-                    style={{
-                      fontSize: '0.75rem',
-                      fontWeight: 700,
-                      padding: '4px 8px',
-                      borderRadius: 6,
-                      background:
-                        String(s.decision).toUpperCase().includes('APPROV')
-                          ? 'rgba(22, 163, 74, 0.14)'
-                          : String(s.decision).toUpperCase().includes('FRAUD')
-                            ? 'rgba(220, 38, 38, 0.12)'
-                            : 'var(--admin-bg-subtle)',
-                      color:
-                        String(s.decision).toUpperCase().includes('APPROV')
-                          ? '#15803d'
-                          : String(s.decision).toUpperCase().includes('FRAUD')
-                            ? '#b91c1c'
-                            : 'var(--admin-text)',
-                    }}
-                  >
-                    {s.decision}
-                  </span>
-                </td>
-                <td style={adminUi.td}>₹{Number(s.payout).toFixed(0)}</td>
-                <td style={adminUi.td}>{Number(s.fraud_score).toFixed(2)}</td>
-                <td style={adminUi.td}>{String(s.reason || '—')}</td>
-                <td style={{ ...adminUi.td, whiteSpace: 'nowrap' }}>{formatIstDateTime(s.created_at)}</td>
-              </tr>
-            ))}
+            {sims.map((s: { id: number; transaction_id?: string; user_id: number; decision: string; payout: number; fraud_score: number; reason?: string; created_at: string }) => {
+              const payout = Number(s.payout ?? 0);
+              const fraud = Number(s.fraud_score ?? 0);
+              return (
+                <tr key={s.id}>
+                  <td style={adminUi.td}>{s.id}</td>
+                  <td style={adminUi.td}>{s.transaction_id || fallbackTxn(s.id)}</td>
+                  <td style={adminUi.td}>{s.user_id}</td>
+                  <td style={adminUi.td}>
+                    <span
+                      style={{
+                        fontSize: '0.75rem',
+                        fontWeight: 700,
+                        padding: '4px 8px',
+                        borderRadius: 6,
+                        background:
+                          String(s.decision).toUpperCase().includes('APPROV')
+                            ? 'rgba(22, 163, 74, 0.14)'
+                            : String(s.decision).toUpperCase().includes('FRAUD')
+                              ? 'rgba(220, 38, 38, 0.12)'
+                              : 'var(--admin-bg-subtle)',
+                        color:
+                          String(s.decision).toUpperCase().includes('APPROV')
+                            ? '#15803d'
+                            : String(s.decision).toUpperCase().includes('FRAUD')
+                              ? '#b91c1c'
+                              : 'var(--admin-text)',
+                      }}
+                    >
+                      {s.decision}
+                    </span>
+                  </td>
+                  <td style={adminUi.td}>₹{Number.isFinite(payout) ? payout.toFixed(0) : '0'}</td>
+                  <td style={adminUi.td}>{Number.isFinite(fraud) ? fraud.toFixed(2) : '0.00'}</td>
+                  <td style={adminUi.td}>{String(s.reason || '—')}</td>
+                  <td style={{ ...adminUi.td, whiteSpace: 'nowrap' }}>{formatIstDateTime(s.created_at)}</td>
+                </tr>
+              );
+            })}
             {sims.length === 0 ? (
               <tr>
                 <td colSpan={8} style={adminUi.td}>
-                  <div style={adminUi.empty}>No simulations yet.</div>
+                  <div style={adminUi.empty}>{simulationsQuery.isLoading ? 'Loading simulations...' : 'No simulations yet.'}</div>
                 </td>
               </tr>
             ) : null}

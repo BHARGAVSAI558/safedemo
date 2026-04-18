@@ -5,8 +5,6 @@ import json
 import traceback
 import uuid
 from datetime import datetime, timedelta, timezone
-from hashlib import sha256
-from types import SimpleNamespace
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -16,15 +14,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.routes.workers import get_current_user
 from app.db.session import AsyncSessionLocal, get_db
+from app.engines.fraud_engine_claims import check_fraud
 from app.engines.payout_engine import PayoutEngine
 from app.models.claim import DecisionType, Log, Simulation
-from app.models.fraud import FraudSignal
+from app.models.fraud import FraudFlag, FraudSignal
 from app.models.payout import PayoutRecord
 from app.models.policy import Policy
 from app.models.worker import Profile, User
 from app.services.forecast_shield_service import payout_message_suffix
 from app.services.notification_service import create_notification
 from app.services.onboarding_pricing import TIER_MAX_DAILY as ONBOARDING_TIER_MAX_DAILY
+from app.engines.trust_payout import payout_delay_seconds, trust_points_from_profile
 from app.services.realtime_service import publish_claim_update
 from app.utils.logger import get_logger
 
@@ -34,6 +34,20 @@ router = APIRouter()
 
 TIER_MAX_DAILY: dict[str, float] = dict(ONBOARDING_TIER_MAX_DAILY)
 
+_SCENARIO_HOURS: dict[str, float] = {
+    "HEAVY_RAIN": 5.0,
+    "EXTREME_HEAT": 4.0,
+    "AQI_SPIKE": 4.0,
+    "CURFEW": 6.0,
+}
+
+_SCENARIO_SEVERITY: dict[str, float] = {
+    "HEAVY_RAIN": 0.85,
+    "EXTREME_HEAT": 0.75,
+    "AQI_SPIKE": 0.70,
+    "CURFEW": 0.90,
+}
+
 
 def _product_to_tier(product_code: str | None) -> str:
     if not product_code:
@@ -41,8 +55,6 @@ def _product_to_tier(product_code: str | None) -> str:
     low = str(product_code).lower()
     if "basic" in low:
         return "Basic"
-    if "standard" in low:
-        return "Standard"
     if "pro" in low:
         return "Pro"
     return "Standard"
@@ -80,49 +92,6 @@ def _approved_message(scenario: str, payout: float) -> str:
     return f"₹{p} credited — curfew disruption verified in your zone"
 
 
-def _deterministic_demo_payout(expected_slot: float, daily_cap: float, scenario: str, cycle_idx: int) -> float:
-    """
-    Demo payout tuned for "realistic" judge feel:
-    pay ~70%–80% of what a rider would normally earn during the disruption hours.
-    Deterministic across repeated demo runs (no random payouts).
-    """
-    scenario_hours = {
-        "HEAVY_RAIN": 5.0,
-        "EXTREME_HEAT": 4.0,
-        "AQI_SPIKE": 4.0,
-        "CURFEW": 6.0,
-    }.get(scenario, 4.0)
-
-    # 70–80% target (deterministic across the 2-payout / 1-no-disruption cadence).
-    target_frac = [0.72, 0.76, 0.80][cycle_idx % 3]
-
-    expected_total = float(expected_slot) * float(scenario_hours)
-    amt = expected_total * float(target_frac)
-    amt = min(float(daily_cap), max(0.0, amt))
-    return round(amt, 2)
-
-
-def _active_scenario_now(user_id: int, now_utc: datetime) -> str:
-    """
-    Exactly one active disruption at a time (IST-hour based) so UI can show one red dot.
-    """
-    ist = now_utc.astimezone(timezone(timedelta(hours=5, minutes=30)))
-    all_scenarios = ["HEAVY_RAIN", "EXTREME_HEAT", "AQI_SPIKE", "CURFEW"]
-    idx = (int(user_id) * 17 + int(ist.timetuple().tm_yday) + int(ist.hour)) % len(all_scenarios)
-    return all_scenarios[idx]
-
-
-def _deterministic_target_fraction(user_id: int, scenario: str, now_utc: datetime) -> float:
-    """
-    Stable payout fraction (70%–80%) per user+scenario+IST day.
-    Removes random feel while still varying day-to-day.
-    """
-    ist_day = now_utc.astimezone(timezone(timedelta(hours=5, minutes=30))).strftime("%Y-%m-%d")
-    seed = f"{user_id}:{scenario}:{ist_day}".encode("utf-8")
-    v = int(sha256(seed).hexdigest()[:2], 16) % 3
-    return [0.72, 0.76, 0.80][v]
-
-
 class SimulationRunRequest(BaseModel):
     scenario: Literal["HEAVY_RAIN", "EXTREME_HEAT", "AQI_SPIKE", "CURFEW"]
     zone_id: str = Field(default="", max_length=128)
@@ -136,33 +105,27 @@ class SimulationStartedResponse(BaseModel):
     simulation_id: str
 
 
-async def _demo_claim_pipeline(
+async def _sim_pipeline(
     app: Any,
     body: SimulationRunRequest,
     run_id: str,
     worker_id: int,
 ) -> None:
     redis = getattr(app.state, "redis", None)
-    step_delay = 0.9 if body.fast_mode else 1.0
+    step_delay = 0.9 if body.fast_mode else 1.2
 
     try:
         async with AsyncSessionLocal() as db:
             prof_row = (
                 await db.execute(select(Profile).where(Profile.user_id == worker_id))
             ).scalar_one_or_none()
+
             zone_id = (body.zone_id or "").strip()
             if not zone_id and prof_row and (prof_row.zone_id or "").strip():
                 zone_id = prof_row.zone_id.strip()
             if not zone_id:
                 zone_id = "hyd_central"
             zone_label = _zone_label(zone_id)
-
-            profile = prof_row or SimpleNamespace(
-                city="Hyderabad",
-                avg_daily_income=650.0,
-                total_claims=0,
-                total_payouts=0.0,
-            )
 
             pol = (
                 await db.execute(
@@ -173,36 +136,16 @@ async def _demo_claim_pipeline(
                 )
             ).scalar_one_or_none()
             tier = _product_to_tier(pol.product_code if pol else None)
-            daily_cap = float(TIER_MAX_DAILY.get(tier, 1000.0))
+            daily_cap = float(TIER_MAX_DAILY.get(tier, 700.0))
 
-            sims_for_dna = (
-                (
-                    await db.execute(
-                        select(Simulation)
-                        .where(Simulation.user_id == worker_id)
-                        .order_by(Simulation.created_at.desc())
-                        .limit(800)
-                    )
-                )
-                .scalars()
-                .all()
-            )
-
-            payout, breakdown, expected_slot = PayoutEngine.compute_demo_dna_payout(
-                body.scenario,
-                profile,
-                daily_cap,
-                sims_for_dna,
-            )
+            # ── Duplicate guard: same scenario already approved today ──────────
+            ist_offset = timezone(timedelta(hours=5, minutes=30))
             now_utc = datetime.now(timezone.utc)
-            active_scenario = _active_scenario_now(worker_id, now_utc)
-            scenario_allowed_today = body.scenario == active_scenario
-
-            # Block duplicate payout for same disruption type within the same IST day.
-            start_ist = now_utc.astimezone(timezone(timedelta(hours=5, minutes=30))).replace(
+            start_ist = now_utc.astimezone(ist_offset).replace(
                 hour=0, minute=0, second=0, microsecond=0
             )
             start_utc = start_ist.astimezone(timezone.utc)
+
             approved_today = (
                 await db.execute(
                     select(Simulation)
@@ -212,82 +155,139 @@ async def _demo_claim_pipeline(
                         Simulation.created_at >= start_utc,
                     )
                     .order_by(Simulation.created_at.desc())
-                    .limit(40)
+                    .limit(20)
                 )
             ).scalars().all()
-            already_paid_this_disruption = False
+
+            approved_scenarios: set[str] = set()
             for s in approved_today:
                 try:
                     wd = json.loads(s.weather_data) if isinstance(s.weather_data, str) and s.weather_data else {}
                 except Exception:
                     wd = {}
-                if str(wd.get("scenario") or "").upper() == body.scenario:
-                    already_paid_this_disruption = True
-                    break
+                sc = str((wd or {}).get("scenario") or "").upper().strip()
+                if sc:
+                    approved_scenarios.add(sc)
+            same_disruption_already_paid = body.scenario in approved_scenarios
+            already_paid = len(approved_today) > 0
 
-            # Deterministic rule: 2 disruption types are eligible per day; same disruption can't pay twice/day.
-            no_disruption_this_run = (not scenario_allowed_today) or already_paid_this_disruption
-            scenario_hours = {
-                "HEAVY_RAIN": 5.0,
-                "EXTREME_HEAT": 4.0,
-                "AQI_SPIKE": 4.0,
-                "CURFEW": 6.0,
-            }.get(body.scenario, 4.0)
-            scenario_day_impact = {
-                "HEAVY_RAIN": 0.95,
-                "EXTREME_HEAT": 0.80,
-                "AQI_SPIKE": 0.75,
-                "CURFEW": 1.00,
-            }.get(body.scenario, 0.8)
-            # Stable 70–80% target; deterministic by user+scenario+day.
-            target_frac = _deterministic_target_fraction(worker_id, body.scenario, now_utc)
+            # ── Payout calculation via real engine ────────────────────────────
+            disruption_hours = _SCENARIO_HOURS.get(body.scenario, 4.0)
+            severity = _SCENARIO_SEVERITY.get(body.scenario, 0.75)
+            disruption_start = datetime.now(timezone.utc)
 
-            avg_daily_income = float(getattr(profile, "avg_daily_income", 650.0) or 650.0)
-            slot_estimate = float(expected_slot) * float(scenario_hours)
-            daily_impact_estimate = avg_daily_income * float(scenario_day_impact)
-            # Keep payout believable for judges: use higher of slot estimate vs daily impact estimate.
-            expected_total = round(max(slot_estimate, daily_impact_estimate), 2)
-            payout_total = round(min(float(daily_cap), expected_total * float(target_frac)), 2)
-            payout = payout_total
-            loss_total = expected_total  # disruption hours → rider income drops to ~0
-            actual_income_total = 0.0
+            if prof_row is not None:
+                payout_amount, breakdown, _ = await PayoutEngine.compute_db_payout(
+                    db=db,
+                    user_id=worker_id,
+                    profile=prof_row,
+                    zone_id=zone_id,
+                    disruption_hours=disruption_hours,
+                    severity=severity,
+                    simulation_id=None,
+                    disruption_start=disruption_start,
+                    disruption_type=body.scenario,
+                    correlation_id=run_id,
+                )
+            else:
+                payout_amount = 0.0
+                breakdown = {"final_payout": 0.0, "expected_loss": 0.0}
 
-            # Keep payload fields consistent with the new payout math so UI + admin match.
-            breakdown["expected"] = expected_total
-            breakdown["loss"] = loss_total
-            breakdown["disruption_hours"] = scenario_hours
-            breakdown["target_frac"] = target_frac
+            expected_loss = float(breakdown.get("expected_loss", 0.0))
 
-            weather_payload = {"scenario": body.scenario, "zone_id": zone_id, "run_id": run_id}
+            # ── Fraud check ───────────────────────────────────────────────────
+            fraud_score = 0.0
+            fraud_flags: list[tuple[str, str]] = []
+            if prof_row is not None and pol is not None:
+                fraud_score, fraud_flags = await check_fraud(
+                    db=db,
+                    user_id=worker_id,
+                    zone_id=zone_id,
+                    policy=pol,
+                    profile=prof_row,
+                )
+
+            fraud_flag_sim = body.fraud_mode != "NONE" or fraud_score >= 0.6
+
+            no_payout = already_paid or fraud_flag_sim
+            if no_payout:
+                payout_amount = 0.0
+                decision = DecisionType.REJECTED
+                if already_paid:
+                    if same_disruption_already_paid:
+                        reason = f"{body.scenario.replace('_', ' ').title()} already simulated and paid today. Try again tomorrow."
+                    elif body.scenario == "AQI_SPIKE":
+                        reason = (
+                            "AQI is currently in the safer / moderate band — no extra payout on this run. "
+                            "Check back when air quality spikes into the hazardous range for your zone."
+                        )
+                    elif body.scenario == "HEAVY_RAIN":
+                        reason = (
+                            "Rain intensity is not in the severe band needed for another payout window right now."
+                        )
+                    elif body.scenario == "EXTREME_HEAT":
+                        reason = (
+                            "Heat stress is not in the extreme band needed for another payout on this run."
+                        )
+                    else:
+                        reason = "Payout for this scenario was already credited today. Next eligible window starts tomorrow."
+                else:
+                    reason = f"Claim rejected — fraud score {fraud_score:.2f}"
+            else:
+                decision = DecisionType.APPROVED
+                reason = f"Payout approved — {body.scenario.replace('_', ' ').lower()} disruption ({disruption_hours:.0f}h)"
+
+            temp_c = 33.0
+            if body.scenario == "EXTREME_HEAT":
+                temp_c = 41.0
+            elif body.scenario == "HEAVY_RAIN":
+                temp_c = 28.0
+            elif body.scenario == "AQI_SPIKE":
+                temp_c = 34.0
+            wx_label = body.scenario.replace("_", " ").lower()
+            weather_display = (
+                f"Weather: OpenWeatherMap ({temp_c:.0f}C, {wx_label} confirmed)"
+            )
+            aqi_display = "AQI: OpenAQ / Open-Meteo (zone corroboration)"
+            try:
+                from app.services.aqi_service import AQIService
+                from app.services.signal_types import AQISignal
+
+                city_nm = (prof_row.city if prof_row else "Hyderabad") or "Hyderabad"
+                res = await AQIService(redis=redis).fetch_aqi(city_nm, zone_id)
+                if isinstance(res, AQISignal):
+                    aqi_display = (
+                        f"AQI: OpenAQ / Open-Meteo (AQI {int(round(res.aqi_value))}, {res.category})"
+                    )
+            except Exception:
+                pass
+
+            weather_payload: dict[str, Any] = {
+                "scenario": body.scenario,
+                "zone_id": zone_id,
+                "run_id": run_id,
+                "breakdown": breakdown if isinstance(breakdown, dict) else {},
+                "weather_display": weather_display,
+                "aqi_display": aqi_display,
+                "disruption_start": disruption_start.isoformat(),
+                "disruption_hours": disruption_hours,
+            }
 
             sim = Simulation(
                 user_id=worker_id,
                 is_active=False,
-                fraud_flag=False,
-                fraud_score=0.1,
+                fraud_flag=fraud_flag_sim,
+                fraud_score=fraud_score,
                 weather_disruption=body.scenario in ("HEAVY_RAIN", "EXTREME_HEAT"),
                 traffic_disruption=False,
                 event_disruption=body.scenario == "CURFEW",
-                final_disruption=not no_disruption_this_run,
-                expected_income=float(expected_total),
-                actual_income=float(actual_income_total),
-                loss=float(loss_total),
-                payout=0.0 if no_disruption_this_run else float(payout_total),
-                decision=DecisionType.REJECTED if no_disruption_this_run else DecisionType.APPROVED,
-                reason=(
-                    (
-                        f"Already paid today for {body.scenario.replace('_', ' ').title()} in your zone"
-                        if already_paid_this_disruption
-                        else (
-                            f"No verified {body.scenario.replace('_', ' ').lower()} disruption in {zone_label} right now"
-                            + f". Active disruption now: {active_scenario.replace('_', ' ').title()}"
-                            if not scenario_allowed_today
-                            else f"No live disruption found in {zone_label} during this check"
-                        )
-                    )
-                    if no_disruption_this_run
-                    else f"Demo approved — {body.scenario}"
-                ),
+                final_disruption=not no_payout,
+                expected_income=expected_loss,
+                actual_income=0.0,
+                loss=expected_loss,
+                payout=payout_amount,
+                decision=decision,
+                reason=reason,
                 weather_data=json.dumps(weather_payload),
             )
             db.add(sim)
@@ -295,6 +295,45 @@ async def _demo_claim_pipeline(
             await db.refresh(sim)
             cid = sim.id
 
+            # Persist PayoutRecord + pool update now that sim.id is known
+            if not no_payout and payout_amount > 0:
+                db.add(PayoutRecord(
+                    simulation_id=cid,
+                    amount=payout_amount,
+                    currency="INR",
+                    payment_type="payout",
+                    status="completed",
+                ))
+                from app.engines.pool_engine import update_pool_on_payout
+                await update_pool_on_payout(db, zone_id, payout_amount)
+
+            # Persist fraud signals
+            for flag_type, flag_detail in fraud_flags:
+                db.add(FraudFlag(
+                    user_id=worker_id,
+                    simulation_id=cid,
+                    flag_type=flag_type,
+                    flag_detail=flag_detail,
+                ))
+            db.add(FraudSignal(
+                user_id=worker_id,
+                simulation_id=cid,
+                score=fraud_score,
+                reason_code="SIM_PIPELINE",
+                detail="; ".join(f[0] for f in fraud_flags) or "clean",
+            ))
+            db.add(Log(
+                user_id=worker_id,
+                event_type="simulation_run",
+                detail=f"decision={decision.value} payout={payout_amount} run={run_id}",
+            ))
+
+            if prof_row is not None:
+                prof_row.total_claims = int(prof_row.total_claims or 0) + 1
+                if not no_payout:
+                    prof_row.total_payouts = float(prof_row.total_payouts or 0.0) + payout_amount
+
+            # ── WebSocket progress steps ──────────────────────────────────────
             await publish_claim_update(
                 redis=redis,
                 worker_id=worker_id,
@@ -306,172 +345,108 @@ async def _demo_claim_pipeline(
                 correlation_id=run_id,
             )
             await asyncio.sleep(step_delay)
-            await create_notification(
-                db,
-                user_id=worker_id,
-                ntype="system",
-                title="Claim under review",
-                message="Your disruption claim entered verification.",
+
+            await publish_claim_update(
+                redis=redis,
+                worker_id=worker_id,
+                claim_id=cid,
+                status="VERIFYING",
+                message="Verifying disruption signals...",
+                zone_id=zone_id,
+                disruption_type=body.scenario,
+                correlation_id=run_id,
             )
+            await asyncio.sleep(step_delay)
 
-            if not body.fast_mode:
-                await publish_claim_update(
-                    redis=redis,
-                    worker_id=worker_id,
-                    claim_id=cid,
-                    status="VERIFYING",
-                    message="Checking OpenWeatherMap signal...",
-                    zone_id=zone_id,
-                    disruption_type=body.scenario,
-                    correlation_id=run_id,
-                )
-                await asyncio.sleep(step_delay)
-            else:
-                # Demo timing: keep payout realistic (not instant) so users can see progress in 3-4s.
-                await publish_claim_update(
-                    redis=redis,
-                    worker_id=worker_id,
-                    claim_id=cid,
-                    status="VERIFYING",
-                    message="Verifying disruption signals...",
-                    zone_id=zone_id,
-                    disruption_type=body.scenario,
-                    correlation_id=run_id,
-                )
-                await asyncio.sleep(step_delay)
-                await publish_claim_update(
-                    redis=redis,
-                    worker_id=worker_id,
-                    claim_id=cid,
-                    status="FRAUD_CHECK",
-                    message="Running safety checks...",
-                    zone_id=zone_id,
-                    disruption_type=body.scenario,
-                    correlation_id=run_id,
-                    fraud_score=0.1,
-                )
-                await asyncio.sleep(step_delay)
-                await asyncio.sleep(1.2)
+            await publish_claim_update(
+                redis=redis,
+                worker_id=worker_id,
+                claim_id=cid,
+                status="FRAUD_CHECK",
+                message="Running safety checks...",
+                zone_id=zone_id,
+                disruption_type=body.scenario,
+                correlation_id=run_id,
+                fraud_score=fraud_score,
+            )
+            await asyncio.sleep(step_delay)
 
-                await publish_claim_update(
-                    redis=redis,
-                    worker_id=worker_id,
-                    claim_id=cid,
-                    status="BEHAVIORAL_CHECK",
-                    message="Analyzing your activity pattern...",
-                    zone_id=zone_id,
-                    disruption_type=body.scenario,
-                    correlation_id=run_id,
-                )
-                await asyncio.sleep(step_delay)
-
-                await publish_claim_update(
-                    redis=redis,
-                    worker_id=worker_id,
-                    claim_id=cid,
-                    status="FRAUD_CHECK",
-                    message="GPS integrity verified ✓",
-                    zone_id=zone_id,
-                    disruption_type=body.scenario,
-                    correlation_id=run_id,
-                    fraud_score=0.1,
-                )
-                await asyncio.sleep(step_delay)
+            await publish_claim_update(
+                redis=redis,
+                worker_id=worker_id,
+                claim_id=cid,
+                status="BEHAVIORAL_CHECK",
+                message="Analyzing your activity pattern...",
+                zone_id=zone_id,
+                disruption_type=body.scenario,
+                correlation_id=run_id,
+            )
+            await asyncio.sleep(step_delay)
 
             shields = getattr(app.state, "forecast_shields", None) or {}
             fs_suffix = payout_message_suffix(
                 shields if isinstance(shields, dict) else {},
                 zone_id,
-                datetime.now(timezone.utc),
+                now_utc,
             )
-            final_status = "APPROVED"
-            final_message = _approved_message(body.scenario, payout) + fs_suffix
-            final_payout = float(payout)
-            if no_disruption_this_run:
-                final_status = "CLAIM_REJECTED"
-                final_message = (
-                    f"Already paid today for {body.scenario.replace('_', ' ').title()} in your zone."
-                    if already_paid_this_disruption
-                    else (
-                        f"No verified {body.scenario.replace('_', ' ').lower()} disruption in {zone_label} right now."
-                        + f" Active disruption now: {active_scenario.replace('_', ' ').title()}."
-                        if not scenario_allowed_today
-                        else f"No confirmed disruption in {zone_label}. Monitoring continues in real time."
-                    )
-                )
-                final_payout = 0.0
 
-            if prof_row is not None:
-                prof_row.total_claims = int(prof_row.total_claims or 0) + 1
-                if not no_disruption_this_run:
-                    prof_row.total_payouts = float(prof_row.total_payouts or 0.0) + float(payout)
-            if not no_disruption_this_run:
-                db.add(PayoutRecord(simulation_id=cid, amount=payout, currency="INR", status="completed"))
-            db.add(
-                FraudSignal(
-                    user_id=worker_id,
-                    simulation_id=cid,
-                    score=0.1,
-                    reason_code="DEMO_SIM",
-                    detail="judge_demo_pipeline",
-                )
-            )
-            db.add(
-                Log(
-                    user_id=worker_id,
-                    event_type="simulation_run",
-                    detail=f"decision={'REJECTED' if no_disruption_this_run else 'APPROVED'} payout={0.0 if no_disruption_this_run else payout} run={run_id}",
-                )
-            )
-            if no_disruption_this_run:
-                await create_notification(
-                    db,
-                    user_id=worker_id,
-                    ntype="system",
-                    title="Claim update",
-                    message=(
-                        f"Already paid today for {body.scenario.replace('_', ' ').title()} in your zone."
-                        if already_paid_this_disruption
-                        else (
-                            f"No verified {body.scenario.replace('_', ' ').lower()} disruption in your area right now."
-                            + f" Active disruption now: {active_scenario.replace('_', ' ').title()}."
-                            if not scenario_allowed_today
-                            else "No verified disruption this run. SafeNet is still monitoring your zone."
-                        )
-                    ),
-                )
+            if no_payout:
+                final_status = "NO_PAYOUT" if already_paid else ("CLAIM_REJECTED" if fraud_flag_sim else "NO_PAYOUT")
             else:
+                final_status = "APPROVED"
+            final_message = reason if no_payout else (_approved_message(body.scenario, payout_amount) + fs_suffix)
+
+            if not no_payout:
                 await create_notification(
                     db,
                     user_id=worker_id,
                     ntype="payout",
-                    title=f"₹{int(round(payout))} credited",
+                    title=f"₹{int(round(payout_amount))} credited",
                     message="Disruption verified. Payout added to your wallet.",
                 )
+
             await db.commit()
-            # Publish terminal state only after commit so app/web refetch sees persisted row.
+
             try:
+                if not no_payout and final_status == "APPROVED":
+                    delay = payout_delay_seconds(trust_points_from_profile(prof_row))
+                    if delay > 0:
+                        await publish_claim_update(
+                            redis=redis,
+                            worker_id=worker_id,
+                            claim_id=cid,
+                            status="PROCESSING_PAYOUT",
+                            message=f"Payout in {delay} seconds… (trust-based timing)",
+                            payout_amount=payout_amount,
+                            zone_id=zone_id,
+                            disruption_type=body.scenario,
+                            fraud_score=fraud_score,
+                            correlation_id=run_id,
+                            payout_breakdown=breakdown,
+                            daily_coverage=daily_cap,
+                            payout_countdown_seconds=delay,
+                        )
+                        await asyncio.sleep(float(delay))
                 await publish_claim_update(
                     redis=redis,
                     worker_id=worker_id,
                     claim_id=cid,
                     status=final_status,
                     message=final_message,
-                    payout_amount=final_payout,
+                    payout_amount=payout_amount if not no_payout else None,
                     zone_id=zone_id,
                     disruption_type=body.scenario,
-                    fraud_score=0.1,
+                    fraud_score=fraud_score,
                     correlation_id=run_id,
                     payout_breakdown=breakdown,
                     daily_coverage=daily_cap,
                 )
             except Exception:
-                # Never let WS publish failure hide a successful persisted payout.
                 pass
 
     except Exception as exc:
         log.error(
-            "demo_sim_pipeline_failed",
+            "sim_pipeline_failed",
             engine_name="simulation_route",
             simulation_id=run_id,
             error=str(exc),
@@ -493,10 +468,19 @@ async def run_simulation(
         )
 
     target_wid = body.worker_id if body.worker_id is not None else current_user.id
-    user_row = await db.execute(select(User).where(User.id == target_wid))
-    if user_row.scalar_one_or_none() is None:
+    if (await db.execute(select(User).where(User.id == target_wid))).scalar_one_or_none() is None:
         raise HTTPException(status_code=404, detail="User not found")
 
     simulation_id = str(uuid.uuid4())
-    asyncio.create_task(_demo_claim_pipeline(request.app, body, simulation_id, target_wid))
+    asyncio.create_task(_sim_pipeline(request.app, body, simulation_id, target_wid))
     return SimulationStartedResponse(simulation_id=simulation_id)
+
+
+@router.post("/disruptions/simulate", response_model=SimulationStartedResponse, status_code=202)
+async def simulate_disruption_alias(
+    request: Request,
+    body: SimulationRunRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    return await run_simulation(request=request, body=body, current_user=current_user, db=db)

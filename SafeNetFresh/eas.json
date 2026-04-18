@@ -10,7 +10,8 @@
         "gradleCommand": ":app:assembleRelease"
       },
       "env": {
-        "EXPO_PUBLIC_BACKEND_URL": "https://safenet-api-y4se.onrender.com"
+        "EXPO_PUBLIC_API_URL": "http://127.0.0.1:8000",
+        "EXPO_PUBLIC_DEMO_OTP": "0"
       }
     }
   }

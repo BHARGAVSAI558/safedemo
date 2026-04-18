@@ -16,9 +16,13 @@ class Policy(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), index=True, nullable=False)
     product_code: Mapped[str] = mapped_column(String(64), default="income_shield_basic")
+    tier: Mapped[str] = mapped_column(String(32), default="basic")          # basic/standard/pro
     status: Mapped[str] = mapped_column(String(32), default="active", index=True)
     monthly_premium: Mapped[float] = mapped_column(Float, default=0.0)
     weekly_premium: Mapped[float] = mapped_column(Float, default=0.0)
+    coverage_cap: Mapped[float] = mapped_column(Float, default=0.0)         # max payout per week
+    zone_risk_multiplier: Mapped[float] = mapped_column(Float, default=1.0) # snapshot at creation
+    worker_risk_adjustment: Mapped[float] = mapped_column(Float, default=1.0) # snapshot at creation
     valid_from: Mapped[Optional[DateTime]] = mapped_column(DateTime(timezone=True), nullable=True)
     valid_until: Mapped[Optional[DateTime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now())

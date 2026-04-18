@@ -1,6 +1,7 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   Keyboard,
   KeyboardAvoidingView,
   Platform,
@@ -13,10 +14,32 @@ import {
   View,
 } from 'react-native';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-
+import { MaterialCommunityIcons } from '@expo/vector-icons';
 import AppModal from './AppModal';
 import { support } from '../services/api';
 import { useAuth } from '../contexts/AuthContext';
+import { useLocalization } from '../contexts/LocalizationContext';
+
+function bcp47ForAppLang(code) {
+  if (code === 'hi') return 'hi-IN';
+  if (code === 'te') return 'te-IN';
+  return 'en-IN';
+}
+
+function getSpeechModule() {
+  try {
+    // eslint-disable-next-line global-require
+    const lib = require('expo-speech-recognition');
+    return lib?.ExpoSpeechRecognitionModule || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function getWebSpeechRecognitionCtor() {
+  if (typeof window === 'undefined') return null;
+  return window.SpeechRecognition || window.webkitSpeechRecognition || null;
+}
 
 const assistantContent = {
   en: {
@@ -87,12 +110,20 @@ const assistantContent = {
 export default function AssistantModal({ visible, onClose }) {
   const { userId } = useAuth();
   const qc = useQueryClient();
+  const { language, setLanguage: setAppLanguage, t: tloc } = useLocalization();
   const [message, setMessage] = useState('');
   const [selectedLanguage, setSelectedLanguage] = useState('en');
   const [languageOpen, setLanguageOpen] = useState(false);
   const [ticketText, setTicketText] = useState('');
   const [ticketOpen, setTicketOpen] = useState(false);
+  const [recognizing, setRecognizing] = useState(false);
+  const [voiceTarget, setVoiceTarget] = useState('message');
+  const currentTranscriptRef = useRef('');
+  const baseVoiceTextRef = useRef('');
+  const fullTranscriptRef = useRef('');
   const historyRef = useRef(null);
+  const speechModuleRef = useRef(null);
+  const webRecognitionRef = useRef(null);
 
   const historyQuery = useQuery({
     queryKey: ['supportHistory', userId],
@@ -150,11 +181,163 @@ export default function AssistantModal({ visible, onClose }) {
   const languagePack = assistantContent[selectedLanguage] || assistantContent.en;
 
   useEffect(() => {
+    if (visible) setSelectedLanguage(language);
+  }, [visible, language]);
+
+  const stopWebRecognition = useCallback(() => {
+    try {
+      const r = webRecognitionRef.current;
+      if (r) {
+        r.onresult = null;
+        r.onerror = null;
+        r.onend = null;
+        r.stop?.();
+        r.abort?.();
+      }
+    } catch (_) {}
+    webRecognitionRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    if (!visible) {
+      try {
+        speechModuleRef.current?.stop?.();
+      } catch (_) {}
+      stopWebRecognition();
+      setRecognizing(false);
+    }
+  }, [visible, stopWebRecognition]);
+
+  useEffect(() => {
+    const sm = getSpeechModule();
+    speechModuleRef.current = sm;
+    if (!sm?.addListener) return undefined;
+
+    const startSub = sm.addListener('start', () => setRecognizing(true));
+    const endSub = sm.addListener('end', () => {
+      setRecognizing(false);
+      currentTranscriptRef.current = '';
+      baseVoiceTextRef.current = '';
+      fullTranscriptRef.current = '';
+    });
+    const errorSub = sm.addListener('error', () => {
+      setRecognizing(false);
+      currentTranscriptRef.current = '';
+      baseVoiceTextRef.current = '';
+      fullTranscriptRef.current = '';
+    });
+    const resultSub = sm.addListener('result', (event) => {
+      const parts = (event?.results || [])
+        .map((r) => String(r?.transcript || '').trim())
+        .filter(Boolean);
+      const transcript = parts.join(' ').trim();
+      if (!transcript) return;
+      if (transcript === currentTranscriptRef.current || transcript === fullTranscriptRef.current) return;
+      currentTranscriptRef.current = transcript;
+      fullTranscriptRef.current = transcript;
+      const merged = `${baseVoiceTextRef.current} ${fullTranscriptRef.current}`.trim();
+      if (voiceTarget === 'ticket') setTicketText(merged);
+      else setMessage(merged);
+    });
+
+    return () => {
+      startSub?.remove?.();
+      endSub?.remove?.();
+      errorSub?.remove?.();
+      resultSub?.remove?.();
+    };
+  }, [voiceTarget]);
+
+  const toggleVoice = async (target = 'message') => {
+    try {
+      if (Platform.OS === 'web') {
+        const Ctor = getWebSpeechRecognitionCtor();
+        if (recognizing) {
+          stopWebRecognition();
+          setRecognizing(false);
+          return;
+        }
+        if (!Ctor) {
+          Alert.alert(
+            'Voice input',
+            'This browser does not support speech recognition. Type your message instead, or use Chrome / Edge.'
+          );
+          return;
+        }
+        setVoiceTarget(target);
+        baseVoiceTextRef.current =
+          target === 'ticket' ? String(ticketText || '').trim() : String(message || '').trim();
+        currentTranscriptRef.current = '';
+        fullTranscriptRef.current = '';
+        stopWebRecognition();
+        const rec = new Ctor();
+        rec.lang = bcp47ForAppLang(selectedLanguage);
+        rec.interimResults = true;
+        rec.continuous = true;
+        rec.onresult = (event) => {
+          let chunk = '';
+          for (let i = event.resultIndex; i < event.results.length; i += 1) {
+            chunk += event.results[i][0].transcript;
+          }
+          const merged = `${baseVoiceTextRef.current} ${chunk}`.trim();
+          if (target === 'ticket') setTicketText(merged);
+          else setMessage(merged);
+        };
+        rec.onerror = () => {
+          stopWebRecognition();
+          setRecognizing(false);
+        };
+        rec.onend = () => {
+          webRecognitionRef.current = null;
+          setRecognizing(false);
+        };
+        webRecognitionRef.current = rec;
+        rec.start();
+        setRecognizing(true);
+        return;
+      }
+
+      const sm = speechModuleRef.current || getSpeechModule();
+      speechModuleRef.current = sm;
+      if (!sm) {
+        Alert.alert(
+          'Voice input',
+          'Speech recognition needs a development build with the native speech module (`npx expo run:ios` / `run:android`), or open Support from the web app where the browser can use voice typing.'
+        );
+        return;
+      }
+      if (recognizing) {
+        sm.stop();
+        return;
+      }
+      setVoiceTarget(target);
+      const perm = await sm.requestPermissionsAsync();
+      if (!perm.granted) {
+        Alert.alert('Microphone', 'Allow microphone access to speak your message.');
+        return;
+      }
+      baseVoiceTextRef.current =
+        target === 'ticket'
+          ? String(ticketText || '').trim()
+          : String(message || '').trim();
+      currentTranscriptRef.current = '';
+      fullTranscriptRef.current = '';
+      sm.start({
+        lang: bcp47ForAppLang(selectedLanguage),
+        interimResults: true,
+        continuous: true,
+      });
+    } catch (e) {
+      Alert.alert('Voice input', e?.message || 'Speech recognition is not available here. Try the keyboard or use SafeNet on web.');
+    }
+  };
+
+  useEffect(() => {
     if (!visible) return undefined;
-    const t = setTimeout(() => {
+    const scrollTimer = setTimeout(() => {
       historyRef.current?.scrollToEnd?.({ animated: true });
     }, 60);
-    return () => clearTimeout(t);
+    return () => clearTimeout(scrollTimer);
   }, [visible, items.length, ticketOpen, languageOpen]);
 
   return (
@@ -197,6 +380,7 @@ export default function AssistantModal({ visible, onClose }) {
                   style={[styles.langItem, selectedLanguage === row.id && styles.langItemActive]}
                   onPress={() => {
                     setSelectedLanguage(row.id);
+                    void setAppLanguage(row.id);
                     setLanguageOpen(false);
                   }}
                 >
@@ -259,7 +443,22 @@ export default function AssistantModal({ visible, onClose }) {
 
           {ticketOpen ? (
             <View style={styles.ticketBox}>
-              <Text style={styles.ticketTitle}>Raise Ticket</Text>
+              <View style={styles.ticketHead}>
+                <Text style={styles.ticketTitle}>Raise Ticket</Text>
+                <View style={styles.ticketHeadActions}>
+                  <TouchableOpacity
+                    style={[styles.voiceBtn, recognizing && voiceTarget === 'ticket' && styles.voiceBtnOn]}
+                    onPress={() => void toggleVoice('ticket')}
+                    accessibilityRole="button"
+                    accessibilityLabel={tloc('assistant.voice')}
+                  >
+                    <MaterialCommunityIcons name={recognizing ? 'microphone' : 'microphone-outline'} size={20} color={recognizing && voiceTarget === 'ticket' ? '#fff' : '#1a73e8'} />
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.ticketCloseBtn} onPress={() => setTicketOpen(false)}>
+                    <Text style={styles.ticketCloseText}>✕</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
               <TextInput
                 style={styles.ticketInput}
                 placeholder="Describe issue for admin team... add Transaction ID if available"
@@ -301,16 +500,25 @@ export default function AssistantModal({ visible, onClose }) {
           <View style={styles.inputRow}>
             <TextInput
               style={styles.input}
-              placeholder={languagePack.placeholder}
+              placeholder={recognizing ? tloc('assistant.listening') : languagePack.placeholder}
               value={message}
               onChangeText={setMessage}
               returnKeyType="send"
               onSubmitEditing={() => send(message)}
             />
+            <TouchableOpacity
+              style={[styles.voiceBtn, recognizing && voiceTarget === 'message' && styles.voiceBtnOn]}
+              onPress={() => void toggleVoice('message')}
+              accessibilityRole="button"
+              accessibilityLabel={tloc('assistant.voice')}
+            >
+              <MaterialCommunityIcons name={recognizing ? 'microphone' : 'microphone-outline'} size={22} color={recognizing && voiceTarget === 'message' ? '#fff' : '#1a73e8'} />
+            </TouchableOpacity>
             <TouchableOpacity style={styles.send} onPress={() => send(message)}>
               <Text style={styles.sendText}>{sendMutation.isPending ? '...' : languagePack.send}</Text>
             </TouchableOpacity>
           </View>
+          <Text style={styles.voiceHint}>{tloc('assistant.voice_hint')}</Text>
           </Pressable>
         </KeyboardAvoidingView>
       </Pressable>
@@ -410,6 +618,18 @@ const styles = StyleSheet.create({
   quickText: { color: '#334155', fontSize: 11, fontWeight: '700' },
   inputRow: { flexDirection: 'row', gap: 8, alignItems: 'center', marginTop: 8, marginBottom: 4 },
   input: { flex: 1, borderWidth: 1, borderColor: '#e2e8f0', borderRadius: 10, paddingHorizontal: 10, paddingVertical: 10, fontSize: 14 },
+  voiceBtn: {
+    borderWidth: 1.5,
+    borderColor: '#cbd5e1',
+    borderRadius: 999,
+    width: 44,
+    height: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#f8fafc',
+  },
+  voiceBtnOn: { borderColor: '#dc2626', backgroundColor: '#dc2626' },
+  voiceHint: { fontSize: 11, color: '#64748b', fontWeight: '600', marginBottom: 4 },
   send: { backgroundColor: '#1a73e8', borderRadius: 10, paddingHorizontal: 14, paddingVertical: 10 },
   sendText: { color: '#fff', fontWeight: '800' },
   ticketBox: {
@@ -420,6 +640,10 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     padding: 10,
   },
+  ticketHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 },
+  ticketHeadActions: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  ticketCloseBtn: { width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: '#ffedd5' },
+  ticketCloseText: { color: '#b45309', fontWeight: '900', fontSize: 14 },
   ticketTitle: { fontSize: 12, fontWeight: '900', color: '#b45309', marginBottom: 6, textTransform: 'uppercase' },
   ticketInput: {
     minHeight: 70,

@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Any, Dict, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -10,6 +10,7 @@ class PolicyCreate(BaseModel):
 
 class PolicyActivateRequest(BaseModel):
     tier: Literal["Basic", "Standard", "Pro"]
+    zone_id: Optional[str] = Field(default=None, max_length=64)
 
 
 class PolicyResponse(BaseModel):
@@ -47,6 +48,7 @@ class PolicyActivatedFullResponse(BaseModel):
     city: str
     name: str
     trust_level: str = "Newcomer"
+    premium_breakdown: Optional[Dict[str, Any]] = None
 
 
 class PolicyCurrentResponse(BaseModel):
@@ -62,6 +64,7 @@ class PolicyCurrentResponse(BaseModel):
     pool_utilization_pct: float = 0.0
     policy_id: Optional[int] = None
     message: Optional[str] = None
+    premium_breakdown: Optional[Dict[str, Any]] = None
 
 
 class PoolHealthResponse(BaseModel):
@@ -69,3 +72,6 @@ class PoolHealthResponse(BaseModel):
     zone_label: str = ""
     pool_balance: float = 0.0
     pool_utilization_pct: float = 0.0
+    loss_ratio: float = 0.0
+    total_premiums_collected: float = 0.0
+    total_payouts_disbursed: float = 0.0

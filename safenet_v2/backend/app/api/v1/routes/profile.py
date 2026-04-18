@@ -5,6 +5,7 @@ from structlog.contextvars import bind_contextvars
 
 from app.api.v1.routes.workers import get_current_user
 from app.db.session import get_db
+from app.engines.earnings_engine import build_earnings_dna_from_onboarding
 from app.models.worker import OccupationType as OrmOccupation
 from app.models.worker import Profile, RiskProfile as OrmRisk, User
 from app.schemas.profile import GigProfileResponse, GigProfileUpsert, ProfileBootstrapResponse
@@ -51,6 +52,8 @@ async def get_profile_bootstrap(
             is_profile_complete=False,
         )
     complete = bool(str(row.zone_id or "").strip()) and bool(str(row.platform or "").strip())
+    loc_disp = getattr(row, "location_display", None)
+    loc_disp = (str(loc_disp).strip() or None) if loc_disp else None
     return ProfileBootstrapResponse(
         id=current_user.id,
         phone_number=_mask_phone(current_user.phone),
@@ -58,6 +61,7 @@ async def get_profile_bootstrap(
         city=(row.city or None) if str(row.city or "").strip() else None,
         zone_id=(row.zone_id or None) if str(row.zone_id or "").strip() else None,
         platform=(row.platform or None) if str(row.platform or "").strip() else None,
+        location_display=loc_disp,
         avg_daily_income=float(row.avg_daily_income or 650.0),
         trust_score=_trust_display(row.trust_score),
         is_profile_complete=complete,
@@ -74,7 +78,6 @@ async def upsert_gig_profile(
     bind_contextvars(worker_id=current_user.id)
     zone_key = normalize_zone(body.zone_id)
     risk = ZONE_TO_RISK.get(zone_key, OrmRisk.medium)
-    risk_score = compute_risk_score(zone_key, body.working_hours_preset, body.platform)
     tier = body.coverage_tier.strip()
     if tier not in TIER_MAX_DAILY:
         raise HTTPException(status_code=422, detail="Invalid coverage_tier — use Basic, Standard, or Pro")
@@ -82,6 +85,11 @@ async def upsert_gig_profile(
     weekly = compute_weekly_premium(zone_key, body.working_hours_preset, tier)
 
     row = (await db.execute(select(Profile).where(Profile.user_id == current_user.id))).scalar_one_or_none()
+    prior_claims = int(row.total_claims or 0) if row else 0
+    risk_score_computed = float(compute_risk_score(zone_key, body.working_hours_preset, body.platform))
+    risk_score = risk_score_computed if prior_claims > 0 else 0.0
+    loc_disp = (body.location_display or "").strip()[:255] if body.location_display else None
+
     if row is None:
         row = Profile(
             user_id=current_user.id,
@@ -96,6 +104,8 @@ async def upsert_gig_profile(
             coverage_tier=tier,
             risk_score=float(risk_score),
             weekly_premium=float(weekly),
+            trust_score=0.0,
+            location_display=loc_disp,
         )
         db.add(row)
     else:
@@ -109,9 +119,27 @@ async def upsert_gig_profile(
         row.coverage_tier = tier
         row.risk_score = float(risk_score)
         row.weekly_premium = float(weekly)
+        row.location_display = loc_disp
 
     await db.commit()
     await db.refresh(row)
+
+    # Build / rebuild EarningsDNA matrix from onboarding data
+    try:
+        avg_daily = float(body.avg_daily_income or 600.0)
+        # Derive active hours from working_hours_preset
+        _hours_map = {"morning": 4.0, "afternoon": 4.0, "evening": 5.0, "full_day": 10.0, "flexible": 8.0}
+        active_hours = _hours_map.get((body.working_hours_preset or "flexible").strip().lower(), 8.0)
+        await build_earnings_dna_from_onboarding(db, current_user.id, avg_daily, active_hours)
+        await db.commit()
+    except Exception as _dna_exc:
+        log.warning(
+            "earnings_dna_build_failed",
+            engine_name="profile_route",
+            reason_code="DNA_BUILD_FAIL",
+            worker_id=current_user.id,
+            error=str(_dna_exc),
+        )
 
     await cache_invalidate(getattr(request.app.state, "redis", None), f"trust:{current_user.id}")
 
@@ -139,4 +167,5 @@ async def upsert_gig_profile(
         working_hours_preset=body.working_hours_preset.strip(),
         name=body.name.strip(),
         city=body.city.strip() or "Hyderabad",
+        location_display=loc_disp,
     )

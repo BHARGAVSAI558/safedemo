@@ -15,7 +15,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { auth, warmBackendOnce } from '../services/api';
+import { auth, warmBackendOnce, formatApiError } from '../services/api';
 
 const BRAND = '#1A56DB';
 
@@ -51,7 +51,7 @@ export default function OnboardingScreen({ navigation }) {
     } catch (e) {
       Alert.alert(
         'Could not send code',
-        e?.message || e?.response?.data?.detail || 'Check your connection and try again.'
+        formatApiError(e)
       );
     } finally {
       setLoading(false);

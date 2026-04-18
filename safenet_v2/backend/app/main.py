@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 import traceback
 
 import redis.asyncio as aioredis
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -10,20 +10,17 @@ from pydantic import ValidationError
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
-from sqlalchemy import func, select, text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import text
 
-from app.api.v1.routes import admin, auth, claims, notifications, policies, pools, profile, simulation, support, websockets, workers, zones
-from app.api.v1.routes.admin import HYDERABAD_ZONES_GEO
+from app.api.v1.routes import admin, auth, claims, notifications, policies, pools, profile, simulation, support, weather_aqi, websockets, workers, zones
+from app.api.v1.routes import events, payments
 from app.core.config import settings
 from app.core.exceptions import SafeNetBaseException
 from app.db.mongo import connect_mongo, disconnect_mongo
 from app.services.event_service import load_government_alerts_from_path
-from app.core.middleware import MaxBodySizeMiddleware, RequestIDMiddleware, RequestTimingMiddleware
+from app.core.middleware import MaxBodySizeMiddleware, RequestIDMiddleware, RequestTimingMiddleware, RateLimitMiddleware
 from app.core.rate_limit import limiter
-from app.db.session import engine, get_db, init_db
-from app.models.claim import DecisionType, Simulation
-from app.models.worker import User
+from app.db.session import engine, init_db, sqlite_uses_memory_fallback
 from app.tasks.background_scheduler import shutdown_background_scheduler, start_background_scheduler
 from app.utils.logger import logger
 
@@ -124,14 +121,17 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # Middleware runs in reverse order of registration: last added runs first on each request.
 # CORS must be outermost so every response (including errors from inner layers) gets CORS headers.
+# Expo/web clients burst many parallel GETs (profile, policy, claims); keep high to avoid 429 in dev.
+app.add_middleware(RateLimitMiddleware, requests_per_minute=800)
 app.add_middleware(MaxBodySizeMiddleware)
 app.add_middleware(RequestIDMiddleware)
 app.add_middleware(RequestTimingMiddleware)
 app.add_middleware(SlowAPIMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=settings.origins,
+    allow_origin_regex=r"^(https?://(localhost|127\.0\.0\.1)(:\d+)?|https?://(10|192\.168|172\.(1[6-9]|2\d|3[0-1]))(\.\d{1,3}){2}(:\d+)?|exp://(localhost|127\.0\.0\.1)(:\d+)?|exp://(10|192\.168|172\.(1[6-9]|2\d|3[0-1]))(\.\d{1,3}){2}(:\d+)?)$",
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["X-Request-ID"],
@@ -214,43 +214,14 @@ app.include_router(workers.router, prefix="/api/v1/workers", tags=["Workers"])
 app.include_router(zones.router, prefix="/api/v1", tags=["Zones"])
 app.include_router(policies.router, prefix="/api/v1/policies", tags=["Policies"])
 app.include_router(pools.router, prefix="/api/v1/pools", tags=["Pools"])
+app.include_router(weather_aqi.router, prefix="/api/v1", tags=["Weather & AQI"])
 app.include_router(claims.router, prefix="/api/v1/claims", tags=["Claims"])
 app.include_router(simulation.router, prefix="/api/v1/simulation", tags=["Simulation"])
 app.include_router(support.router, prefix="/api/v1/support", tags=["Support"])
 app.include_router(admin.router, prefix="/api/v1/admin", tags=["Admin"])
+app.include_router(events.router, prefix="/api/v1/admin/events", tags=["Admin Events"])
+app.include_router(payments.router, prefix="/api/v1/payments", tags=["Payments"])
 app.include_router(websockets.router, tags=["WebSockets"])
-
-
-@app.get("/api/v1/demo/status", tags=["Demo"])
-async def demo_public_status(db: AsyncSession = Depends(get_db)):
-    """Public health snapshot for demos (no auth)."""
-    workers_registered = int((await db.execute(select(func.count(User.id)))).scalar_one() or 0)
-    claims_processed = int((await db.execute(select(func.count(Simulation.id)))).scalar_one() or 0)
-    approved = int(
-        (await db.execute(select(func.count(Simulation.id)).where(Simulation.decision == DecisionType.APPROVED))).scalar_one()
-        or 0
-    )
-    fraud_blocked = int(
-        (await db.execute(select(func.count(Simulation.id)).where(Simulation.decision == DecisionType.FRAUD))).scalar_one()
-        or 0
-    )
-    approval_rate = round((approved / claims_processed * 100.0), 1) if claims_processed else 0.0
-    live_zones = [str(z["zone_name"]) for z in HYDERABAD_ZONES_GEO]
-    ow = (settings.OPENWEATHER_API_KEY or "").strip()
-    wu = (settings.WEATHERAPI_KEY or "").strip()
-    oq = (settings.OPENAQ_API_KEY or "").strip()
-    return {
-        "status": "operational",
-        "workers_registered": workers_registered,
-        "claims_processed": claims_processed,
-        "approval_rate": approval_rate,
-        "fraud_blocked": fraud_blocked,
-        "live_zones": live_zones,
-        "apis": {
-            "weather": "live" if (ow or wu) else "mock",
-            "aqi": "live" if oq else "mock",
-        },
-    }
 
 
 @app.get("/", tags=["Health"])
@@ -304,7 +275,7 @@ async def health(request: Request):
         "version": settings.APP_VERSION,
         "storage": {
             "driver": "sqlite" if settings.is_sqlite else "postgres",
-            "persistent": not settings.is_sqlite,
+            "persistent": not (settings.is_sqlite and sqlite_uses_memory_fallback()),
         },
         "database": {"connected": db_ok},
         "redis": {"connected": redis_ok, "skipped": redis_skipped},

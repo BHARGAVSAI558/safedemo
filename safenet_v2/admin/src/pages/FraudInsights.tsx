@@ -22,28 +22,50 @@ export default function FraudInsights() {
 
   const alertsQuery = useQuery({
     queryKey: ['admin', 'fraud-alerts'],
-    queryFn: async () => (await api.get('/admin/fraud-alerts')).data,
+    queryFn: async () => {
+      try {
+        const res = await api.get('/admin/fraud-alerts');
+        return Array.isArray(res.data) ? res.data : [];
+      } catch (err) {
+        console.error('Fraud alerts fetch failed:', err);
+        return [];
+      }
+    },
     refetchInterval: 30_000,
+    retry: 1,
   });
   const analyticsQuery = useQuery({
     queryKey: ['admin', 'fraud-analytics'],
-    queryFn: async () => (await api.get('/admin/fraud/analytics')).data,
+    queryFn: async () => {
+      try {
+        const res = await api.get('/admin/fraud/analytics');
+        return res.data ?? {};
+      } catch (err) {
+        console.error('Fraud analytics fetch failed:', err);
+        return {};
+      }
+    },
     refetchInterval: 30_000,
+    retry: 1,
   });
 
   const rows: QueueRow[] = wsQueue.length
     ? (wsQueue as QueueRow[])
-    : (alertsQuery.data ?? []).map((x: { id: number; user_id: number; fraud_score: number; created_at: string }) => ({
+    : (Array.isArray(alertsQuery.data) ? alertsQuery.data : []).map((x: { id: number; user_id: number; fraud_score: number; created_at: string }) => ({
         cluster_id: `sim-${x.id}`,
-        ring_confidence: x.fraud_score > 0.85 ? 'CONFIRMED' : 'PROBABLE',
+        ring_confidence: Number(x.fraud_score) > 0.85 ? 'CONFIRMED' : 'PROBABLE',
         workers_in_ring: [x.user_id],
         zone: 'unknown',
         timestamp: new Date(x.created_at).getTime(),
-        freeze_status: x.fraud_score > 0.85 ? 'FROZEN' : 'PENDING',
+        freeze_status: Number(x.fraud_score) > 0.85 ? 'FROZEN' : 'PENDING',
       }));
 
   const doAction = async (clusterId: string, action: string) => {
-    await api.post(`/admin/fraud/${clusterId}/action`, { action });
+    try {
+      await api.post(`/admin/fraud/${clusterId}/action`, { action });
+    } catch {
+      // action failures are non-critical; queue will refresh
+    }
   };
 
   return (
@@ -52,6 +74,13 @@ export default function FraudInsights() {
         <h1 style={adminUi.h1}>Fraud insights</h1>
         <p style={adminUi.sub}>Queue from WebSocket when live; otherwise from API. Actions post to the fraud endpoints.</p>
       </header>
+
+      {alertsQuery.isError ? (
+        <div style={{ ...adminUi.card, marginBottom: 16, borderColor: '#fecaca', background: '#fef2f2', color: '#b91c1c', fontWeight: 600, fontSize: '0.875rem' }}>
+          Could not load fraud alerts.{' '}
+          <button type="button" style={adminUi.btnPrimary} onClick={() => void alertsQuery.refetch()}>Retry</button>
+        </div>
+      ) : null}
 
       <div style={{ ...adminUi.card, marginBottom: 20, padding: 0, overflow: 'hidden' }}>
         <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--admin-border)' }}>
@@ -112,7 +141,7 @@ export default function FraudInsights() {
           <div style={adminUi.cardTitle}>Fraud score distribution</div>
           <div style={{ height: 260, marginTop: 12 }}>
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={analyticsQuery.data?.fraud_score_histogram ?? []} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+              <BarChart data={Array.isArray(analyticsQuery.data?.fraud_score_histogram) ? analyticsQuery.data.fraud_score_histogram : []} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="var(--admin-border)" vertical={false} />
                 <XAxis dataKey="bucket" tick={{ fontSize: 11, fill: 'var(--admin-muted)' }} />
                 <YAxis tick={{ fontSize: 11, fill: 'var(--admin-muted)' }} />
@@ -126,7 +155,7 @@ export default function FraudInsights() {
           <div style={adminUi.cardTitle}>Enrollment vs weather signal</div>
           <div style={{ height: 260, marginTop: 12 }}>
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={analyticsQuery.data?.enrollment_timeline ?? []} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+              <LineChart data={Array.isArray(analyticsQuery.data?.enrollment_timeline) ? analyticsQuery.data.enrollment_timeline : []} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="var(--admin-border)" />
                 <XAxis dataKey="hour" tick={{ fontSize: 11, fill: 'var(--admin-muted)' }} />
                 <YAxis tick={{ fontSize: 11, fill: 'var(--admin-muted)' }} />

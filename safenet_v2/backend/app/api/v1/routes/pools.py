@@ -33,8 +33,11 @@ async def get_pool_health(
         )
     ).scalar_one_or_none()
 
-    balance = float(row.pool_balance_start_of_week or 0.0) if row else 0.0
+    balance = float(row.current_balance or 0.0) if row else 0.0
     util = float(row.utilization_pct or 0.0) if row else 0.0
+    loss_ratio = float(row.loss_ratio or 0.0) if row else 0.0
+    premiums_collected = float(row.total_premiums_collected or 0.0) if row else 0.0
+    payouts_disbursed = float(row.total_payouts_disbursed or 0.0) if row else 0.0
 
     log.info(
         "pool_health",
@@ -49,4 +52,7 @@ async def get_pool_health(
         zone_label=str(prof.city or zone_id),
         pool_balance=balance,
         pool_utilization_pct=util,
+        loss_ratio=loss_ratio,
+        total_premiums_collected=premiums_collected,
+        total_payouts_disbursed=payouts_disbursed,
     )

@@ -1,4 +1,6 @@
-from sqlalchemy import DateTime, Integer, String
+from typing import Optional
+
+from sqlalchemy import DateTime, Float, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
@@ -11,5 +13,12 @@ class Zone(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     city_code: Mapped[str] = mapped_column(String(32), unique=True, index=True, nullable=False)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
+    city: Mapped[str] = mapped_column(String(100), default="Hyderabad")
+    lat: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    lng: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    flood_risk_score: Mapped[float] = mapped_column(Float, default=0.5)
+    heat_risk_score: Mapped[float] = mapped_column(Float, default=0.5)
+    aqi_risk_score: Mapped[float] = mapped_column(Float, default=0.5)
+    zone_risk_multiplier: Mapped[float] = mapped_column(Float, default=1.0)
     risk_tier: Mapped[str] = mapped_column(String(32), default="medium")
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now())

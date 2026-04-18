@@ -12,7 +12,6 @@ const getWSURL = (workerId, token) => {
  * Server sends {"type":"PING"} every 30s; client must reply {"type":"PONG"} within 10s.
  */
 export function createClaimsWebSocket({ workerId, token, onMessage, onDisconnect, onStatusChange }) {
-  const wsUrl = (BASE_URL || '').replace(/\/$/, '');
   const fullUrl = getWSURL(workerId, token);
 
   let socket = null;
@@ -52,7 +51,7 @@ export function createClaimsWebSocket({ workerId, token, onMessage, onDisconnect
 
   const connect = () => {
     isStopped = false;
-    if (!wsUrl || !workerId || !token) {
+    if (!fullUrl || !workerId || !token) {
       scheduleReconnect();
       return;
     }

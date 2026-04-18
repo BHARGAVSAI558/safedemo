@@ -3,6 +3,7 @@ import random
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
+import httpx
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +16,7 @@ from app.models.notification import Notification
 from app.models.support import SupportQuery
 from app.models.policy import Policy
 from app.models.worker import User
+from app.core.config import settings
 
 router = APIRouter()
 
@@ -30,6 +32,101 @@ class SupportQueryBody(BaseModel):
 class SupportReplyBody(BaseModel):
     query_id: int
     admin_reply: str = Field(..., min_length=2, max_length=2000)
+
+
+class AnalyzeTicketBody(BaseModel):
+    message: str = Field(..., min_length=2, max_length=2000)
+    userId: str = Field(..., min_length=1, max_length=64)
+
+
+class TicketAnalysis(BaseModel):
+    priority: str = "LOW"
+    category: str = "other"
+    reason: str = ""
+    score: int = 0
+
+
+def _normalize_analysis(payload: dict[str, Any] | None) -> TicketAnalysis:
+    p = str((payload or {}).get("priority", "LOW")).upper()
+    c = str((payload or {}).get("category", "other")).strip().lower() or "other"
+    r = str((payload or {}).get("reason", "")).strip()
+    try:
+        s = int(round(float((payload or {}).get("score", 0))))
+    except Exception:
+        s = 0
+    if p not in {"HIGH", "MEDIUM", "LOW"}:
+        p = "LOW"
+    if c not in {"payment", "safety", "weather", "technical", "other"}:
+        c = "other"
+    if p == "HIGH":
+        s = min(100, max(70, s if s > 0 else 85))
+    elif p == "MEDIUM":
+        s = min(69, max(40, s if s > 0 else 55))
+    else:
+        s = min(39, max(0, s))
+    return TicketAnalysis(priority=p, category=c, reason=r or "Rule/AI classification", score=s)
+
+
+def _keyword_analysis(message: str) -> TicketAnalysis:
+    t = str(message or "").lower()
+    high_keys = [
+        "accident", "not safe", "unsafe", "rain", "flood", "harass", "payment not received",
+        "payment pending", "payment", "transaction failure", "transaction failed", "failed transaction",
+        "भुगतान नहीं", "पेमेंट नहीं", "लेनदेन विफल", "ट्रांजैक्शन फेल", "असुरक्षित", "बारिश", "बाढ़",
+        "చెల్లింపు రాలేదు", "ట్రాన్సాక్షన్ ఫెయిల్", "లావాదేవీ విఫలం", "సేఫ్ కాదు", "వర్షం", "వర్షపు", "వరద",
+    ]
+    med_keys = ["delay", "late", "app issue", "partial payment", "slow", "देरी", "लेट", "ఆలస్యం", "నెమ్మది"]
+    if any(k in t for k in high_keys):
+        payment_tokens = ["payment", "transaction", "भुगतान", "पेमेंट", "लेनदेन", "ట్రాన్సాక్షన్", "లావాదేవీ", "చెల్లింపు"]
+        weather_tokens = ["rain", "flood", "बारिश", "बाढ़", "వర్షం", "వరద"]
+        category = "payment" if any(k in t for k in payment_tokens) else ("weather" if any(k in t for k in weather_tokens) else "safety")
+        return TicketAnalysis(priority="HIGH", category=category, reason="High-risk keyword detected", score=88)
+    if any(k in t for k in med_keys):
+        category = "payment" if "payment" in t else "technical"
+        return TicketAnalysis(priority="MEDIUM", category=category, reason="Medium priority keyword detected", score=56)
+    return TicketAnalysis(priority="LOW", category="other", reason="General support query", score=20)
+
+
+async def _analyze_ticket_llm(message: str, user_id: str) -> TicketAnalysis:
+    api_key = str(getattr(settings, "OPENAI_API_KEY", "") or "").strip()
+    if not api_key:
+        return _keyword_analysis(message)
+    prompt = (
+        "Classify the following gig worker issue into priority levels.\n\n"
+        "Rules:\n"
+        "* HIGH: safety risk, accident, heavy rain, flood, payment not received, harassment\n"
+        "* MEDIUM: delays, app issues, partial payment\n"
+        "* LOW: general queries, help, information\n\n"
+        "The text may be in English, Hindi, Telugu, or mixed transliteration. Classify correctly regardless of language.\n\n"
+        "Also detect category:\n"
+        "* payment\n* safety\n* weather\n* technical\n* other\n\n"
+        "Return strictly in JSON:\n"
+        '{ "priority": "HIGH | MEDIUM | LOW", "category": "string", "reason": "short explanation", "score": number between 0-100 }\n\n'
+        f"userId: {user_id}\n"
+        f"Text: {message}"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=12.0) as client:
+            resp = await client.post(
+                "https://api.openai.com/v1/responses",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={
+                    "model": "gpt-4o-mini",
+                    "input": prompt,
+                    "temperature": 0.1,
+                    "max_output_tokens": 180,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        txt = str(data.get("output_text") or "").strip()
+        if not txt:
+            return _keyword_analysis(message)
+        import json
+        parsed = json.loads(txt)
+        return _normalize_analysis(parsed)
+    except Exception:
+        return _keyword_analysis(message)
 
 
 def _fallback_system_reply(msg: str) -> str:
@@ -598,15 +695,21 @@ async def create_support_query(
             sys_reply = _format_last_five_from_notifications(body.language, notif_rows)
     if not sys_reply:
         sys_reply = await _auto_system_reply(db, uid, body.message, body.language)
+    analysis = await _analyze_ticket_llm(body.message, str(uid))
     is_ticket = str(body.type or "").lower() == "ticket" or str(body.query_key or "").lower() == "raise_ticket"
     row = SupportQuery(
         user_id=uid,
         message=body.message.strip(),
+        translated_text=body.message.strip(),
         query_type=(
             "ticket"
             if is_ticket
             else ("predefined" if str(body.type).lower() == "predefined" else "custom")
         ),
+        priority=analysis.priority,
+        category=analysis.category,
+        score=int(analysis.score),
+        reason=analysis.reason,
         system_response=sys_reply,
         admin_reply=None,
         status="open",
@@ -617,16 +720,27 @@ async def create_support_query(
     if is_ticket:
         l = _norm_lang(body.language)
         row.system_response = (
-            f"Ticket {ticket_no} created successfully. Priority: Normal. Our team will respond soon."
+            f"Ticket {ticket_no} created successfully. Priority: {analysis.priority}. Our team will respond soon."
             if l == "en"
             else (
-                f"टिकट {ticket_no} सफलतापूर्वक बन गया है। प्राथमिकता: सामान्य। हमारी टीम जल्द उत्तर देगी।"
+                f"टिकट {ticket_no} सफलतापूर्वक बन गया है। प्राथमिकता: {analysis.priority}। हमारी टीम जल्द उत्तर देगी।"
                 if l == "hi"
-                else f"టికెట్ {ticket_no} విజయవంతంగా సృష్టించబడింది. ప్రాధాన్యత: సాధారణం. మా టీమ్ త్వరలో స్పందిస్తుంది."
+                else f"టికెట్ {ticket_no} విజయవంతంగా సృష్టించబడింది. ప్రాధాన్యత: {analysis.priority}. మా టీమ్ త్వరలో స్పందిస్తుంది."
             )
         )
     await db.commit()
     return {"ok": True, "id": row.id, "ticket_no": ticket_no if is_ticket else None}
+
+
+@router.post("/analyze-ticket")
+async def analyze_ticket(
+    body: AnalyzeTicketBody,
+    current_user: User = Depends(get_current_user),
+):
+    if str(current_user.id) != str(body.userId).strip():
+        raise HTTPException(status_code=403, detail="userId does not match JWT")
+    analysis = await _analyze_ticket_llm(body.message, str(body.userId))
+    return analysis.model_dump()
 
 
 @router.get("/history")
@@ -653,6 +767,10 @@ async def support_history(
             "admin_reply": r.admin_reply,
             "status": r.status,
             "query_type": r.query_type,
+            "priority": r.priority,
+            "category": r.category,
+            "score": r.score,
+            "reason": r.reason,
             "ticket_no": f"TKT-{int(r.id):06d}" if str(r.query_type) == "ticket" else None,
             "created_at": _as_utc_iso(r.created_at),
         }

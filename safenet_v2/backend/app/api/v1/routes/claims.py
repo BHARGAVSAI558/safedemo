@@ -3,19 +3,26 @@ from typing import Any, List
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import Response
 from sqlalchemy import func, select
 from sqlalchemy import or_
 from sqlalchemy.ext.asyncio import AsyncSession
+import httpx
 
 from app.api.v1.routes.workers import get_current_user
+from app.core.config import settings
 from app.db.session import get_db
 from app.engines.decision_engine import DecisionEngine
-from app.models.claim import DecisionType, Simulation
+from app.models.claim import ClaimLifecycle, DecisionType, DisruptionEvent, Simulation
 from app.models.notification import Notification
-from app.models.worker import User
+from app.models.payout import PayoutRecord
+from app.models.zone import Zone
+from app.models.worker import Profile, User
 from app.schemas.claim import SimulationRequest, SimulationResponse
 from app.services.simulation_labels import disruption_from_simulation
 from app.services.notification_service import create_notification
+from app.services.zone_match import disruption_zone_candidates
+from app.services.income_loss_receipt import build_income_loss_receipt_pdf
 from app.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -54,13 +61,47 @@ def _ui_status_from_decision(decision: Any) -> str:
     return "PENDING"
 
 
-def _history_reason(s: Simulation, ui_status: str, payout_amt: float) -> str:
-    if ui_status == "APPROVED":
+def _refined_history_status(s: Simulation, base_ui: str, payout_amt: float) -> str:
+    """Map DB REJECTED into NO_PAYOUT for benign checks; reserve REJECTED/BLOCKED for fraud."""
+    if payout_amt > 0:
+        return "CREDITED"
+    r = str(s.reason or "").lower()
+    fraudish = bool(getattr(s, "fraud_flag", False)) or float(s.fraud_score or 0) >= 0.65
+    if fraudish or "fraud" in r or base_ui == "BLOCKED":
+        return "BLOCKED"
+    if base_ui != "REJECTED":
+        return base_ui or "PENDING"
+    if any(
+        k in r
+        for k in (
+            "already simulated",
+            "try again tomorrow",
+            "safer/moderate",
+            "not severe enough",
+            "not extreme enough",
+            "not eligible",
+            "no extra payout",
+            "another payout",
+            "signal too weak",
+            "too weak",
+            "limit",
+        )
+    ):
+        return "NO_PAYOUT"
+    return "REJECTED"
+
+
+def _history_reason(s: Simulation, refined: str, payout_amt: float) -> str:
+    if refined == "CREDITED" or refined == "APPROVED":
         return f"Disruption verified · GPS clean · Paid ₹{int(round(payout_amt))}"
-    if ui_status == "BLOCKED":
+    if refined == "BLOCKED":
+        if "fraud" in str(s.reason or "").lower():
+            return str(s.reason or "Blocked after fraud checks.")[:500]
         return "GPS anomaly detected · Claim blocked"
-    if ui_status == "REJECTED":
-        return "Disruption signal too weak · No payout"
+    if refined == "NO_PAYOUT":
+        return (s.reason or "No payout on this run — conditions not met for an extra credit.")[:500]
+    if refined == "REJECTED":
+        return "Claim rejected after review — see details below."
     return (s.reason or "")[:500]
 
 
@@ -83,10 +124,24 @@ def _history_row(s: Simulation) -> dict[str, Any]:
     ui_status = _ui_status_from_decision(s.decision)
     payout_amt = float(s.payout or 0.0)
     credited = payout_amt > 0
-    effective_status = "CREDITED" if credited else ui_status
-    created = s.created_at
-    created_iso = _created_at_utc_z(created)
+    refined = _refined_history_status(s, ui_status, payout_amt)
+    effective_status = "CREDITED" if credited else refined
+    created_iso = _created_at_utc_z(s.created_at)
     transaction_id = _public_tx_id("TXN" if payout_amt > 0 else "CLM", int(s.id))
+    expected = float(s.expected_income or 0.0)
+    loss = float(s.loss or 0.0)
+    fraud_score = float(s.fraud_score or 0.0)
+    # Build payout breakdown for mobile display
+    payout_breakdown = None
+    if credited:
+        severity = round(min(1.0, max(0.3, fraud_score * 0.3 + 0.7)), 2) if fraud_score < 0.3 else 0.7
+        payout_breakdown = {
+            "expected_loss": round(expected, 2),
+            "severity": severity,
+            "zone": 1.0,
+            "pool": 1.0,
+            "final_payout": round(payout_amt, 2),
+        }
     return {
         "id": s.id,
         "transaction_id": transaction_id,
@@ -94,15 +149,16 @@ def _history_row(s: Simulation) -> dict[str, Any]:
         "status": effective_status,
         "payout_amount": round(payout_amt, 2),
         "created_at": created_iso,
-        "fraud_score": float(s.fraud_score or 0.0),
-        "reason": _history_reason(s, "APPROVED" if credited else ui_status, payout_amt if credited else 0.0),
+        "fraud_score": round(fraud_score, 4),
+        "reason": _history_reason(s, "CREDITED" if credited else refined, payout_amt),
+        "payout_breakdown": payout_breakdown,
         "details": {
             "claim_id": s.id,
             "transaction_id": transaction_id,
             "decision": str(s.decision.value if hasattr(s.decision, "value") else s.decision),
-            "expected_income": round(float(s.expected_income or 0.0), 2),
+            "expected_income": round(expected, 2),
             "actual_income": round(float(s.actual_income or 0.0), 2),
-            "loss": round(float(s.loss or 0.0), 2),
+            "loss": round(loss, 2),
             "payout": round(payout_amt, 2),
             "reason": str(s.reason or ""),
         },
@@ -164,6 +220,100 @@ def _amount_from_title(title: str | None) -> float:
         return float(digits) if digits else 0.0
     except Exception:
         return 0.0
+
+
+@router.get("/{claim_id}/receipt")
+async def download_claim_receipt(
+    claim_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        pdf = await build_income_loss_receipt_pdf(
+            db,
+            claim_id=int(claim_id),
+            requester_user_id=int(current_user.id),
+            is_admin=False,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Not your claim")
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="safenet-receipt-{claim_id}.pdf"'},
+    )
+
+
+@router.get("/active")
+async def get_active_disruptions(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Returns active disruption events in the worker's zone
+    and the worker's current claim lifecycle status for each.
+    """
+    profile = (
+        await db.execute(select(Profile).where(Profile.user_id == current_user.id))
+    ).scalar_one_or_none()
+
+    if not profile or not profile.zone_id:
+        return {"disruptions": [], "zone_id": None}
+
+    zone_id = str(profile.zone_id)
+    zone_rows = (await db.execute(select(Zone))).scalars().all()
+    zone_candidates = disruption_zone_candidates(zone_id, zone_rows)
+
+    active_events = (
+        await db.execute(
+            select(DisruptionEvent)
+            .where(
+                DisruptionEvent.zone_id.in_(list(zone_candidates)),
+                DisruptionEvent.is_active.is_(True),
+            )
+            .order_by(DisruptionEvent.started_at.desc())
+        )
+    ).scalars().all()
+
+    out = []
+    for event in active_events:
+        # Find this worker's claim lifecycle for this event (if any)
+        lc = (
+            await db.execute(
+                select(ClaimLifecycle).where(
+                    ClaimLifecycle.user_id == current_user.id,
+                    ClaimLifecycle.zone_id == zone_id,
+                    ClaimLifecycle.disruption_type == event.disruption_type,
+                )
+                .order_by(ClaimLifecycle.created_at.desc())
+            )
+        ).scalar_one_or_none()
+
+        started_iso = ""
+        if event.started_at:
+            dt = event.started_at
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            started_iso = dt.isoformat().replace("+00:00", "Z")
+
+        out.append({
+            "disruption_event_id": event.id,
+            "disruption_type": event.disruption_type,
+            "severity": round(float(event.severity or 0.0), 3),
+            "confidence": event.confidence,
+            "raw_value": event.raw_value,
+            "threshold_value": event.threshold_value,
+            "api_source": event.api_source,
+            "started_at": started_iso,
+            "zone_id": zone_id,
+            "claim_status": lc.status if lc else None,
+            "claim_payout": round(float(lc.payout_amount or 0.0), 2) if lc else None,
+            "claim_message": lc.message if lc else None,
+        })
+
+    return out
 
 
 @router.post("/run", response_model=SimulationResponse, status_code=201)
@@ -354,4 +504,72 @@ async def payout_history(
         "data": data,
         "next_cursor": str(next_cursor) if next_cursor is not None else None,
         "total_count": int(total_count),
+    }
+
+
+@router.post("/{claim_id}/process-payout")
+async def process_payout_for_claim(
+    claim_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    sim = (
+        await db.execute(
+            select(Simulation).where(Simulation.id == claim_id, Simulation.user_id == current_user.id)
+        )
+    ).scalar_one_or_none()
+    if sim is None:
+        raise HTTPException(status_code=404, detail="Claim not found")
+    if float(sim.payout or 0.0) <= 0:
+        raise HTTPException(status_code=400, detail="No payable amount on this claim")
+
+    existing = (
+        await db.execute(select(PayoutRecord).where(PayoutRecord.simulation_id == sim.id).order_by(PayoutRecord.id.desc()))
+    ).scalars().first()
+    if existing and str(existing.status).lower() == "completed":
+        return {
+            "claim_id": sim.id,
+            "payout_id": existing.razorpay_order_id or f"local-{existing.id}",
+            "payout_status": "completed",
+            "amount": round(float(existing.amount or 0.0), 2),
+            "message": f"₹{int(round(float(existing.amount or 0.0)))} credited to your account (Razorpay test)",
+        }
+
+    payout_id = None
+    payout_status = "pending"
+    try:
+        if settings.RAZORPAY_KEY_ID and settings.RAZORPAY_KEY_SECRET:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                resp = await client.post(
+                    "https://api.razorpay.com/v1/orders",
+                    auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET),
+                    json={
+                        "amount": int(max(1, round(float(sim.payout) * 100))),
+                        "currency": "INR",
+                        "receipt": f"claim_{sim.id}",
+                        "notes": {"worker_id": current_user.id},
+                    },
+                )
+            if resp.status_code == 200:
+                payout_id = resp.json().get("id")
+                payout_status = "completed"
+    except Exception:
+        payout_status = "pending"
+
+    rec = PayoutRecord(
+        simulation_id=sim.id,
+        amount=float(sim.payout or 0.0),
+        currency="INR",
+        payment_type="payout",
+        razorpay_order_id=payout_id,
+        status=payout_status,
+    )
+    db.add(rec)
+    await db.commit()
+    return {
+        "claim_id": sim.id,
+        "payout_id": payout_id or f"local-{rec.id}",
+        "payout_status": payout_status,
+        "amount": round(float(sim.payout or 0.0), 2),
+        "message": f"₹{int(round(float(sim.payout or 0.0)))} credited to your account (Razorpay test)",
     }

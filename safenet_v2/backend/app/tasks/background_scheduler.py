@@ -18,20 +18,24 @@ from app.db.session import AsyncSessionLocal
 from app.engines.confidence_engine import ConfidenceEngine
 from app.engines.fraud_engine import FRAUD_THRESHOLD
 from app.engines.payout_engine import PayoutEngine
-from app.engines.premium_engine import PremiumEngine
+from app.engines.actuarial_pricing import persist_pool_health_snapshot, run_full_weekly_pricing
+from app.engines.trust_payout import trust_score_points
 from app.engines.fraud_engine import first_simulation_time
-from app.models.claim import ClaimLifecycle, DecisionType, Simulation
+from app.models.claim import ClaimLifecycle, DecisionType, DisruptionEvent, Simulation
 from app.models.fraud import FraudSignal
 from app.models.payout import PayoutRecord
 from app.models.policy import Policy
 from app.models.pool_balance import ZonePoolBalance
+from app.models.weekly_summary import WeeklySummary
 from app.models.worker import Profile, User
 from app.models.zone import Zone
-from app.services.realtime_service import publish_claim_update, publish_pool_health, publish_zone_event
+from app.services.realtime_service import publish_claim_update, publish_pool_health, publish_zone_event, publish_disruption_alert
 from app.tasks.claim_processor import process_claim
 from app.services.zone_resolver import resolve_city_to_zone
 from app.services.forecast_shield_service import refresh_forecast_shields
 from app.services.notification_service import create_notification
+from app.engines.disruption_engine import check_disruptions_for_zone
+from app.engines.claims_engine import initiate_claims_for_disruption
 from app.utils.logger import logger as struct_logger
 
 from app.utils.logger import get_logger
@@ -228,6 +232,12 @@ async def confidence_monitor(app: Any) -> None:
         return
 
     zones = _zones_from_coordinates()
+    get_log.info(
+        "confidence_monitor_batch_start",
+        zone_count=len(zones),
+        reason="scheduled_all_configured_markets",
+        note="not_user_specific_hyderabad_only",
+    )
     async with AsyncSessionLocal() as session:
         # Resolve zone rows if present (optional).
         zone_rows = {}
@@ -267,6 +277,9 @@ async def confidence_monitor(app: Any) -> None:
                         event_type="WORKER_IMPACT_CHECK_TRIGGERED",
                         details={"worker_ids": worker_ids, "level": level},
                     )
+                # Rate limit: max 50 workers per zone per run to prevent overload
+                MAX_WORKERS_PER_RUN = 50
+                eligible_workers = []
                 for worker in workers:
                     if not worker.profile:
                         continue
@@ -274,7 +287,11 @@ async def confidence_monitor(app: Any) -> None:
                         continue
                     if not _deviation_detected_from_baseline(worker.profile):
                         continue
+                    eligible_workers.append(worker)
+                    if len(eligible_workers) >= MAX_WORKERS_PER_RUN:
+                        break
 
+                for worker in eligible_workers:
                     correlation_id = str(uuid4())
                     claim_id = f"lifecycle:{worker.id}:{int(_ist_now().timestamp())}"
                     lifecycle = ClaimLifecycle(
@@ -287,7 +304,11 @@ async def confidence_monitor(app: Any) -> None:
                         message="Disruption detected in your zone",
                     )
                     session.add(lifecycle)
-                    await session.commit()
+                    try:
+                        await session.commit()
+                    except Exception:
+                        await session.rollback()
+                        continue
 
                     await publish_claim_update(
                         redis=redis,
@@ -330,72 +351,14 @@ async def premium_recalculator(app: Any) -> None:
     """
     premium_recalculator: every Monday at 00:00 IST
     """
-    redis = getattr(app.state, "redis", None)
+    shields = getattr(app.state, "forecast_shields", None)
     async with AsyncSessionLocal() as session:
-        users = (await session.execute(select(User).where(User.is_active.is_(True)))).scalars().all()
-        now = _ist_now()
-        week_start = (now - timedelta(days=now.weekday() + 7)).replace(hour=0, minute=0, second=0, microsecond=0)
-        # Last full week window:
-        w0 = now - timedelta(days=7)
-
-        zones = _zones_from_coordinates()
-        zone_by_city = {city: (zid, lat, lon) for city, zid, lat, lon in zones}
-
-        from app.services.notification_service import NotificationService
-
-        for user in users:
-            if not user.profile:
-                continue
-            profile = user.profile
-            zone_id, _, _ = resolve_city_to_zone(profile.city)
-
-            zone_risk = None
-            try:
-                zone_row = await session.execute(select(Zone).where(Zone.city_code == profile.city))
-                zr = zone_row.scalars().first()
-                if zr is not None:
-                    zone_risk = _zone_risk_multiplier(zr.risk_tier)
-            except Exception:
-                zone_risk = None
-            if zone_risk is None:
-                zone_risk = _zone_risk_multiplier(profile.risk_profile.value if hasattr(profile.risk_profile, "value") else "medium")
-
-            tenure_days = max(0.0, (now - (user.created_at or now)).total_seconds() / 86400.0)  # type: ignore[operator]
-
-            premium_result = await PremiumEngine.calculate(user.id)
-            weekly_premium = float(premium_result.get("weekly_premium", 35))
-
-            # Update policy: best effort if weekly_premium column exists.
-            policies = await session.execute(
-                select(Policy).where(Policy.user_id == user.id, Policy.status == "active")
-            )
-            policy = policies.scalars().first()
-            if policy is None:
-                continue
-
-            try:
-                setattr(policy, "weekly_premium", weekly_premium)
-                # Keep monthly_premium aligned in case DB column is missing elsewhere.
-                if not hasattr(policy, "weekly_premium"):
-                    policy.monthly_premium = weekly_premium
-                await session.commit()
-            except Exception:
-                # Fallback: store into monthly_premium.
-                try:
-                    policy.monthly_premium = weekly_premium
-                    await session.commit()
-                except Exception:
-                    await session.rollback()
-
-            try:
-                await NotificationService.send_push(
-                    user_id=user.id,
-                    title="Premium updated",
-                    body="Your weekly premium has been updated",
-                    data={"weekly_premium": weekly_premium},
-                )
-            except Exception:
-                pass
+        try:
+            await run_full_weekly_pricing(session, redis=getattr(app.state, "redis", None))
+            await persist_pool_health_snapshot(session, shields if isinstance(shields, dict) else None)
+        except Exception:
+            await session.rollback()
+            raise
 
 
 async def pool_health_auditor(app: Any) -> None:
@@ -466,6 +429,141 @@ async def pool_health_auditor(app: Any) -> None:
                 )
 
 
+async def weekly_worker_summary(app: Any) -> None:
+    """Sunday 20:00 IST — persisted WeeklySummary + in-app notification per worker."""
+    shields = getattr(app.state, "forecast_shields", None) or {}
+    from app.engines.actuarial_pricing import _ist_week_bounds
+    from app.services.notification_service import NotificationService
+
+    async with AsyncSessionLocal() as session:
+        now_ist = _ist_now()
+        monday_this, _ = _ist_week_bounds(now_ist)
+        review_start_ist = monday_this - timedelta(days=7)
+        review_end_ist = monday_this
+        rs_utc = review_start_ist.astimezone(timezone.utc)
+        re_utc = review_end_ist.astimezone(timezone.utc)
+
+        profiles = (await session.execute(select(Profile))).scalars().all()
+        for p in profiles:
+            uid = int(p.user_id)
+            if (
+                await session.execute(select(User.id).where(User.id == uid, User.is_active.is_(True)).limit(1))
+            ).scalar_one_or_none() is None:
+                continue
+            exists = (
+                await session.execute(
+                    select(WeeklySummary.id).where(
+                        WeeklySummary.user_id == uid,
+                        WeeklySummary.week_start == rs_utc,
+                    ).limit(1)
+                )
+            ).scalar_one_or_none()
+            if exists is not None:
+                continue
+
+            zid = str(p.zone_id or "").strip()
+            hours_prot = round(float(p.active_hours_per_day or 8.0) * 7.0, 1)
+            dcnt = 0
+            if zid:
+                dcnt = int(
+                    (
+                        await session.execute(
+                            select(func.count(DisruptionEvent.id)).where(
+                                DisruptionEvent.zone_id == zid,
+                                DisruptionEvent.started_at >= rs_utc,
+                                DisruptionEvent.started_at < re_utc,
+                            )
+                        )
+                    ).scalar_one()
+                    or 0
+                )
+            pay = float(
+                (
+                    await session.execute(
+                        select(func.coalesce(func.sum(Simulation.payout), 0.0)).where(
+                            Simulation.user_id == uid,
+                            Simulation.decision == DecisionType.APPROVED,
+                            Simulation.created_at >= rs_utc,
+                            Simulation.created_at < re_utc,
+                        )
+                    )
+                ).scalar_one()
+                or 0.0
+            )
+            prem_row = (
+                await session.execute(
+                    select(Policy.weekly_premium).where(Policy.user_id == uid, Policy.status == "active").limit(1)
+                )
+            ).scalar_one_or_none()
+            prem = float(prem_row or p.weekly_premium or 49.0)
+            peace = round(prem, 2) if pay <= 0 else 0.0
+            risk = "MEDIUM"
+            zl = zid.lower().replace("-", "_") if zid else ""
+            if isinstance(shields, dict):
+                for sh in shields.values():
+                    if not isinstance(sh, dict):
+                        continue
+                    szz = str(sh.get("zone_id") or "").lower().replace("-", "_")
+                    if zl and szz and zl not in szz and szz not in zl:
+                        continue
+                    pr = float(sh.get("probability") or 0.5)
+                    if pr >= 0.75:
+                        risk = "HIGH"
+                    elif pr >= 0.45:
+                        risk = "MEDIUM"
+                    else:
+                        risk = "LOW"
+            trust_delta = 3 if pay > 0 else 1
+            title = "Your SafeNet Week in Review"
+            if pay > 0:
+                body = (
+                    f"Hours protected this week: {hours_prot:.0f}. "
+                    f"Disruptions in your zone: {dcnt}. "
+                    f"Payout received: Rs {pay:.0f}. "
+                    f"Your zone risk next week: {risk}. "
+                    f"Trust score change: +{trust_delta} this week."
+                )
+            else:
+                body = (
+                    f"Hours protected this week: {hours_prot:.0f}. "
+                    f"Disruptions in your zone: {dcnt}. "
+                    f"No disruptions — your savings: Rs {peace:.0f} in premiums bought peace of mind. "
+                    f"Your zone risk next week: {risk}. "
+                    f"Trust score change: +{trust_delta} this week."
+                )
+            session.add(
+                WeeklySummary(
+                    user_id=uid,
+                    week_start=rs_utc,
+                    hours_protected=hours_prot,
+                    disruptions_in_zone=dcnt,
+                    payout_inr=pay,
+                    premium_peace_inr=peace if pay <= 0 else 0.0,
+                    zone_risk_next_week=risk,
+                    trust_delta_points=trust_delta,
+                    title=title,
+                    body=body,
+                )
+            )
+            await create_notification(
+                session,
+                user_id=uid,
+                ntype="weekly_summary",
+                title=title,
+                message=body[:900],
+            )
+            try:
+                await NotificationService.send_push(
+                    user_id=uid,
+                    title=title,
+                    body="Open the app for your SafeNet week in review.",
+                    data={"type": "weekly_summary"},
+                )
+            except Exception:
+                pass
+        await session.commit()
+
+
 async def trust_score_updater(app: Any) -> None:
     """
     trust_score_updater: daily at 02:00 IST
@@ -508,6 +606,7 @@ async def trust_score_updater(app: Any) -> None:
 
             updated = False
             trust_score = float(profile.trust_score)
+            old_pts = trust_score_points(trust_score)
 
             if policy_active > 0 and flagged_in_week == 0:
                 # +2 points → +0.02 in this codebase's 0..1 scale.
@@ -521,7 +620,26 @@ async def trust_score_updater(app: Any) -> None:
 
             if updated:
                 profile.trust_score = trust_score
+                new_pts = trust_score_points(trust_score)
                 await session.commit()
+                if old_pts < 70 <= new_pts:
+                    await create_notification(
+                        session,
+                        user_id=user.id,
+                        ntype="trust",
+                        title="Reliable status unlocked",
+                        message="You've reached Reliable status — faster payouts unlocked.",
+                    )
+                    await session.commit()
+                if old_pts < 90 <= new_pts:
+                    await create_notification(
+                        session,
+                        user_id=user.id,
+                        ntype="trust",
+                        title="Elite status achieved",
+                        message="Elite status achieved — instant payouts enabled.",
+                    )
+                    await session.commit()
 
 
 async def forecast_shield_job(app: Any) -> None:
@@ -574,28 +692,42 @@ async def stale_claim_resolver(app: Any) -> None:
             )
         )
         for lc in life_rows.scalars().all():
-            lc.status = "APPROVED"
-            lc.message = "Auto-approved after stale revalidation window"
-            await session.commit()
-            try:
-                await publish_claim_update(
-                    redis=redis,
-                    worker_id=lc.user_id,
-                    claim_id=lc.claim_id,
-                    status="APPROVED",
-                    message="Auto-approved after stale revalidation",
-                    payout_amount=lc.payout_amount or 0.0,
-                    zone_id=lc.zone_id,
-                    disruption_type=lc.disruption_type,
-                    correlation_id=lc.correlation_id,
+            # Check fraud signals before auto-approving
+            fraud_count = (
+                await session.execute(
+                    select(func.count(FraudSignal.id)).where(
+                        FraudSignal.user_id == lc.user_id,
+                        FraudSignal.score >= FRAUD_THRESHOLD,
+                    )
                 )
-            except Exception:
-                pass
+            ).scalar_one() or 0
+            if fraud_count > 0:
+                lc.status = "REJECTED"
+                lc.message = "Auto-rejected: fraud signals present during revalidation"
+            else:
+                lc.status = "APPROVED"
+                lc.message = "Auto-approved after stale revalidation window"
+            await session.commit()
+            if lc.status == "APPROVED":
+                try:
+                    await publish_claim_update(
+                        redis=redis,
+                        worker_id=lc.user_id,
+                        claim_id=lc.claim_id,
+                        status="APPROVED",
+                        message="Auto-approved after stale revalidation",
+                        payout_amount=lc.payout_amount or 0.0,
+                        zone_id=lc.zone_id,
+                        disruption_type=lc.disruption_type,
+                        correlation_id=lc.correlation_id,
+                    )
+                except Exception:
+                    pass
 
         rows = await session.execute(
             select(Simulation).where(
-                Simulation.decision == DecisionType.REJECTED,
-                Simulation.created_at >= two_hours_ago,
+                Simulation.decision == DecisionType.REVIEW,
+                Simulation.created_at <= two_hours_ago,
             ).order_by(Simulation.created_at.asc())
         )
         sims = rows.scalars().all()
@@ -649,6 +781,97 @@ async def stale_claim_resolver(app: Any) -> None:
                 )
             except Exception:
                 pass
+
+
+async def disruption_scan(app: Any) -> None:
+    """
+    disruption_scan: every 30 minutes, 6 AM – 11 PM IST.
+
+    For each zone in the DB:
+      1. Run check_disruptions_for_zone (live weather + AQI + social events)
+      2. If active events found, trigger claim pipeline for affected workers
+
+    Each zone is isolated — one zone failure never stops the others.
+    """
+    ist_now = _ist_now()
+    if not (6 <= ist_now.hour <= 23):
+        return
+
+    redis = getattr(app.state, "redis", None)
+
+    zone_ids: List[str] = []
+    async with AsyncSessionLocal() as session:
+        zone_rows = (await session.execute(select(Zone))).scalars().all()
+        zone_ids = [str(z.city_code) for z in zone_rows]
+        zone_map = {str(z.city_code): z for z in zone_rows}
+
+    get_log.info(
+        "disruption_scan_batch_start",
+        zone_count=len(zone_ids),
+        reason="all_zones_in_database",
+    )
+    for zone_id in zone_ids:
+        try:
+            async with AsyncSessionLocal() as session:
+                zone = zone_map[zone_id]
+                events = await check_disruptions_for_zone(session, zone)
+
+                if not events:
+                    continue
+
+                disruption_type = str(events[0].disruption_type)
+                confidence_label = str(events[0].confidence)
+                eligible_rows = (
+                    await session.execute(
+                        select(User.id)
+                        .join(Profile, Profile.user_id == User.id)
+                        .join(Policy, Policy.user_id == User.id)
+                        .where(
+                            User.is_active.is_(True),
+                            Profile.zone_id == zone_id,
+                            Policy.status == "active",
+                        )
+                    )
+                ).all()
+                affected_workers = [int(r[0]) for r in eligible_rows]
+
+                await publish_zone_event(
+                    redis=redis,
+                    zone_id=zone_id,
+                    event_type="disruption_alert",
+                    details={
+                        "disruption_types": [e.disruption_type for e in events],
+                        "confidence": confidence_label,
+                        "severities": [round(e.severity, 3) for e in events],
+                    },
+                )
+                if affected_workers:
+                    await publish_disruption_alert(
+                        redis=redis,
+                        zone_id=zone_id,
+                        disruption_type=disruption_type,
+                        affected_workers=affected_workers,
+                    )
+
+                if confidence_label != "HIGH":
+                    continue
+
+                for event in events:
+                    await initiate_claims_for_disruption(
+                        db=session,
+                        disruption_event=event,
+                        redis=redis,
+                    )
+
+        except Exception as exc:
+            get_log.warning(
+                "disruption_scan_zone_failed",
+                engine_name="background_scheduler",
+                reason_code="ZONE_SCAN_ERROR",
+                zone_id=zone_id,
+                error=str(exc),
+            )
+            continue
 
 
 @dataclass(frozen=True)
@@ -705,6 +928,18 @@ def start_background_scheduler(app: Any) -> AsyncIOScheduler:
             func=lambda: weather_alert_notifier(app),
             lock_ttl_seconds=30 * 60,
         ),
+        JobDef(
+            job_id="weekly_worker_summary",
+            trigger=CronTrigger(day_of_week="sun", hour=20, minute=0, timezone=str(IST)),
+            func=lambda: weekly_worker_summary(app),
+            lock_ttl_seconds=90 * 60,
+        ),
+        JobDef(
+            job_id="disruption_scan",
+            trigger=CronTrigger(minute="*/30", hour="6-23", timezone=str(IST)),
+            func=lambda: disruption_scan(app),
+            lock_ttl_seconds=25 * 60,
+        ),
     ]
 
     # APScheduler expects normal callables; we wrap in async-safe runner.
@@ -729,6 +964,7 @@ def start_background_scheduler(app: Any) -> AsyncIOScheduler:
             replace_existing=True,
             max_instances=1,
             coalesce=True,
+            misfire_grace_time=60,
         )
 
     scheduler.start()
