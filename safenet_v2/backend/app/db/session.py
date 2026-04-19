@@ -45,21 +45,20 @@ def _sqlite_database_url_and_connect_args(database_url: str) -> tuple[str, dict[
 
 
 def _make_engine():
-    """SQLite (file) vs PostgreSQL (pooled); mirrors Render `postgres://` DSN handling."""
-    database_url = settings.DATABASE_URL
-    if database_url.startswith("postgres://"):
-        database_url = database_url.replace("postgres://", "postgresql+asyncpg://", 1)
+    """SQLite (file) vs PostgreSQL (pooled); DSN comes from env via Settings.async_database_url."""
+    url = settings.async_database_url
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql+asyncpg://", 1)
 
-    if database_url.startswith("sqlite"):
-        database_url, connect_args, engine_kwargs = _sqlite_database_url_and_connect_args(database_url)
+    if url.startswith("sqlite"):
+        sqlite_url, connect_args, engine_kwargs = _sqlite_database_url_and_connect_args(url)
         return create_async_engine(
-            database_url,
+            sqlite_url,
             connect_args=connect_args,
             echo=False,
             **engine_kwargs,
         )
 
-    url = settings.async_database_url
     return create_async_engine(
         url,
         pool_pre_ping=True,
@@ -162,6 +161,35 @@ async def init_db() -> None:
                 # Payments table (created by SQLAlchemy metadata.create_all, but backfill for existing DBs)
                 "CREATE INDEX IF NOT EXISTS ix_payments_user_id ON payments (user_id)",
                 "CREATE INDEX IF NOT EXISTS ix_payments_status ON payments (status)",
+                "ALTER TABLE profiles ADD COLUMN IF NOT EXISTS last_api_call TIMESTAMPTZ",
+                "ALTER TABLE profiles ADD COLUMN IF NOT EXISTS last_seen TIMESTAMPTZ",
+                "ALTER TABLE profiles ADD COLUMN IF NOT EXISTS last_known_lat DOUBLE PRECISION",
+                "ALTER TABLE profiles ADD COLUMN IF NOT EXISTS last_known_lng DOUBLE PRECISION",
+                "ALTER TABLE zones ADD COLUMN IF NOT EXISTS zone_radius_km DOUBLE PRECISION DEFAULT 15",
+                "ALTER TABLE zones ADD COLUMN IF NOT EXISTS zone_baseline_orders DOUBLE PRECISION DEFAULT 100",
+                "ALTER TABLE zones ADD COLUMN IF NOT EXISTS orders_last_hour DOUBLE PRECISION DEFAULT 85",
+                "ALTER TABLE zones ADD COLUMN IF NOT EXISTS total_registered_workers INTEGER DEFAULT 0",
+                "ALTER TABLE zones ADD COLUMN IF NOT EXISTS current_online_workers INTEGER DEFAULT 0",
+                "ALTER TABLE zones ADD COLUMN IF NOT EXISTS risk_score INTEGER DEFAULT 0",
+                "ALTER TABLE zones ADD COLUMN IF NOT EXISTS risk_mode VARCHAR(32) DEFAULT 'NORMAL'",
+                "ALTER TABLE zones ADD COLUMN IF NOT EXISTS risk_mode_updated_at TIMESTAMPTZ",
+                "ALTER TABLE claim_lifecycles ADD COLUMN IF NOT EXISTS gate1_passed BOOLEAN DEFAULT FALSE",
+                "ALTER TABLE claim_lifecycles ADD COLUMN IF NOT EXISTS gate1_source VARCHAR(128)",
+                "ALTER TABLE claim_lifecycles ADD COLUMN IF NOT EXISTS gate1_value VARCHAR(512)",
+                "ALTER TABLE claim_lifecycles ADD COLUMN IF NOT EXISTS gate2_passed BOOLEAN DEFAULT FALSE",
+                "ALTER TABLE claim_lifecycles ADD COLUMN IF NOT EXISTS gate2_signals JSONB",
+                "ALTER TABLE claim_lifecycles ADD COLUMN IF NOT EXISTS gate2_failure_reason TEXT",
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS canonical_hash VARCHAR(64)",
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_users_canonical_hash ON users (canonical_hash) WHERE canonical_hash IS NOT NULL",
+                "ALTER TABLE simulations ADD COLUMN IF NOT EXISTS ai_explanation TEXT",
+                "ALTER TABLE simulations ADD COLUMN IF NOT EXISTS dispute_worker_text TEXT",
+                "ALTER TABLE simulations ADD COLUMN IF NOT EXISTS dispute_verdict JSONB",
+                "ALTER TABLE simulations ADD COLUMN IF NOT EXISTS gate1_passed BOOLEAN DEFAULT TRUE",
+                "ALTER TABLE simulations ADD COLUMN IF NOT EXISTS gate1_source VARCHAR(128)",
+                "ALTER TABLE simulations ADD COLUMN IF NOT EXISTS gate1_value VARCHAR(512)",
+                "ALTER TABLE simulations ADD COLUMN IF NOT EXISTS gate2_passed BOOLEAN DEFAULT TRUE",
+                "ALTER TABLE simulations ADD COLUMN IF NOT EXISTS gate2_signals JSONB",
+                "ALTER TABLE claim_lifecycles ADD COLUMN IF NOT EXISTS ai_explanation TEXT",
             ]
             for stmt in pg_stmts:
                 await conn.execute(text(stmt))
@@ -211,6 +239,35 @@ async def init_db() -> None:
                 "CREATE INDEX IF NOT EXISTS ix_support_queries_priority ON support_queries (priority)",
                 "CREATE INDEX IF NOT EXISTS ix_support_queries_category ON support_queries (category)",
                 "CREATE INDEX IF NOT EXISTS ix_support_queries_score ON support_queries (score)",
+                "ALTER TABLE profiles ADD COLUMN last_api_call DATETIME",
+                "ALTER TABLE profiles ADD COLUMN last_seen DATETIME",
+                "ALTER TABLE profiles ADD COLUMN last_known_lat FLOAT",
+                "ALTER TABLE profiles ADD COLUMN last_known_lng FLOAT",
+                "ALTER TABLE zones ADD COLUMN zone_radius_km FLOAT DEFAULT 15",
+                "ALTER TABLE zones ADD COLUMN zone_baseline_orders FLOAT DEFAULT 100",
+                "ALTER TABLE zones ADD COLUMN orders_last_hour FLOAT DEFAULT 85",
+                "ALTER TABLE zones ADD COLUMN total_registered_workers INTEGER DEFAULT 0",
+                "ALTER TABLE zones ADD COLUMN current_online_workers INTEGER DEFAULT 0",
+                "ALTER TABLE zones ADD COLUMN risk_score INTEGER DEFAULT 0",
+                "ALTER TABLE zones ADD COLUMN risk_mode VARCHAR(32) DEFAULT 'NORMAL'",
+                "ALTER TABLE zones ADD COLUMN risk_mode_updated_at DATETIME",
+                "ALTER TABLE claim_lifecycles ADD COLUMN gate1_passed BOOLEAN DEFAULT 0",
+                "ALTER TABLE claim_lifecycles ADD COLUMN gate1_source VARCHAR(128)",
+                "ALTER TABLE claim_lifecycles ADD COLUMN gate1_value VARCHAR(512)",
+                "ALTER TABLE claim_lifecycles ADD COLUMN gate2_passed BOOLEAN DEFAULT 0",
+                "ALTER TABLE claim_lifecycles ADD COLUMN gate2_signals TEXT",
+                "ALTER TABLE claim_lifecycles ADD COLUMN gate2_failure_reason TEXT",
+                "ALTER TABLE users ADD COLUMN canonical_hash VARCHAR(64)",
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_users_canonical_hash ON users (canonical_hash)",
+                "ALTER TABLE simulations ADD COLUMN ai_explanation TEXT",
+                "ALTER TABLE simulations ADD COLUMN dispute_worker_text TEXT",
+                "ALTER TABLE simulations ADD COLUMN dispute_verdict TEXT",
+                "ALTER TABLE simulations ADD COLUMN gate1_passed BOOLEAN DEFAULT 1",
+                "ALTER TABLE simulations ADD COLUMN gate1_source VARCHAR(128)",
+                "ALTER TABLE simulations ADD COLUMN gate1_value VARCHAR(512)",
+                "ALTER TABLE simulations ADD COLUMN gate2_passed BOOLEAN DEFAULT 1",
+                "ALTER TABLE simulations ADD COLUMN gate2_signals TEXT",
+                "ALTER TABLE claim_lifecycles ADD COLUMN ai_explanation TEXT",
             ]
             for stmt in sqlite_stmts:
                 try:
@@ -218,77 +275,11 @@ async def init_db() -> None:
                 except Exception:
                     pass
 
-    # Seed reference zones (idempotent — skips if already present)
-    await _seed_zones()
-    await _seed_local_dataset()
-
-
 async def _seed_zones() -> None:
-    """Insert canonical zones across 3 cities if not already present."""
-    from sqlalchemy import select
-    from app.models.zone import Zone
+    """Delegate to seed_db.reference zone seeding (single source of truth)."""
+    from seed_db import seed_zones
 
-    ZONES = [
-        # Hyderabad
-        dict(city_code="HYD_BANJARA_HILLS", name="Banjara Hills", city="Hyderabad", lat=17.4156, lng=78.4347, flood_risk_score=0.55, heat_risk_score=0.58, aqi_risk_score=0.56, risk_tier="medium"),
-        dict(city_code="HYD_GACHIBOWLI", name="Gachibowli", city="Hyderabad", lat=17.4401, lng=78.3489, flood_risk_score=0.50, heat_risk_score=0.57, aqi_risk_score=0.52, risk_tier="medium"),
-        dict(city_code="HYD_MADHAPUR", name="Madhapur", city="Hyderabad", lat=17.4418, lng=78.3810, flood_risk_score=0.52, heat_risk_score=0.56, aqi_risk_score=0.53, risk_tier="medium"),
-        dict(city_code="HYD_KUKATPALLY", name="Kukatpally", city="Hyderabad", lat=17.4849, lng=78.3996, flood_risk_score=0.82, heat_risk_score=0.61, aqi_risk_score=0.66, risk_tier="high"),
-        dict(city_code="HYD_LB_NAGAR", name="LB Nagar", city="Hyderabad", lat=17.3439, lng=78.5519, flood_risk_score=0.77, heat_risk_score=0.69, aqi_risk_score=0.72, risk_tier="high"),
-        dict(city_code="HYD_SECUNDERABAD", name="Secunderabad", city="Hyderabad", lat=17.4399, lng=78.4983, flood_risk_score=0.58, heat_risk_score=0.55, aqi_risk_score=0.61, risk_tier="medium"),
-        dict(city_code="HYD_HITEC_CITY", name="HITEC City", city="Hyderabad", lat=17.4475, lng=78.3762, flood_risk_score=0.44, heat_risk_score=0.53, aqi_risk_score=0.49, risk_tier="low"),
-        dict(city_code="HYD_UPPAL", name="Uppal", city="Hyderabad", lat=17.4010, lng=78.5590, flood_risk_score=0.63, heat_risk_score=0.58, aqi_risk_score=0.66, risk_tier="medium"),
-        # Vijayawada
-        dict(city_code="VJA_CENTRAL", name="Vijayawada Central", city="Vijayawada", lat=16.5062, lng=80.6480, flood_risk_score=0.60, heat_risk_score=0.71, aqi_risk_score=0.47, risk_tier="medium"),
-        dict(city_code="VJA_BENZ_CIRCLE", name="Benz Circle", city="Vijayawada", lat=16.5193, lng=80.6305, flood_risk_score=0.57, heat_risk_score=0.69, aqi_risk_score=0.46, risk_tier="medium"),
-        dict(city_code="VJA_AUTO_NAGAR", name="Auto Nagar", city="Vijayawada", lat=16.4907, lng=80.6480, flood_risk_score=0.61, heat_risk_score=0.68, aqi_risk_score=0.49, risk_tier="medium"),
-        dict(city_code="VJA_KANURU", name="Kanuru", city="Vijayawada", lat=16.5015, lng=80.6780, flood_risk_score=0.55, heat_risk_score=0.67, aqi_risk_score=0.45, risk_tier="medium"),
-        # Mumbai
-        dict(city_code="MUM_ANDHERI", name="Andheri", city="Mumbai", lat=19.1136, lng=72.8697, flood_risk_score=0.66, heat_risk_score=0.48, aqi_risk_score=0.62, risk_tier="medium"),
-        dict(city_code="MUM_DADAR", name="Dadar", city="Mumbai", lat=19.0178, lng=72.8478, flood_risk_score=0.72, heat_risk_score=0.47, aqi_risk_score=0.63, risk_tier="high"),
-        dict(city_code="MUM_THANE", name="Thane", city="Mumbai", lat=19.2183, lng=72.9781, flood_risk_score=0.60, heat_risk_score=0.49, aqi_risk_score=0.58, risk_tier="medium"),
-        # Delhi
-        dict(city_code="DEL_CONN_PLACE", name="Connaught Place", city="Delhi", lat=28.6315, lng=77.2167, flood_risk_score=0.34, heat_risk_score=0.74, aqi_risk_score=0.83, risk_tier="high"),
-        dict(city_code="DEL_DWARKA", name="Dwarka", city="Delhi", lat=28.5921, lng=77.0460, flood_risk_score=0.31, heat_risk_score=0.72, aqi_risk_score=0.79, risk_tier="high"),
-        # Bengaluru
-        dict(city_code="BLR_KORAMANGALA", name="Koramangala", city="Bangalore", lat=12.9352, lng=77.6245, flood_risk_score=0.42, heat_risk_score=0.38, aqi_risk_score=0.52, risk_tier="medium"),
-        dict(city_code="BLR_WHITEFIELD", name="Whitefield", city="Bangalore", lat=12.9698, lng=77.7499, flood_risk_score=0.33, heat_risk_score=0.41, aqi_risk_score=0.59, risk_tier="low"),
-        dict(city_code="BLR_INDIRANAGAR", name="Indiranagar", city="Bangalore", lat=12.9784, lng=77.6408, flood_risk_score=0.37, heat_risk_score=0.40, aqi_risk_score=0.55, risk_tier="medium"),
-        # Chennai
-        dict(city_code="CHE_T_NAGAR", name="T Nagar", city="Chennai", lat=13.0418, lng=80.2341, flood_risk_score=0.62, heat_risk_score=0.73, aqi_risk_score=0.54, risk_tier="medium"),
-        dict(city_code="CHE_ANNA_NAGAR", name="Anna Nagar", city="Chennai", lat=13.0850, lng=80.2101, flood_risk_score=0.58, heat_risk_score=0.71, aqi_risk_score=0.52, risk_tier="medium"),
-    ]
-
-    async with AsyncSessionLocal() as session:
-        for z in ZONES:
-            existing = (await session.execute(select(Zone).where(Zone.city_code == z["city_code"]))).scalar_one_or_none()
-            if existing:
-                # Update risk fields in case values changed
-                existing.lat = z["lat"]
-                existing.lng = z["lng"]
-                existing.flood_risk_score = z["flood_risk_score"]
-                existing.heat_risk_score = z["heat_risk_score"]
-                existing.aqi_risk_score = z["aqi_risk_score"]
-                existing.zone_risk_multiplier = round(
-                    z["flood_risk_score"] * 0.5 + z["heat_risk_score"] * 0.3 + z["aqi_risk_score"] * 0.2, 4
-                )
-                existing.risk_tier = z["risk_tier"]
-                existing.city = z["city"]
-            else:
-                multiplier = round(z["flood_risk_score"] * 0.5 + z["heat_risk_score"] * 0.3 + z["aqi_risk_score"] * 0.2, 4)
-                session.add(Zone(
-                    city_code=z["city_code"],
-                    name=z["name"],
-                    city=z["city"],
-                    lat=z["lat"],
-                    lng=z["lng"],
-                    flood_risk_score=z["flood_risk_score"],
-                    heat_risk_score=z["heat_risk_score"],
-                    aqi_risk_score=z["aqi_risk_score"],
-                    zone_risk_multiplier=multiplier,
-                    risk_tier=z["risk_tier"],
-                ))
-        await session.commit()
+    await seed_zones()
 
 
 async def _seed_local_dataset() -> None:
@@ -313,7 +304,14 @@ async def _seed_local_dataset() -> None:
         now = datetime.now(timezone.utc)
         user = (await session.execute(select(User).where(User.phone == "9000000010"))).scalar_one_or_none()
         if user is None:
-            user = User(phone="9000000010", is_active=True, is_admin=False)
+            from app.utils.canonical_id import generate_canonical_hash
+
+            user = User(
+                phone="9000000010",
+                is_active=True,
+                is_admin=False,
+                canonical_hash=generate_canonical_hash("9000000010"),
+            )
             session.add(user)
             await session.flush()
 

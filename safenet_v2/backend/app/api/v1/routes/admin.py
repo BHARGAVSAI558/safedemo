@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from pydantic import BaseModel, Field
 from fastapi.responses import Response, StreamingResponse
 import httpx
 from sqlalchemy import delete, func, or_, select, and_
@@ -24,12 +25,15 @@ from app.models.notification import Notification
 from app.models.payout import PayoutRecord
 from app.models.support import SupportQuery
 from app.models.pool_balance import ZonePoolBalance
+from app.models.payment import Payment
 from app.models.policy import Policy
 from app.models.worker import Profile, User
 from app.models.zone import Zone
+from app.models.zero_day_alert import ZeroDayAlert
 from app.services.notification_service import create_notification
 from app.schemas.admin import AnalyticsResponse, UserAdminResponse, ZoneAlertsInjectBody
 from app.engines.actuarial_pricing import compute_pool_health_payload, persist_pool_health_snapshot, run_full_weekly_pricing
+from app.engines.claims_engine import initiate_claims_for_disruption
 from app.services.earnings_dna_service import admin_aggregate_earnings_analytics
 from app.services.income_loss_receipt import build_income_loss_receipt_pdf
 from app.services.event_service import government_alert_store
@@ -235,14 +239,19 @@ async def get_admin_user(
     try:
         admin_payload = verify_admin_token(token)
         user_id = int(admin_payload.get("user_id"))
+        result = await db.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
+        if not user:
+            raise HTTPException(status_code=403, detail="Admin access required")
+        return user
     except HTTPException:
-        # Backwards compatibility: allow legacy access tokens that still map to admin users.
+        # Not an admin-signed JWT: allow only DB-flagged admin users on worker access tokens.
         user_id = get_user_id_from_token(token)
-    result = await db.execute(select(User).where(User.id == user_id, User.is_admin.is_(True)))
-    user = result.scalar_one_or_none()
-    if not user:
-        raise HTTPException(status_code=403, detail="Admin access required")
-    return user
+        result = await db.execute(select(User).where(User.id == user_id, User.is_admin.is_(True)))
+        user = result.scalar_one_or_none()
+        if not user:
+            raise HTTPException(status_code=403, detail="Admin access required")
+        return user
 
 
 def _require_api_key(x_admin_key: Optional[str] = Header(None, alias="X-Admin-Key")) -> None:
@@ -406,16 +415,26 @@ async def get_fraud_alerts(admin: User = Depends(get_admin_user), db: AsyncSessi
         .limit(20)
     )
     fraud_sims = result.scalars().all()
-    return [
-        {
-            "id": s.id,
-            "user_id": s.user_id,
-            "fraud_score": s.fraud_score,
-            "reason": s.reason,
-            "created_at": str(s.created_at),
-        }
-        for s in fraud_sims
-    ]
+    out = []
+    for s in fraud_sims:
+        flags = (
+            await db.execute(select(FraudFlag).where(FraudFlag.simulation_id == s.id).order_by(FraudFlag.id.desc()))
+        ).scalars().all()
+        canon = next((f for f in flags if str(f.flag_type) == "canonical_dedup"), None)
+        reason = str(s.reason or "")
+        if canon and canon.flag_detail:
+            reason = f"Canonical dedup blocked — {canon.flag_detail}"
+        out.append(
+            {
+                "id": s.id,
+                "user_id": s.user_id,
+                "fraud_score": s.fraud_score,
+                "reason": reason,
+                "flag_types": [str(f.flag_type) for f in flags],
+                "created_at": str(s.created_at),
+            }
+        )
+    return out
 
 
 @router.get("/logs")
@@ -684,8 +703,74 @@ async def get_zones_summary(
             "current_disruption": dis[0] if dis else None,
             "disruption_severity": round(dis[1], 3) if dis else None,
             "risk_level": _risk_from_loss_ratio(loss_ratio),
+            "risk_score": int(getattr(z, "risk_score", 0) or 0),
+            "risk_mode": str(getattr(z, "risk_mode", "NORMAL") or "NORMAL"),
         })
     return out
+
+
+class ZeroDayActionBody(BaseModel):
+    action: str = Field(..., min_length=4, max_length=32)
+
+
+@router.get("/zero-day-alerts")
+async def list_zero_day_alerts(
+    admin: User = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    rows = (await db.execute(select(ZeroDayAlert).order_by(ZeroDayAlert.id.desc()).limit(200))).scalars().all()
+    return [
+        {
+            "id": r.id,
+            "zone_id": r.zone_id,
+            "offline_ratio": r.offline_ratio,
+            "offline_count": r.offline_count,
+            "total_count": r.total_count,
+            "confidence": r.confidence,
+            "status": r.status,
+            "message": r.message,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        }
+        for r in rows
+    ]
+
+
+@router.post("/zero-day-alerts/{alert_id}/action")
+async def zero_day_alert_action(
+    alert_id: int,
+    body: ZeroDayActionBody,
+    request: Request,
+    admin: User = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    row = (await db.execute(select(ZeroDayAlert).where(ZeroDayAlert.id == alert_id))).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    act = (body.action or "").strip().lower()
+    redis = getattr(request.app.state, "redis", None)
+    if act == "deny":
+        row.status = "denied"
+    elif act == "investigate":
+        row.status = "investigating"
+    elif act == "approve_payout":
+        row.status = "approved"
+        ev = DisruptionEvent(
+            zone_id=str(row.zone_id),
+            disruption_type="ZERO_DAY",
+            severity=0.85,
+            confidence="HIGH",
+            api_source="admin_zero_day",
+            raw_value=1.0,
+            threshold_value=0.5,
+            is_active=True,
+        )
+        db.add(ev)
+        await db.flush()
+        await initiate_claims_for_disruption(db, ev, redis=redis)
+    else:
+        raise HTTPException(status_code=400, detail="Unknown action")
+    await db.commit()
+    return {"ok": True, "id": alert_id, "status": row.status}
 
 
 @router.get("/workers")
@@ -1134,6 +1219,112 @@ async def get_dashboard_stats(admin: User = Depends(get_admin_user), db: AsyncSe
         "fraud_blocked_today": int(kpis.get("fraud_blocked", 0)),
         "pool_utilization_pct": float(kpis.get("pool_utilization_pct", 0.0)),
         "total_premiums_collected_this_week": round(float(week_premiums), 2),
+    }
+
+
+@router.get("/pool-health")
+async def get_pool_health(admin: User = Depends(get_admin_user), db: AsyncSession = Depends(get_db)):
+    """
+    Aggregate pool metrics from Policy + Payment tables (rolling 7-day window for payouts).
+    Premium total = sum of weekly_premium for all active policies (current book).
+    """
+    now = datetime.now(timezone.utc)
+    week_start = now - timedelta(days=7)
+
+    total_premiums = (
+        await db.execute(
+            select(func.coalesce(func.sum(Policy.weekly_premium), 0.0)).where(Policy.status == "active")
+        )
+    ).scalar_one() or 0.0
+
+    total_payouts = (
+        await db.execute(
+            select(func.coalesce(func.sum(Payment.amount), 0.0)).where(
+                Payment.payment_type == "payout",
+                Payment.status == "success",
+                Payment.created_at >= week_start,
+            )
+        )
+    ).scalar_one() or 0.0
+
+    loss_ratio = (float(total_payouts) / float(total_premiums)) if float(total_premiums) > 0 else 0.0
+
+    zones = (await db.execute(select(Zone))).scalars().all()
+    zone_breakdown: list[dict[str, Any]] = []
+    for z in zones:
+        prof_rows = (
+            await db.execute(
+                select(Profile.user_id).where(func.lower(Profile.zone_id) == func.lower(z.city_code))
+            )
+        ).scalars().all()
+        uids = [int(x) for x in prof_rows if x is not None]
+        if not uids:
+            zone_breakdown.append(
+                {
+                    "zone_name": z.name,
+                    "city": z.city,
+                    "risk_level": str(getattr(z, "risk_mode", None) or getattr(z, "risk_tier", "") or "NORMAL"),
+                    "active_policies": 0,
+                    "premiums_week": 0.0,
+                    "payouts_week": 0.0,
+                    "loss_ratio": 0.0,
+                    "status": "HEALTHY",
+                }
+            )
+            continue
+
+        z_policies = (
+            await db.execute(
+                select(func.count(Policy.id)).where(Policy.user_id.in_(uids), Policy.status == "active")
+            )
+        ).scalar_one() or 0
+
+        z_premiums = (
+            await db.execute(
+                select(func.coalesce(func.sum(Policy.weekly_premium), 0.0)).where(
+                    Policy.user_id.in_(uids),
+                    Policy.status == "active",
+                )
+            )
+        ).scalar_one() or 0.0
+
+        z_payouts = (
+            await db.execute(
+                select(func.coalesce(func.sum(Payment.amount), 0.0)).where(
+                    Payment.user_id.in_(uids),
+                    Payment.payment_type == "payout",
+                    Payment.status == "success",
+                    Payment.created_at >= week_start,
+                )
+            )
+        ).scalar_one() or 0.0
+
+        z_ratio = (float(z_payouts) / float(z_premiums)) if float(z_premiums) > 0 else 0.0
+        risk_level = str(getattr(z, "risk_mode", None) or getattr(z, "risk_tier", "") or "NORMAL")
+        zone_breakdown.append(
+            {
+                "zone_name": z.name,
+                "city": z.city,
+                "risk_level": risk_level,
+                "active_policies": int(z_policies),
+                "premiums_week": round(float(z_premiums), 2),
+                "payouts_week": round(float(z_payouts), 2),
+                "loss_ratio": round(float(z_ratio), 3),
+                "status": "HEALTHY" if z_ratio < 0.50 else "WATCH" if z_ratio < 0.65 else "CRITICAL",
+            }
+        )
+
+    reserve_pool = float(total_premiums) - float(total_payouts)
+    overall = "HEALTHY" if loss_ratio < 0.50 else "WATCH" if loss_ratio < 0.65 else "CRITICAL"
+
+    return {
+        "total_premiums_week": round(float(total_premiums), 2),
+        "total_payouts_week": round(float(total_payouts), 2),
+        "reserve_pool": round(reserve_pool, 2),
+        "loss_ratio": round(float(loss_ratio), 3),
+        "loss_ratio_pct": round(float(loss_ratio) * 100, 1),
+        "status": overall,
+        "zone_breakdown": sorted(zone_breakdown, key=lambda x: float(x["loss_ratio"]), reverse=True),
     }
 
 

@@ -122,7 +122,7 @@ async def upsert_gig_profile(
         row.location_display = loc_disp
 
     await db.commit()
-    await db.refresh(row)
+    row = (await db.execute(select(Profile).where(Profile.user_id == current_user.id))).scalar_one()
 
     # Build / rebuild EarningsDNA matrix from onboarding data
     try:

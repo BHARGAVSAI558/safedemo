@@ -1,5 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import { Users, FileText, ShieldAlert, PieChart } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 import {
   Bar,
   BarChart,
@@ -84,20 +86,50 @@ function KpiCard({
   title,
   value,
   delta,
+  icon: Icon,
+  iconBg,
 }: {
   title: string;
   value: string;
   delta?: { label: string; direction: 'up' | 'down' | 'flat' };
+  icon: LucideIcon;
+  iconBg: string;
 }) {
   const deltaColor =
     delta?.direction === 'up' ? '#16a34a' : delta?.direction === 'down' ? '#dc2626' : '#6b7280';
   return (
-    <div style={{ ...adminUi.kpiCard }}>
+    <div
+      style={{
+        ...adminUi.kpiCard,
+        background: '#fff',
+        border: '1px solid #e5e7eb',
+        borderRadius: 12,
+        padding: 24,
+        position: 'relative',
+        minHeight: 128,
+      }}
+    >
+      <div
+        style={{
+          position: 'absolute',
+          top: 20,
+          right: 20,
+          width: 40,
+          height: 40,
+          borderRadius: 999,
+          background: iconBg,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+      >
+        <Icon size={20} color="#1e293b" strokeWidth={2} aria-hidden />
+      </div>
       <div style={styles.kpiTitle}>{title}</div>
-      <div style={styles.kpiValue}>{value}</div>
+      <div style={{ ...styles.kpiValue, fontSize: '1.5rem' }}>{value}</div>
       {delta ? (
         <div style={{ ...styles.kpiDelta, color: deltaColor }}>
-          {delta.direction === 'up' ? '▲' : delta.direction === 'down' ? '▼' : '•'} {delta.label}
+          {delta.direction === 'up' ? '↑' : delta.direction === 'down' ? '↓' : '•'} {delta.label}
         </div>
       ) : (
         <div style={styles.kpiDeltaPlaceholder} />
@@ -308,21 +340,23 @@ export default function Dashboard() {
         title="Total Active Workers"
         value={String(activeWorkers)}
         delta={{ label: '24h', direction: 'flat' }}
+        icon={Users}
+        iconBg="#eff6ff"
       />
       <KpiCard
         title="Claims Processed Today"
         value={String(claimsProcessedToday)}
         delta={{ label: `${approvalRatePct.toFixed(1)}% approval`, direction: 'up' }}
+        icon={FileText}
+        iconBg="#ecfdf5"
       />
-      <KpiCard title="Fraud Attempts Blocked" value={String(fraudBlocked)} />
+      <KpiCard title="Fraud Attempts Blocked" value={String(fraudBlocked)} icon={ShieldAlert} iconBg="#fef2f2" />
       <KpiCard
         title="Pool Utilization % (All Zones)"
         value={`${poolUtilizationPct}%`}
         delta={{ label: 'risk-based', direction: poolUtilizationPct > 80 ? 'down' : 'flat' }}
-      />
-      <KpiCard
-        title="Pooled vs Paid (Week)"
-        value={`₹${Math.round((kpis?.pooled_total_amount ?? 0) / 1000)}k / ₹${Math.round((kpis?.paid_total_amount ?? 0) / 1000)}k`}
+        icon={PieChart}
+        iconBg="#f5f3ff"
       />
     </div>
   );
@@ -385,7 +419,15 @@ export default function Dashboard() {
 
   if (kpiQuery.isLoading && !kpiQuery.data) {
     return (
-      <div style={{ ...adminUi.page, ...styles.loading }}>
+      <div
+        style={{
+          ...adminUi.page,
+          textAlign: 'center',
+          paddingTop: 60,
+          paddingBottom: 60,
+          color: 'var(--admin-muted)',
+        }}
+      >
         <span>Loading dashboard…</span>
       </div>
     );
@@ -446,19 +488,11 @@ export default function Dashboard() {
         </div>
       ) : null}
 
-      <header style={{ ...adminUi.pageHeader, display: 'flex', justifyContent: 'space-between', gap: 20, alignItems: 'flex-start', flexWrap: 'wrap' }}>
-        <div>
-          <h1 style={adminUi.h1}>Dashboard</h1>
-          <p style={adminUi.sub}>
-            Live KPIs, claim feed, pool health, and earnings DNA. Real-time rows update over the WebSocket.
-          </p>
-        </div>
-        <div style={styles.systemMeta}>
-          <span style={styles.liveDot} />
-          <span style={styles.systemLive}>Live</span>
-          <span style={styles.systemDivider}>•</span>
-          <span style={styles.systemTime}>Updated {formatUpdated(Math.max(kpiQuery.dataUpdatedAt || 0, simulationsFeedQuery.dataUpdatedAt || 0))}</span>
-        </div>
+      <header style={{ ...adminUi.pageHeader, borderBottom: 'none', paddingBottom: 8 }}>
+        <p style={{ ...adminUi.sub, marginTop: 0 }}>
+          Live KPIs, claim feed, pool health, and earnings DNA. Real-time rows update over the WebSocket. Last sync:{' '}
+          {formatUpdated(Math.max(kpiQuery.dataUpdatedAt || 0, simulationsFeedQuery.dataUpdatedAt || 0))}
+        </p>
       </header>
 
       {kpiCards}
@@ -615,8 +649,8 @@ export default function Dashboard() {
         ) : fleetDnaBarData.length === 0 ? (
           <div style={styles.empty}>No approved simulation payouts in this window yet.</div>
         ) : (
-          <div style={{ height: 320, width: '100%' }}>
-            <ResponsiveContainer width="100%" height="100%">
+          <div style={{ height: 320, width: '100%', minWidth: 0, minHeight: 280 }}>
+            <ResponsiveContainer width="100%" height="100%" minWidth={0}>
               <BarChart data={fleetDnaBarData} margin={{ top: 8, right: 12, left: 4, bottom: 8 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" vertical={false} />
                 <XAxis dataKey="hourLabel" tick={{ fontSize: 11, fill: '#64748b', fontWeight: 700 }} />
@@ -707,9 +741,9 @@ export default function Dashboard() {
           <div style={adminUi.card}>
             <div style={adminUi.cardTitle}>Loss ratio</div>
             <div style={{ ...adminUi.cardSub, marginBottom: 8 }}>Target band 60–75%</div>
-            <div style={{ height: isMobile ? 220 : 260 }}>
-              <ResponsiveContainer width="100%" height="100%">
-              <RadialBarChart data={[{ name: 'loss', value: lossRatioChartData.actual }]} cx="50%" cy="50%" innerRadius="80%" outerRadius="100%" barSize={18}>
+            <div style={{ height: isMobile ? 220 : 260, width: '100%', minWidth: 0, minHeight: 200 }}>
+              <ResponsiveContainer width="100%" height="100%" minWidth={0}>
+              <RadialBarChart data={[{ name: 'loss', value: lossRatioChartData.actual }]} cx="50%" cy="50%" innerRadius="70%" outerRadius="100%" barSize={18}>
                   <RadialBar dataKey="value" minAngle={15} background={{ fill: '#e5e7eb' }} />
                   <Tooltip />
                 </RadialBarChart>
@@ -923,7 +957,7 @@ const styles: Record<string, React.CSSProperties> = {
     border: '1px solid #fdba74',
   },
   poolWarnLine: { fontSize: 13, fontWeight: 800, color: '#9a3412', marginBottom: 4 },
-  loading: { textAlign: 'center', padding: 60, color: 'var(--admin-muted)' },
+  loading: { textAlign: 'center', paddingTop: 60, paddingBottom: 60, color: 'var(--admin-muted)' },
   kpiTitle: { fontSize: 12, color: 'var(--admin-muted)', fontWeight: 500, marginBottom: 8 },
   kpiValue: { fontSize: 'clamp(1.35rem, 2.5vw, 1.75rem)', fontWeight: 700, color: 'var(--admin-text)', marginBottom: 6, letterSpacing: '-0.02em' },
   kpiDelta: { fontSize: 12, fontWeight: 700 },

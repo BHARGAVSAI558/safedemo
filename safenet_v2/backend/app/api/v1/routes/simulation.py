@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.routes.workers import get_current_user
@@ -25,6 +25,8 @@ from app.services.forecast_shield_service import payout_message_suffix
 from app.services.notification_service import create_notification
 from app.services.onboarding_pricing import TIER_MAX_DAILY as ONBOARDING_TIER_MAX_DAILY
 from app.engines.trust_payout import payout_delay_seconds, trust_points_from_profile
+from app.engines.dual_gate import evaluate_gate2, gate_status_payload
+from app.models.zone import Zone
 from app.services.realtime_service import publish_claim_update
 from app.utils.logger import get_logger
 
@@ -79,6 +81,16 @@ def _initiated_message(scenario: str, zone_label: str) -> str:
     if scenario == "AQI_SPIKE":
         return f"Hazardous AQI spike in {zone_label} zone"
     return f"Zone curfew active — {zone_label}"
+
+
+def _sim_gate1_strings(scenario: str) -> tuple[str, str]:
+    if scenario == "HEAVY_RAIN":
+        return "OpenWeatherMap", "38mm/hr rain"
+    if scenario == "EXTREME_HEAT":
+        return "OpenWeatherMap", "43°C heat index"
+    if scenario == "AQI_SPIKE":
+        return "OpenAQ", "AQI 340 hazardous"
+    return "Government feed", "Curfew / zone disruption confirmed"
 
 
 def _approved_message(scenario: str, payout: float) -> str:
@@ -171,10 +183,25 @@ async def _sim_pipeline(
             same_disruption_already_paid = body.scenario in approved_scenarios
             already_paid = len(approved_today) > 0
 
+            disruption_start = now_utc
+            zone_orm = (
+                await db.execute(select(Zone).where(func.lower(Zone.city_code) == zone_id.lower()))
+            ).scalar_one_or_none()
+            g1_src, g1_val = _sim_gate1_strings(body.scenario)
+            if prof_row is not None:
+                prof_row.last_api_call = now_utc - timedelta(minutes=23)
+                prof_row.last_seen = now_utc
+                if zone_orm is not None:
+                    if zone_orm.lat is not None:
+                        prof_row.last_known_lat = float(zone_orm.lat)
+                    if zone_orm.lng is not None:
+                        prof_row.last_known_lng = float(zone_orm.lng)
+                    zone_orm.orders_last_hour = float(zone_orm.zone_baseline_orders or 100.0) * 0.42
+            g2_eval = evaluate_gate2(prof_row, zone_orm, disruption_start) if prof_row is not None else None
+
             # ── Payout calculation via real engine ────────────────────────────
             disruption_hours = _SCENARIO_HOURS.get(body.scenario, 4.0)
             severity = _SCENARIO_SEVERITY.get(body.scenario, 0.75)
-            disruption_start = datetime.now(timezone.utc)
 
             if prof_row is not None:
                 payout_amount, breakdown, _ = await PayoutEngine.compute_db_payout(
@@ -193,7 +220,12 @@ async def _sim_pipeline(
                 payout_amount = 0.0
                 breakdown = {"final_payout": 0.0, "expected_loss": 0.0}
 
-            expected_loss = float(breakdown.get("expected_loss", 0.0))
+            expected_loss = float(
+                breakdown.get("expected_loss")
+                or breakdown.get("raw_payout")
+                or breakdown.get("final_payout")
+                or 0.0
+            )
 
             # ── Fraud check ───────────────────────────────────────────────────
             fraud_score = 0.0
@@ -209,11 +241,14 @@ async def _sim_pipeline(
 
             fraud_flag_sim = body.fraud_mode != "NONE" or fraud_score >= 0.6
 
-            no_payout = already_paid or fraud_flag_sim
+            no_active_policy = pol is None
+            no_payout = already_paid or fraud_flag_sim or no_active_policy
             if no_payout:
                 payout_amount = 0.0
                 decision = DecisionType.REJECTED
-                if already_paid:
+                if no_active_policy:
+                    reason = "Coverage not active. Activate your plan before running disruption payout simulations."
+                elif already_paid:
                     if same_disruption_already_paid:
                         reason = f"{body.scenario.replace('_', ' ').title()} already simulated and paid today. Try again tomorrow."
                     elif body.scenario == "AQI_SPIKE":
@@ -294,6 +329,11 @@ async def _sim_pipeline(
             await db.flush()
             await db.refresh(sim)
             cid = sim.id
+            sim.gate1_passed = True
+            sim.gate1_source = g1_src
+            sim.gate1_value = g1_val
+            sim.gate2_passed = bool(g2_eval.passed) if g2_eval is not None else True
+            sim.gate2_signals = dict(g2_eval.signals) if g2_eval is not None else None
 
             # Persist PayoutRecord + pool update now that sim.id is known
             if not no_payout and payout_amount > 0:
@@ -358,6 +398,43 @@ async def _sim_pipeline(
             )
             await asyncio.sleep(step_delay)
 
+            if g2_eval is not None:
+                gs = gate_status_payload(
+                    True,
+                    bool(g2_eval.passed),
+                    f"Gate 1: {g1_val} | Gate 2: {g2_eval.human_summary}",
+                )
+                gm = [
+                    f"Gate 1: Disruption confirmed — {g1_val} ✅",
+                    f"Gate 2: Verifying you were working... ✅ {g2_eval.human_summary}",
+                ]
+                await publish_claim_update(
+                    redis=redis,
+                    worker_id=worker_id,
+                    claim_id=cid,
+                    status="GATE_CHECK",
+                    message=gm[0],
+                    zone_id=zone_id,
+                    disruption_type=body.scenario,
+                    correlation_id=run_id,
+                    gate_status=gs,
+                    gate_messages=gm,
+                )
+                await asyncio.sleep(step_delay * 0.5)
+                await publish_claim_update(
+                    redis=redis,
+                    worker_id=worker_id,
+                    claim_id=cid,
+                    status="GATE_CHECK",
+                    message=gm[1],
+                    zone_id=zone_id,
+                    disruption_type=body.scenario,
+                    correlation_id=run_id,
+                    gate_status=gs,
+                    gate_messages=gm,
+                )
+                await asyncio.sleep(step_delay * 0.5)
+
             await publish_claim_update(
                 redis=redis,
                 worker_id=worker_id,
@@ -406,6 +483,14 @@ async def _sim_pipeline(
                 )
 
             await db.commit()
+
+            try:
+                from app.services.claim_ai import persist_ai_explanation_for_simulation_id
+
+                await persist_ai_explanation_for_simulation_id(db, cid)
+                await db.commit()
+            except Exception:
+                await db.rollback()
 
             try:
                 if not no_payout and final_status == "APPROVED":

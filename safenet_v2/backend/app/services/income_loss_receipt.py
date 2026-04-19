@@ -1,4 +1,4 @@
-"""Income Loss Receipt PDF (fpdf2) for approved claims."""
+"""Income Loss Receipt PDF (fpdf2) for approved claims — includes dual-gate + AI explanation."""
 from __future__ import annotations
 
 import json
@@ -16,27 +16,7 @@ from app.models.fraud import FraudFlag
 from app.models.payment import Payment
 from app.models.payout import PayoutRecord
 from app.models.worker import Profile, User
-
-class _ReceiptPdf(FPDF):
-    def header(self) -> None:
-        self.set_font("Helvetica", "B", 16)
-        self.set_text_color(26, 115, 232)
-        self.cell(0, 10, "SafeNet", ln=True)
-        self.set_font("Helvetica", "", 9)
-        self.set_text_color(80, 80, 80)
-        self.cell(0, 5, "Income Loss Protection Receipt", ln=True)
-        self.ln(2)
-
-    def footer(self) -> None:
-        self.set_y(-14)
-        self.set_font("Helvetica", "I", 8)
-        self.set_text_color(100, 100, 100)
-        self.cell(
-            0,
-            8,
-            "This document certifies income protection payout by SafeNet / Team AlphaNexus",
-            align="C",
-        )
+from app.models.zone import Zone
 
 
 def _parse_weather(sim: Simulation) -> dict[str, Any]:
@@ -47,13 +27,6 @@ def _parse_weather(sim: Simulation) -> dict[str, Any]:
         return json.loads(raw) if isinstance(raw, str) else dict(raw)
     except Exception:
         return {}
-
-
-def _fraud_line(sim: Simulation, flag_count: int, trust_pts: int) -> str:
-    fs = float(sim.fraud_score or 0.0)
-    if getattr(sim, "fraud_flag", False) or fs >= 0.6:
-        return f"Flagged in review — model score {fs:.2f}"
-    return f"Passed all 4 layers — Trust Score: {trust_pts}"
 
 
 async def build_income_loss_receipt_pdf(
@@ -85,37 +58,21 @@ async def build_income_loss_receipt_pdf(
         await db.execute(select(User).where(User.id == sim.user_id))
     ).scalar_one_or_none()
 
+    zone_orm = None
+    if profile and profile.zone_id:
+        zone_orm = (
+            await db.execute(
+                select(Zone).where(func.lower(Zone.city_code) == str(profile.zone_id).lower())
+            )
+        ).scalar_one_or_none()
+    zone_name = zone_orm.name if zone_orm else (profile.zone_id if profile and profile.zone_id else "—")
+
     wd = _parse_weather(sim)
     breakdown = wd.get("breakdown") or {}
     hourly = float(breakdown.get("hourly_rate") or sim.expected_income or 0.0)
-    hours = float(breakdown.get("disruption_hours") or 3.0)
+    hours = float(breakdown.get("disruption_hours") or 2.5)
     cov = float(breakdown.get("coverage_multiplier") or 0.85)
-    tier_disp = str(breakdown.get("tier_display") or breakdown.get("tier") or "Standard")
-    slot_label = str(breakdown.get("slot_label") or "Current slot IST")
-
-    weather_line = str(wd.get("weather_display") or "OpenWeatherMap (disruption verified for claim)")
-    aqi_line = str(wd.get("aqi_display") or "OpenAQ / Open-Meteo (zone air quality corroboration)")
-
-    start_s = wd.get("disruption_start")
-    if start_s:
-        try:
-            st = datetime.fromisoformat(str(start_s).replace("Z", "+00:00"))
-            en = st + timedelta(hours=hours)
-            start_txt = st.strftime("%Y-%m-%d %H:%M UTC")
-            end_txt = en.strftime("%Y-%m-%d %H:%M UTC")
-        except Exception:
-            start_txt = str(start_s)
-            end_txt = "—"
-    else:
-        ca = sim.created_at
-        if ca is None:
-            ca = datetime.now(timezone.utc)
-        if ca.tzinfo is None:
-            ca = ca.replace(tzinfo=timezone.utc)
-        st = ca
-        en = st + timedelta(hours=hours)
-        start_txt = st.strftime("%Y-%m-%d %H:%M UTC")
-        end_txt = en.strftime("%Y-%m-%d %H:%M UTC")
+    tier_label = str(breakdown.get("tier_display") or breakdown.get("tier") or profile.coverage_tier or "Standard")
 
     fc = (
         await db.execute(
@@ -148,63 +105,122 @@ async def build_income_loss_receipt_pdf(
                 .limit(1)
             )
         ).scalar_one_or_none()
-        if pm and pm.razorpay_payment_id:
-            pay_ref = str(pm.razorpay_payment_id)
+        if pm:
+            pay_ref = str(pm.razorpay_payment_id or pm.razorpay_order_id or "")
     if not pay_ref:
         pay_ref = f"pay_{sim.id}_{abs(hash(str(sim.id))) % 900000 + 100000}"
 
     trust_pts = int(round(trust_score_points(getattr(profile, "trust_score", None) if profile else 0.0)))
-    fraud_txt = _fraud_line(sim, flag_count, trust_pts)
+    fs = float(sim.fraud_score or 0.0)
 
-    scenario = str(wd.get("scenario") or "DISRUPTION")
+    ai_explanation = (getattr(sim, "ai_explanation", None) or "").strip()
+    if not ai_explanation:
+        ai_explanation = "Claim processed through SafeNet 4-layer validation pipeline."
+
+    g1_ok = getattr(sim, "gate1_passed", True)
+    g2_ok = getattr(sim, "gate2_passed", True)
+    g1_label = "PASSED" if g1_ok else "FAILED"
+    g2_label = "PASSED" if g2_ok else "FAILED"
+    g1_detail = str(getattr(sim, "gate1_value", None) or wd.get("weather_display") or "Confirmed")
+    g2_detail = "Active"
+    sig = getattr(sim, "gate2_signals", None)
+    if isinstance(sig, dict):
+        if sig.get("human_summary"):
+            g2_detail = str(sig.get("human_summary"))
+        elif sig.get("summary"):
+            g2_detail = str(sig.get("summary"))
+
     payout_amt = float(sim.payout or 0.0)
-    calc_line = f"Rs {hourly:.2f} x {hours:.1f} h x {cov:.2f} ({tier_disp} tier) = Rs {payout_amt:.2f}"
-
-    pdf = _ReceiptPdf()
-    pdf.set_auto_page_break(auto=True, margin=16)
-    pdf.add_page()
-    pdf.set_text_color(20, 20, 20)
-    pdf.set_font("Helvetica", "B", 11)
-    pdf.cell(0, 7, f"Claim ID: SN-{sim.id}", ln=True)
-    pdf.set_font("Helvetica", "", 10)
     wname = (profile.name if profile else None) or (user.phone if user else "Worker")
     platform = (profile.platform if profile else None) or "—"
-    zone = (profile.zone_id if profile else None) or str(wd.get("zone_id") or "—")
-    pdf.cell(0, 6, f"Worker: {wname}", ln=True)
-    pdf.cell(0, 6, f"Platform: {platform}   Zone: {zone}", ln=True)
-    pdf.ln(2)
-    pdf.set_font("Helvetica", "B", 10)
-    pdf.cell(0, 6, "Disruption", ln=True)
+
+    start_s = wd.get("disruption_start")
+    if start_s:
+        try:
+            st = datetime.fromisoformat(str(start_s).replace("Z", "+00:00"))
+            en = st + timedelta(hours=hours)
+            start_txt = st.strftime("%Y-%m-%d %H:%M UTC")
+            end_txt = en.strftime("%Y-%m-%d %H:%M UTC")
+        except Exception:
+            start_txt = str(start_s)
+            end_txt = "—"
+    else:
+        ca = sim.created_at
+        if ca is None:
+            ca = datetime.now(timezone.utc)
+        if ca.tzinfo is None:
+            ca = ca.replace(tzinfo=timezone.utc)
+        st = ca
+        en = st + timedelta(hours=hours)
+        start_txt = st.strftime("%Y-%m-%d %H:%M UTC")
+        end_txt = en.strftime("%Y-%m-%d %H:%M UTC")
+
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=16)
+    pdf.add_page()
+
+    pdf.set_fill_color(37, 99, 235)
+    pdf.rect(0, 0, 210, 33, "F")
+    pdf.set_text_color(255, 255, 255)
+    pdf.set_y(7)
+    pdf.set_font("Helvetica", "B", 22)
+    pdf.cell(0, 10, "SafeNet", ln=True, align="C")
     pdf.set_font("Helvetica", "", 10)
-    pdf.cell(0, 6, f"Type: {scenario.replace('_', ' ')}", ln=True)
-    pdf.cell(0, 6, f"Start: {start_txt}", ln=True)
-    pdf.cell(0, 6, f"End: {end_txt}", ln=True)
-    pdf.cell(0, 6, f"Duration: {hours:.1f} hours", ln=True)
-    pdf.ln(2)
-    pdf.set_font("Helvetica", "B", 10)
-    pdf.cell(0, 6, "Data sources", ln=True)
+    pdf.cell(0, 7, "AI-Powered Income Protection Receipt", ln=True, align="C")
+
+    pdf.set_text_color(20, 20, 20)
+    pdf.ln(6)
+
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 7, f"Claim: SNT-{sim.id:06d}", ln=True)
+    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(0, 6, f"Worker: {wname}  |  Platform: {platform}  |  Zone: {zone_name}", ln=True)
+    pdf.cell(0, 6, f"Disruption window: {start_txt} → {end_txt}", ln=True)
+    pdf.ln(4)
+
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 7, "Dual Gate Validation:", ln=True)
+    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(0, 6, f"  Gate 1 (External Disruption): {g1_label} — {g1_detail}", ln=True)
+    pdf.cell(0, 6, f"  Gate 2 (Worker Activity): {g2_label} — {g2_detail}", ln=True)
+    pdf.ln(4)
+
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 7, "Income Loss Calculation:", ln=True)
+    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(0, 6, f"  Earnings DNA rate ({zone_name}, this time slot): Rs.{hourly:.2f}/hr", ln=True)
+    pdf.cell(0, 6, f"  Hours lost to disruption: {hours}h", ln=True)
+    pdf.cell(0, 6, f"  Coverage multiplier ({tier_label} plan): x{cov}", ln=True)
+    pdf.set_fill_color(220, 252, 231)
+    pdf.set_font("Helvetica", "B", 13)
+    pdf.cell(
+        0,
+        10,
+        f"  PAYOUT: Rs.{payout_amt:.2f}  (Formula: Rs.{hourly:.2f} x {hours}h x {cov})",
+        ln=True,
+        fill=True,
+    )
+    pdf.ln(4)
+
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 7, "SafeNet AI Explanation:", ln=True)
+    pdf.set_font("Helvetica", "I", 10)
+    pdf.set_text_color(30, 30, 30)
+    pdf.multi_cell(0, 6, f"  {ai_explanation}")
+    pdf.ln(4)
+
     pdf.set_font("Helvetica", "", 9)
-    pdf.multi_cell(0, 5, weather_line)
-    pdf.multi_cell(0, 5, aqi_line)
-    pdf.ln(1)
-    pdf.set_font("Helvetica", "B", 10)
-    pdf.cell(0, 6, "Earnings DNA", ln=True)
-    pdf.set_font("Helvetica", "", 10)
-    pdf.multi_cell(0, 5, f"Your typical rate for this slot: Rs {hourly:.2f}/hr — {slot_label}")
-    pdf.ln(1)
-    pdf.set_font("Helvetica", "B", 10)
-    pdf.cell(0, 6, "Calculation", ln=True)
-    pdf.set_font("Helvetica", "", 10)
-    pdf.multi_cell(0, 5, calc_line)
-    pdf.ln(1)
-    pdf.set_font("Helvetica", "B", 10)
-    pdf.cell(0, 6, "Fraud & trust", ln=True)
-    pdf.set_font("Helvetica", "", 10)
-    pdf.multi_cell(0, 5, fraud_txt)
-    pdf.ln(2)
-    pdf.set_font("Helvetica", "B", 12)
-    pdf.cell(0, 8, f"Payout: Rs {payout_amt:.2f}", ln=True)
-    pdf.set_font("Helvetica", "", 10)
-    pdf.cell(0, 6, f"Razorpay reference: {pay_ref}", ln=True)
+    pdf.set_text_color(100, 100, 100)
+    fraud_note = (
+        f"Fraud validation: 4-layer pipeline — {flag_count} flag(s) | Score: {fs:.2f} | "
+        f"Trust: {trust_pts}/100"
+    )
+    pdf.cell(0, 5, fraud_note, ln=True)
+    pdf.cell(0, 5, f"Razorpay ref: {pay_ref}", ln=True)
+
+    pdf.set_y(-18)
+    pdf.set_font("Helvetica", "I", 8)
+    pdf.set_text_color(120, 120, 120)
+    pdf.cell(0, 5, "SafeNet / Team AlphaNexus — Guidewire DevTrails 2026 | Parametric Income Protection", ln=True, align="C")
 
     return bytes(pdf.output(dest="S"))

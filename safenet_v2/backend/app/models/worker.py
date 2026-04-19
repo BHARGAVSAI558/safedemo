@@ -31,6 +31,7 @@ class User(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     phone: Mapped[str] = mapped_column(String(15), unique=True, nullable=False, index=True)
+    canonical_hash: Mapped[Optional[str]] = mapped_column(String(64), unique=True, nullable=True, index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[Optional[DateTime]] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -69,6 +70,10 @@ class Profile(Base):
     bank_ifsc: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     bank_upi_id: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
     bank_account_name: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    last_api_call: Mapped[Optional[DateTime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_seen: Mapped[Optional[DateTime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_known_lat: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    last_known_lng: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     created_at: Mapped[Optional[DateTime]] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[Optional[DateTime]] = mapped_column(DateTime(timezone=True), onupdate=func.now())
 

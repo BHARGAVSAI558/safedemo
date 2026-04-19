@@ -18,6 +18,7 @@ from app.models import (  # noqa: F401
     User,
     Zone,
 )
+from app.models.zero_day_alert import ZeroDayAlert  # noqa: F401
 
 config = context.config
 if config.config_file_name is not None:

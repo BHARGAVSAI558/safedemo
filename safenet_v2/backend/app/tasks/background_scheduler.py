@@ -36,6 +36,8 @@ from app.services.forecast_shield_service import refresh_forecast_shields
 from app.services.notification_service import create_notification
 from app.engines.disruption_engine import check_disruptions_for_zone
 from app.engines.claims_engine import initiate_claims_for_disruption
+from app.engines.risk_mode_job import run_zone_risk_refresh
+from app.engines.zero_day_detector import run_zero_day_detection
 from app.utils.logger import logger as struct_logger
 
 from app.utils.logger import get_logger
@@ -783,6 +785,18 @@ async def stale_claim_resolver(app: Any) -> None:
                 pass
 
 
+async def zero_day_scan(app: Any) -> None:
+    redis = getattr(app.state, "redis", None)
+    async with AsyncSessionLocal() as session:
+        await run_zero_day_detection(session, redis=redis)
+
+
+async def zone_risk_mode_scan(app: Any) -> None:
+    redis = getattr(app.state, "redis", None)
+    async with AsyncSessionLocal() as session:
+        await run_zone_risk_refresh(session, redis=redis)
+
+
 async def disruption_scan(app: Any) -> None:
     """
     disruption_scan: every 30 minutes, 6 AM – 11 PM IST.
@@ -938,6 +952,18 @@ def start_background_scheduler(app: Any) -> AsyncIOScheduler:
             job_id="disruption_scan",
             trigger=CronTrigger(minute="*/30", hour="6-23", timezone=str(IST)),
             func=lambda: disruption_scan(app),
+            lock_ttl_seconds=25 * 60,
+        ),
+        JobDef(
+            job_id="zero_day_detection",
+            trigger=IntervalTrigger(seconds=60, timezone=str(IST)),
+            func=lambda: zero_day_scan(app),
+            lock_ttl_seconds=50,
+        ),
+        JobDef(
+            job_id="zone_risk_mode",
+            trigger=IntervalTrigger(minutes=30, timezone=str(IST)),
+            func=lambda: zone_risk_mode_scan(app),
             lock_ttl_seconds=25 * 60,
         ),
     ]

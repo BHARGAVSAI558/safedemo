@@ -499,10 +499,17 @@ async def get_profile(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    from datetime import datetime, timezone
+
     result = await db.execute(select(Profile).where(Profile.user_id == current_user.id))
     profile = result.scalar_one_or_none()
     if not profile:
         return await _default_worker_profile_out(current_user, db)
+    now = datetime.now(timezone.utc)
+    profile.last_api_call = now
+    profile.last_seen = now
+    await db.commit()
+    await db.refresh(profile)
     return await _worker_profile_payload(profile, current_user, db)
 
 
@@ -511,11 +518,7 @@ async def get_profile_alias(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(select(Profile).where(Profile.user_id == current_user.id))
-    profile = result.scalar_one_or_none()
-    if not profile:
-        return await _default_worker_profile_out(current_user, db)
-    return await _worker_profile_payload(profile, current_user, db)
+    return await get_profile(current_user=current_user, db=db)
 
 
 @router.get("/{worker_id}/dashboard")

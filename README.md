@@ -390,3 +390,18 @@ DATABASE_URL=postgresql+asyncpg://user:pass@host/dbname
 ---
 
 *DevTrails 2026 — Team AlphaNexus*
+
+---
+
+## Submission Quick Links (Update Before Final Submit)
+
+### Pitch Deck
+[Add public pitch deck link here](https://example.com/pitch-deck)
+
+### Recorded Video
+[Add public demo video link here](https://example.com/demo-video)
+
+### Live Links
+Worker App: [https://safenet-sage.vercel.app](https://safenet-sage.vercel.app)  
+Admin Dashboard: [https://safenet-admin-wine.vercel.app](https://safenet-admin-wine.vercel.app)  
+Backend API: [https://safenet-api-y4se.onrender.com](https://safenet-api-y4se.onrender.com)

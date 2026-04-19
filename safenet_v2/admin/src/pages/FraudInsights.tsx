@@ -1,10 +1,11 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, LineChart, Line, CartesianGrid } from 'recharts';
 
 import api from '../api';
 import { adminUi } from '../theme/adminUi';
 import { useFraudQueueStore } from '../stores/fraudQueue';
+import { useZeroDayStore } from '../stores/zeroDay';
 
 type QueueRow = {
   cluster_id: string;
@@ -60,11 +61,46 @@ export default function FraudInsights() {
         freeze_status: Number(x.fraud_score) > 0.85 ? 'FROZEN' : 'PENDING',
       }));
 
+  const wsZero = useZeroDayStore((s) => s.items);
+
+  const zeroDayQuery = useQuery({
+    queryKey: ['admin', 'zero-day-alerts'],
+    queryFn: async () => {
+      try {
+        const res = await api.get('/admin/zero-day-alerts');
+        return Array.isArray(res.data) ? res.data : [];
+      } catch (err) {
+        console.error('Zero-day alerts fetch failed:', err);
+        return [];
+      }
+    },
+    refetchInterval: 30_000,
+    retry: 1,
+  });
+
   const doAction = async (clusterId: string, action: string) => {
     try {
       await api.post(`/admin/fraud/${clusterId}/action`, { action });
     } catch {
       // action failures are non-critical; queue will refresh
+    }
+  };
+
+  const zeroDayRows = Array.isArray(zeroDayQuery.data) ? zeroDayQuery.data : [];
+  const hasActiveZeroDay = zeroDayRows.some(
+    (r: { status?: string }) => !r.status || r.status === 'pending' || r.status === 'active',
+  );
+
+  useEffect(() => {
+    if (wsZero.length > 0) void zeroDayQuery.refetch();
+  }, [wsZero.length, zeroDayQuery]);
+
+  const zeroDayAction = async (id: number, action: 'approve_payout' | 'deny' | 'investigate') => {
+    try {
+      await api.post(`/admin/zero-day-alerts/${id}/action`, { action });
+      void zeroDayQuery.refetch();
+    } catch {
+      // ignore
     }
   };
 
@@ -79,6 +115,24 @@ export default function FraudInsights() {
         <div style={{ ...adminUi.card, marginBottom: 16, borderColor: '#fecaca', background: '#fef2f2', color: '#b91c1c', fontWeight: 600, fontSize: '0.875rem' }}>
           Could not load fraud alerts.{' '}
           <button type="button" style={adminUi.btnPrimary} onClick={() => void alertsQuery.refetch()}>Retry</button>
+        </div>
+      ) : null}
+
+      {hasActiveZeroDay ? (
+        <div
+          style={{
+            marginBottom: 16,
+            padding: '14px 18px',
+            borderRadius: 12,
+            border: '1px solid #fecaca',
+            background: '#fef2f2',
+            color: '#991b1b',
+            fontWeight: 700,
+            fontSize: '0.9rem',
+          }}
+          role="status"
+        >
+          ⚠️ Unclassified Mass Offline Event — review the Zero-Day queue below.
         </div>
       ) : null}
 
@@ -136,11 +190,69 @@ export default function FraudInsights() {
         </div>
       </div>
 
+      <div style={{ ...adminUi.card, marginBottom: 20, padding: 0, overflow: 'hidden' }}>
+        <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--admin-border)' }}>
+          <div style={adminUi.cardTitle}>Zero-Day Alerts</div>
+          <div style={{ ...adminUi.cardSub, marginBottom: 0 }}>
+            Mass offline / no API match — DBSCAN signal. Live via WebSocket when connected.
+          </div>
+        </div>
+        <div style={{ ...adminUi.tableScroll, maxHeight: 'min(360px, 50vh)', border: 'none', borderRadius: 0 }}>
+          <table style={{ ...adminUi.table, minWidth: 720 }}>
+            <thead>
+              <tr>
+                <th style={adminUi.th}>Zone</th>
+                <th style={adminUi.th}>Offline ratio</th>
+                <th style={adminUi.th}>Confidence</th>
+                <th style={adminUi.th}>Detected</th>
+                <th style={adminUi.th}>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {zeroDayRows.map((r) => (
+                <tr key={String(r.id)}>
+                  <td style={adminUi.td}>{r.zone_id}</td>
+                  <td style={adminUi.td}>{typeof r.offline_ratio === 'number' ? `${Math.round(r.offline_ratio * 100)}%` : '—'}</td>
+                  <td style={adminUi.td}>{typeof r.confidence === 'number' ? r.confidence.toFixed(2) : '—'}</td>
+                  <td style={adminUi.td}>
+                    {r.created_at
+                      ? new Date(r.created_at).toLocaleString()
+                      : r.timestamp
+                        ? new Date(r.timestamp).toLocaleString()
+                        : '—'}
+                  </td>
+                  <td style={adminUi.td}>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                      <button type="button" style={adminUi.btnPrimary} onClick={() => void zeroDayAction(r.id, 'approve_payout')}>
+                        Approve payout
+                      </button>
+                      <button type="button" style={adminUi.btnDanger} onClick={() => void zeroDayAction(r.id, 'deny')}>
+                        Deny
+                      </button>
+                      <button type="button" style={adminUi.btnMuted} onClick={() => void zeroDayAction(r.id, 'investigate')}>
+                        Investigate
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+              {zeroDayRows.length === 0 ? (
+                <tr>
+                  <td colSpan={5} style={adminUi.td}>
+                    <div style={adminUi.empty}>No zero-day anomalies.</div>
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
       <div className="admin-chart-row">
         <div style={adminUi.card}>
           <div style={adminUi.cardTitle}>Fraud score distribution</div>
-          <div style={{ height: 260, marginTop: 12 }}>
-            <ResponsiveContainer width="100%" height="100%">
+          <div style={{ height: 260, marginTop: 12, width: '100%', minWidth: 0, minHeight: 220 }}>
+            <ResponsiveContainer width="100%" height="100%" minWidth={0}>
               <BarChart data={Array.isArray(analyticsQuery.data?.fraud_score_histogram) ? analyticsQuery.data.fraud_score_histogram : []} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="var(--admin-border)" vertical={false} />
                 <XAxis dataKey="bucket" tick={{ fontSize: 11, fill: 'var(--admin-muted)' }} />
@@ -153,8 +265,8 @@ export default function FraudInsights() {
         </div>
         <div style={adminUi.card}>
           <div style={adminUi.cardTitle}>Enrollment vs weather signal</div>
-          <div style={{ height: 260, marginTop: 12 }}>
-            <ResponsiveContainer width="100%" height="100%">
+          <div style={{ height: 260, marginTop: 12, width: '100%', minWidth: 0, minHeight: 220 }}>
+            <ResponsiveContainer width="100%" height="100%" minWidth={0}>
               <LineChart data={Array.isArray(analyticsQuery.data?.enrollment_timeline) ? analyticsQuery.data.enrollment_timeline : []} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="var(--admin-border)" />
                 <XAxis dataKey="hour" tick={{ fontSize: 11, fill: 'var(--admin-muted)' }} />

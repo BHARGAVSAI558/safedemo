@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import math
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.routes.workers import get_current_user
+from app.core.config import settings
 from app.db.session import get_db
+from app.engines.payment_engine import confirm_premium_payment, create_premium_order
 from app.engines.pool_engine import calculate_weekly_premium, update_pool_on_premium
 from app.engines.premium_engine import PremiumEngine
 from app.models.policy import Policy
@@ -37,6 +40,27 @@ from app.utils.logger import get_logger
 
 log = get_logger(__name__)
 router = APIRouter()
+
+
+class PoliciesCreateOrderBody(BaseModel):
+    worker_id: int = Field(..., ge=1)
+    tier: str = Field(..., min_length=2, max_length=32)
+    policy_id: Optional[int] = Field(default=None)
+
+
+class PoliciesVerifyPaymentBody(BaseModel):
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
+    worker_id: int = Field(..., ge=1)
+    tier: Optional[str] = Field(default=None, max_length=32)
+
+
+def _normalize_tier(raw: str) -> str:
+    t = str(raw or "").strip().title()
+    if t not in {"Basic", "Standard", "Pro"}:
+        raise HTTPException(status_code=422, detail="Invalid tier — use Basic, Standard, or Pro")
+    return t
 
 TIER_MULT: Dict[str, float] = {
     "Basic": 0.92,
@@ -180,6 +204,74 @@ async def build_policy_current(
             "final_premium": round(float(pol.weekly_premium or 0.0), 2),
         },
     )
+
+
+@router.post("/create-order")
+async def policies_create_razorpay_order(
+    body: PoliciesCreateOrderBody,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Create a Razorpay order for weekly premium (paise amount + publishable key for Checkout).
+    """
+    if int(body.worker_id) != int(current_user.id):
+        raise HTTPException(status_code=403, detail="worker_id does not match authenticated user")
+    tier = _normalize_tier(body.tier)
+    out = await create_premium_order(db, current_user.id, tier, body.policy_id)
+    key = (settings.RAZORPAY_KEY_ID or "").strip() or str(out.get("key_id") or "")
+    return {
+        "order_id": out["order_id"],
+        "amount": int(out.get("amount_paise") or 0),
+        "key": key,
+        "key_id": key,
+        "currency": "INR",
+        "tier": tier,
+    }
+
+
+@router.post("/verify-payment")
+async def policies_verify_razorpay_payment(
+    body: PoliciesVerifyPaymentBody,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if int(body.worker_id) != int(current_user.id):
+        raise HTTPException(status_code=403, detail="worker_id does not match authenticated user")
+    log.info(
+        "policy_payment_verify_requested",
+        engine_name="policies_route",
+        decision="started",
+        reason_code="VERIFY_PAYMENT",
+        worker_id=current_user.id,
+        order_id=body.razorpay_order_id.strip(),
+    )
+    result = await confirm_premium_payment(
+        db,
+        razorpay_order_id=body.razorpay_order_id.strip(),
+        razorpay_payment_id=body.razorpay_payment_id.strip(),
+        razorpay_signature=body.razorpay_signature.strip(),
+    )
+    if not result.get("ok"):
+        log.warning(
+            "policy_payment_verify_failed",
+            engine_name="policies_route",
+            decision="failed",
+            reason_code="VERIFY_PAYMENT_FAIL",
+            worker_id=current_user.id,
+            order_id=body.razorpay_order_id.strip(),
+            error=result.get("error", "Payment verification failed"),
+        )
+        raise HTTPException(status_code=400, detail=result.get("error", "Payment verification failed"))
+    log.info(
+        "policy_payment_verify_success",
+        engine_name="policies_route",
+        decision="activated",
+        reason_code="VERIFY_PAYMENT_OK",
+        worker_id=current_user.id,
+        order_id=body.razorpay_order_id.strip(),
+    )
+    return {"status": "activated", **{k: v for k, v in result.items() if k != "ok"}}
 
 
 @router.get("/current", response_model=PolicyCurrentResponse)

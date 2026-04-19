@@ -12,7 +12,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.routes.workers import get_current_user
@@ -202,6 +202,80 @@ def _risk_label(multiplier: float) -> str:
     if multiplier > 1.1:
         return "MEDIUM"
     return "LOW"
+
+
+async def _resolve_zone_row(db: AsyncSession, zone_id: str) -> Zone | None:
+    """Match city_code, slug aliases, or JSON zone_coordinates keys — same spirit as /zones/{id}/status."""
+    raw = str(zone_id or "").strip()
+    if not raw:
+        return None
+    key = raw.lower()
+    norm = _slugify(raw)
+    z = (
+        await db.execute(select(Zone).where(func.lower(Zone.city_code) == func.lower(raw)))
+    ).scalar_one_or_none()
+    if z is not None:
+        return z
+    rows = (await db.execute(select(Zone))).scalars().all()
+    for row in rows:
+        aliases = _zone_aliases(row)
+        if key in {a.lower() for a in aliases if a} or norm in aliases:
+            return row
+    if raw in ZONE_COORDS:
+        canon = raw
+        z2 = (
+            await db.execute(select(Zone).where(func.lower(Zone.city_code) == func.lower(canon)))
+        ).scalar_one_or_none()
+        if z2 is not None:
+            return z2
+    return None
+
+
+@router.get("/zones/{zone_id}/risk-mode")
+async def get_zone_risk_mode(zone_id: str, db: AsyncSession = Depends(get_db)):
+    from app.engines.risk_mode_engine import get_risk_mode
+
+    z = await _resolve_zone_row(db, zone_id)
+    if z is None:
+        # Never 404 for unknown slugs from GPS/onboarding — return conservative defaults.
+        mode = get_risk_mode(45)
+        return {
+            "zone_id": str(zone_id).strip(),
+            "name": str(zone_id).strip(),
+            "risk_score": 45,
+            **mode,
+            "updated_at": None,
+            "fallback": True,
+        }
+    mode = get_risk_mode(int(z.risk_score or 0))
+    return {
+        "zone_id": z.city_code,
+        "name": z.name,
+        "risk_score": int(z.risk_score or 0),
+        **mode,
+        "updated_at": z.risk_mode_updated_at.isoformat() if z.risk_mode_updated_at else None,
+    }
+
+
+@router.get("/zones")
+async def list_zones(db: AsyncSession = Depends(get_db)):
+    rows = (await db.execute(select(Zone).order_by(Zone.city, Zone.name))).scalars().all()
+    return [
+        {
+            "id": z.id,
+            "city_code": z.city_code,
+            "name": z.name,
+            "city": z.city,
+            "lat": z.lat,
+            "lng": z.lng,
+            "flood_risk_score": z.flood_risk_score,
+            "heat_risk_score": z.heat_risk_score,
+            "aqi_risk_score": z.aqi_risk_score,
+            "zone_risk_multiplier": z.zone_risk_multiplier,
+            "risk_tier": z.risk_tier,
+        }
+        for z in rows
+    ]
 
 
 @router.get("/zones/detect")
@@ -509,7 +583,27 @@ async def forecast_daily(
             data = resp.json()
     except Exception as exc:
         log.warning("forecast_daily_upstream_failed", zone_id=zone_id, error=str(exc))
-        raise HTTPException(status_code=502, detail="Weather forecast temporarily unavailable") from exc
+        today = datetime.now(timezone.utc).date()
+        fallback_days = []
+        for i in range(14):
+            d = today + timedelta(days=i)
+            fallback_days.append(
+                {
+                    "date": d.isoformat(),
+                    "temp_max_c": 36 + (i % 3),
+                    "temp_min_c": 27 - (i % 2),
+                    "precip_prob_pct": 20 if i % 4 else 42,
+                }
+            )
+        return {
+            "zone_id": zone_id,
+            "location_label": place_label,
+            "latitude": lat,
+            "longitude": lon,
+            "source": "fallback",
+            "days": fallback_days,
+            "fallback": True,
+        }
 
     daily = data.get("daily") or {}
     dates = daily.get("time") or []

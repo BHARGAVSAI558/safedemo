@@ -9,10 +9,10 @@ import {
   useColorScheme,
   TextInput,
   Alert,
+  Platform,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
-import { CommonActions } from '@react-navigation/native';
 import { useQueryClient, useQuery, useMutation } from '@tanstack/react-query';
 
 import { useAuth } from '../contexts/AuthContext';
@@ -20,28 +20,27 @@ import { useClaims } from '../contexts/ClaimContext';
 import { usePolicy } from '../contexts/PolicyContext';
 import { useWorkerProfile } from '../hooks/useWorkerProfile';
 import { policies, workers, formatApiError } from '../services/api';
-import { navigationRef } from '../services/navigationService';
 import { canonicalTierLabel } from '../utils/tierDisplay';
 import { useLocalization } from '../contexts/LocalizationContext';
 import { formatShortLocation } from '../utils/locationDisplay';
 import AppModal from '../components/AppModal';
 
-const LADDER = ['Newcomer', 'Verified', 'Trusted', 'Guardian', 'Champion'];
+const LADDER = ['Newcomer', 'Reliable', 'Trusted', 'Elite'];
 
 const PLATFORM_UI = {
   zomato: { bg: '#fef2f2', color: '#E23744', label: 'Zomato' },
   swiggy: { bg: '#fff7ed', color: '#EA580C', label: 'Swiggy' },
   other: { bg: '#f1f5f9', color: '#475569', label: 'Other' },
 };
+const TIER_WEEKLY = { Basic: 49, Standard: 89, Pro: 149 };
 
 function ladderTierIndex(score) {
   if (score === null || score === undefined || Number.isNaN(Number(score))) return 0;
   const raw = Number(score);
   const pts = raw <= 1 ? raw * 100 : raw;
-  if (pts >= 85) return 4;
-  if (pts >= 68) return 3;
-  if (pts >= 51) return 2;
-  if (pts >= 34) return 1;
+  if (pts >= 80) return 3;
+  if (pts >= 60) return 2;
+  if (pts >= 38) return 1;
   return 0;
 }
 
@@ -65,7 +64,7 @@ function ProfileRow({ label, children, isLast, theme: th }) {
   );
 }
 
-export default function ProfileScreen() {
+export default function ProfileScreen({ navigation }) {
   const insets = useSafeAreaInsets();
   const scheme = useColorScheme() || 'light';
   const { signOut, workerProfile, token } = useAuth();
@@ -80,6 +79,7 @@ export default function ProfileScreen() {
   const [bankUpi, setBankUpi] = useState('');
   const [bankAcc, setBankAcc] = useState('');
   const [bankIfsc, setBankIfsc] = useState('');
+  const [coveragePrompt, setCoveragePrompt] = useState({ visible: false, tier: 'Standard' });
   const policiesQuery = useQuery({
     queryKey: ['policies', 'list'],
     enabled: Boolean(token),
@@ -97,7 +97,33 @@ export default function ProfileScreen() {
     onSuccess: async () => {
       setBankOpen(false);
       await qc.invalidateQueries({ queryKey: ['workerProfile'] });
-      Alert.alert('Saved', 'Bank details updated successfully.');
+      await qc.invalidateQueries({ queryKey: ['policy', 'current'] });
+      const rawTier = profile?.coverage_tier;
+      const tierLabel = rawTier ? canonicalTierLabel(rawTier) : '';
+      const status = String(policy?.status || '').toLowerCase();
+      const needsPayment = Boolean(tierLabel) && status !== 'active';
+      if (needsPayment) {
+        if (Platform.OS === 'web') {
+          setCoveragePrompt({ visible: true, tier: tierLabel });
+          return;
+        }
+        Alert.alert(
+          'Confirm your coverage',
+          `Your plan is saved as ${tierLabel}. Open Coverage and complete the weekly payment to activate protection.`,
+          [
+            { text: 'Later', style: 'cancel' },
+            {
+              text: 'Open Coverage',
+              onPress: () => {
+                try { navigation?.navigate?.('Coverage'); } catch (_) {}
+                try { navigation?.navigate?.('MainTabs', { screen: 'Coverage' }); } catch (_) {}
+              },
+            },
+          ]
+        );
+      } else {
+        Alert.alert('Saved', 'Bank details updated successfully.');
+      }
     },
     onError: (e) => {
       Alert.alert('Could not save', formatApiError(e));
@@ -105,7 +131,25 @@ export default function ProfileScreen() {
   });
 
   const trustIdx = useMemo(() => ladderTierIndex(profile?.trust_score), [profile?.trust_score]);
-  const filledCircles = trustIdx + 1;
+  const onSaveBankDetails = useCallback(() => {
+    const upi = String(bankUpi || '').trim();
+    const acc = String(bankAcc || '').trim();
+    const ifsc = String(bankIfsc || '').trim();
+    const name = String(bankName || '').trim();
+    const hasUpi = upi.length > 0;
+    const hasBank = acc.length > 0 || ifsc.length > 0 || name.length > 0;
+    if (!hasUpi && !hasBank) {
+      Alert.alert('Add payout details', 'Enter UPI ID or bank details before saving.');
+      return;
+    }
+    if (!hasUpi && (!acc || !ifsc || !name)) {
+      Alert.alert('Incomplete bank details', 'For bank transfer, fill account holder, account number, and IFSC.');
+      return;
+    }
+    saveBankMutation.mutate();
+  }, [bankUpi, bankAcc, bankIfsc, bankName, saveBankMutation]);
+
+  const filledCircles = Math.min(LADDER.length, trustIdx + 1);
 
   const policyRows = useMemo(() => {
     const rows = policiesQuery.data;
@@ -131,11 +175,6 @@ export default function ProfileScreen() {
     try {
       qc.clear();
     } catch (_) {}
-    requestAnimationFrame(() => {
-      if (navigationRef.isReady()) {
-        navigationRef.dispatch(CommonActions.reset({ index: 0, routes: [{ name: 'Onboarding' }] }));
-      }
-    });
   }, [signOut, resetClaims, resetPolicy, qc]);
 
   const plat = platformUi(profile?.platform);
@@ -175,9 +214,9 @@ export default function ProfileScreen() {
       <Text style={[styles.title, { color: theme.text }]}>Account</Text>
       <View style={styles.langRow}>
         {[
-          { code: 'en', label: 'English' },
-          { code: 'hi', label: 'हिंदी' },
-          { code: 'te', label: 'తెలుగు' },
+          { code: 'en', label: 'EN' },
+          { code: 'hi', label: 'हि' },
+          { code: 'te', label: 'తె' },
         ].map((lang) => {
           const active = language === lang.code;
           return (
@@ -185,14 +224,13 @@ export default function ProfileScreen() {
               key={lang.code}
               style={[
                 styles.langBtn,
+                styles.langBtnCompact,
                 { borderColor: theme.cardBorder, backgroundColor: theme.card },
                 active ? styles.langBtnActive : null,
               ]}
               onPress={() => void setLanguage(lang.code)}
             >
-              <Text style={[styles.langBtnText, { color: active ? '#fff' : theme.sub }]}>
-                {lang.label}
-              </Text>
+              <Text style={[styles.langBtnText, { color: active ? '#fff' : theme.sub }]}>{lang.label}</Text>
             </TouchableOpacity>
           );
         })}
@@ -255,15 +293,32 @@ export default function ProfileScreen() {
           </View>
         </ProfileRow>
       </View>
-      <View style={[styles.card, { backgroundColor: theme.card, borderColor: theme.cardBorder, borderWidth: 1 }]}>
-        <Text style={[styles.cardTitle, { color: theme.sub }]}>Payout destination</Text>
-        <Text style={[styles.muted, { color: theme.sub }]}>
-          {profile?.bank_upi_id || profile?.bank_account_number
-            ? `Saved: ${profile?.bank_upi_id || `A/C ••••${String(profile?.bank_account_number || '').slice(-4)}`}`
-            : 'No bank details added yet.'}
+      <View
+        style={[
+          styles.card,
+          styles.payoutCard,
+          {
+            backgroundColor:
+              profile?.bank_upi_id || profile?.bank_account_number ? '#ecfdf5' : '#fff7ed',
+            borderColor:
+              profile?.bank_upi_id || profile?.bank_account_number ? 'rgba(22,163,74,0.3)' : 'rgba(245,158,11,0.35)',
+            borderWidth: 1.5,
+          },
+        ]}
+      >
+        <Text style={[styles.cardTitle, { color: '#334155' }]}>Payout Account</Text>
+        <Text style={[styles.payoutStatus, { color: profile?.bank_upi_id || profile?.bank_account_number ? '#166534' : '#b45309' }]}>
+          {profile?.bank_upi_id || profile?.bank_account_number ? 'Ready for payouts' : 'Add bank details to receive payouts'}
+        </Text>
+        <Text style={[styles.muted, { color: theme.sub, marginTop: 6 }]}>
+          {profile?.bank_upi_id
+            ? `UPI: ${profile.bank_upi_id}`
+            : profile?.bank_account_number
+              ? `A/C ••••${String(profile.bank_account_number).slice(-4)}`
+              : 'No payout method saved yet.'}
         </Text>
         <TouchableOpacity
-          style={[styles.logoutBtn, { marginTop: 12, backgroundColor: '#dbeafe' }]}
+          style={[styles.payoutBtn]}
           onPress={() => {
             setBankName(String(profile?.bank_account_name || ''));
             setBankUpi(String(profile?.bank_upi_id || ''));
@@ -272,7 +327,7 @@ export default function ProfileScreen() {
             setBankOpen(true);
           }}
         >
-          <Text style={[styles.logoutText, { color: '#1d4ed8' }]}>Update bank details</Text>
+          <Text style={styles.payoutBtnText}>Update bank details</Text>
         </TouchableOpacity>
       </View>
 
@@ -282,9 +337,7 @@ export default function ProfileScreen() {
           policyRows.map((row, i) => {
             const active = String(row.status || '').toLowerCase() === 'active';
             const planName = canonicalTierLabel(row.plan);
-            const line = `${planName} · ₹${Math.round(Number(row.weekly_premium || 0))}/wk${
-              active ? ' · Active' : ''
-            }`;
+            const line = `${planName} · ₹${Math.round(Number(row.weekly_premium || 0))}/wk`;
             return (
               <View
                 key={`${row.started_at || i}-${row.plan}`}
@@ -295,6 +348,11 @@ export default function ProfileScreen() {
                   <Text style={[styles.policyMeta, { color: theme.sub }]}>
                     {row.started_at ? String(row.started_at).slice(0, 10) : '—'} ·{' '}
                     {String(row.status || '—')}
+                  </Text>
+                </View>
+                <View style={[styles.policyChip, active ? styles.policyChipActive : styles.policyChipInactive]}>
+                  <Text style={[styles.policyChipText, active ? styles.policyChipTextActive : styles.policyChipTextInactive]}>
+                    {active ? 'Active' : 'Inactive'}
                   </Text>
                 </View>
               </View>
@@ -333,6 +391,19 @@ export default function ProfileScreen() {
                 value={bankName}
                 onChangeText={setBankName}
               />
+              <Text style={styles.bankSectionLabel}>UPI</Text>
+              <Text style={styles.bankHint}>Faster credits when your UPI ID matches the bank name above</Text>
+              <Text style={styles.bankFieldLabel}>UPI ID</Text>
+              <TextInput
+                style={styles.bankInput}
+                placeholder="you@bankupi"
+                placeholderTextColor="#94a3b8"
+                value={bankUpi}
+                onChangeText={setBankUpi}
+                autoCapitalize="none"
+                autoCorrect={false}
+              />
+              <Text style={styles.bankOrLabel}>OR</Text>
               <Text style={styles.bankSectionLabel}>Bank transfer</Text>
               <Text style={styles.bankHint}>IFSC + account for NEFT-style payouts</Text>
               <Text style={styles.bankFieldLabel}>IFSC code</Text>
@@ -353,25 +424,54 @@ export default function ProfileScreen() {
                 onChangeText={setBankAcc}
                 keyboardType="number-pad"
               />
-              <Text style={styles.bankSectionLabel}>UPI</Text>
-              <Text style={styles.bankHint}>Faster credits when your UPI ID matches the bank name above</Text>
-              <Text style={styles.bankFieldLabel}>UPI ID</Text>
-              <TextInput
-                style={styles.bankInput}
-                placeholder="you@bankupi"
-                placeholderTextColor="#94a3b8"
-                value={bankUpi}
-                onChangeText={setBankUpi}
-                autoCapitalize="none"
-                autoCorrect={false}
-              />
-              <TouchableOpacity style={styles.bankSaveBtn} onPress={() => saveBankMutation.mutate()} disabled={saveBankMutation.isPending}>
+              <TouchableOpacity style={styles.bankSaveBtn} onPress={onSaveBankDetails} disabled={saveBankMutation.isPending}>
                 <Text style={styles.bankSaveText}>{saveBankMutation.isPending ? 'Saving...' : 'Save securely'}</Text>
               </TouchableOpacity>
               <TouchableOpacity style={styles.bankCloseBtn} onPress={() => setBankOpen(false)}>
                 <Text style={styles.bankCloseText}>Close</Text>
               </TouchableOpacity>
             </View>
+          </View>
+        </View>
+      </AppModal>
+      <AppModal
+        visible={coveragePrompt.visible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setCoveragePrompt({ visible: false, tier: 'Standard' })}
+      >
+        <View style={styles.bankBackdrop}>
+          <View style={styles.coveragePromptCard}>
+            <Text style={styles.coveragePromptTitle}>Activate coverage now?</Text>
+            <Text style={styles.coveragePromptSub}>
+              You selected {coveragePrompt.tier} plan. Complete payment to activate protection.
+            </Text>
+            <TouchableOpacity
+              style={styles.coveragePromptPrimary}
+              onPress={() => {
+                const tier = coveragePrompt.tier || 'Standard';
+                setCoveragePrompt({ visible: false, tier: 'Standard' });
+                try { navigation?.navigate?.('Coverage', { openPaymentForTier: tier }); } catch (_) {}
+                try { navigation?.navigate?.('MainTabs', { screen: 'Coverage', params: { openPaymentForTier: tier } }); } catch (_) {}
+              }}
+            >
+              <Text style={styles.coveragePromptPrimaryText}>
+                Pay ₹{TIER_WEEKLY[coveragePrompt.tier] || 89} Now
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.coveragePromptSecondary}
+              onPress={() => {
+                setCoveragePrompt({ visible: false, tier: 'Standard' });
+                try { navigation?.navigate?.('Coverage', { openPlanSheet: true }); } catch (_) {}
+                try { navigation?.navigate?.('MainTabs', { screen: 'Coverage', params: { openPlanSheet: true } }); } catch (_) {}
+              }}
+            >
+              <Text style={styles.coveragePromptSecondaryText}>Change Plan</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => setCoveragePrompt({ visible: false, tier: 'Standard' })}>
+              <Text style={styles.coveragePromptLater}>Later</Text>
+            </TouchableOpacity>
           </View>
         </View>
       </AppModal>
@@ -382,37 +482,38 @@ export default function ProfileScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1 },
   content: { paddingHorizontal: 16, paddingTop: 16, paddingBottom: 48 },
-  title: { fontSize: 22, fontWeight: '900', marginBottom: 4 },
+  title: { fontSize: 24, fontWeight: '900', marginBottom: 8, letterSpacing: -0.2 },
   screenSub: { fontSize: 13, fontWeight: '600', marginBottom: 14 },
-  langRow: { flexDirection: 'row', gap: 8, marginBottom: 14 },
-  langBtn: { borderWidth: 1, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 10 },
+  langRow: { flexDirection: 'row', gap: 8, marginBottom: 16, alignItems: 'center' },
+  langBtn: { borderWidth: 1, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 12 },
+  langBtnCompact: { minWidth: 52, minHeight: 42, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 10, paddingVertical: 10 },
   langBtnActive: { borderColor: '#2563eb', backgroundColor: '#2563eb' },
   langBtnText: { fontWeight: '700' },
   loadingWrap: { padding: 24, alignItems: 'center' },
   loadingHint: { marginTop: 10, color: '#64748b', fontWeight: '600' },
   hero: {
     borderRadius: 20,
-    padding: 20,
+    padding: 22,
     marginBottom: 18,
     alignItems: 'center',
     shadowColor: '#000',
-    shadowOpacity: 0.08,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 4,
+    shadowOpacity: 0.18,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 8,
   },
   avatar: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
+    width: 78,
+    height: 78,
+    borderRadius: 39,
     backgroundColor: 'rgba(255,255,255,0.25)',
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: 12,
   },
   avatarText: { fontSize: 28, fontWeight: '900', color: '#fff' },
-  heroName: { fontSize: 20, fontWeight: '900', color: '#fff', textAlign: 'center' },
-  heroSub: { fontSize: 14, fontWeight: '600', color: 'rgba(255,255,255,0.74)', marginTop: 6 },
+  heroName: { fontSize: 22, fontWeight: '900', color: '#fff', textAlign: 'center' },
+  heroSub: { fontSize: 13, fontWeight: '700', color: 'rgba(255,255,255,0.82)', marginTop: 6 },
   card: {
     backgroundColor: '#fff',
     borderRadius: 16,
@@ -427,9 +528,9 @@ const styles = StyleSheet.create({
   cardTitle: { fontSize: 12, fontWeight: '800', color: '#64748b', letterSpacing: 0.6, marginBottom: 12 },
   row: { flexDirection: 'row', alignItems: 'center', paddingVertical: 13, gap: 12 },
   rowBorder: { borderBottomWidth: 1, borderBottomColor: '#eee', marginVertical: 6 },
-  rowLabel: { width: 128, fontSize: 14, color: '#6b7280', fontWeight: '700', paddingTop: 1 },
+  rowLabel: { width: 128, fontSize: 13, color: '#6b7280', fontWeight: '800', paddingTop: 1 },
   rowValue: { flex: 1, alignItems: 'flex-end' },
-  rowValueText: { fontSize: 16, color: '#1a1a2e', fontWeight: '600', textAlign: 'right' },
+  rowValueText: { fontSize: 17, color: '#1a1a2e', fontWeight: '800', textAlign: 'right' },
   platformBadge: {
     alignSelf: 'flex-start',
     paddingHorizontal: 10,
@@ -438,22 +539,32 @@ const styles = StyleSheet.create({
     backgroundColor: '#fff3e0',
   },
   platformBadgeText: { fontWeight: '800', fontSize: 14 },
-  ladderRow: { flexDirection: 'row', justifyContent: 'flex-end', gap: 10 },
+  ladderRow: { flexDirection: 'row', justifyContent: 'flex-end', gap: 8 },
   ladderDot: {
-    width: 22,
-    height: 22,
-    borderRadius: 11,
+    width: 18,
+    height: 18,
+    borderRadius: 9,
     borderWidth: 2,
   },
   ladderDotFilled: { backgroundColor: '#1a73e8', borderColor: '#1a73e8' },
   ladderDotEmpty: { backgroundColor: '#f1f5f9', borderColor: '#cbd5e1' },
-  ladderCaption: { fontSize: 13, color: '#475569', fontWeight: '700', marginTop: 6, textAlign: 'right' },
+  ladderCaption: { fontSize: 12, color: '#475569', fontWeight: '700', marginTop: 7, textAlign: 'right' },
   sectionTitle: { fontSize: 15, fontWeight: '900', color: '#1a1a2e', marginBottom: 8 },
   policyRow: { paddingVertical: 14 },
   policyRowBorder: { borderTopWidth: 1, borderTopColor: 'rgba(0,0,0,0.06)' },
   policyLine: { fontSize: 14, fontWeight: '800', color: '#1a1a2e' },
   policyMeta: { fontSize: 11, color: '#9ca3af', marginTop: 4 },
   muted: { fontSize: 13, color: '#777' },
+  payoutCard: { marginTop: -4 },
+  payoutStatus: { fontSize: 14, fontWeight: '800' },
+  payoutBtn: { marginTop: 12, backgroundColor: '#1d4ed8', borderRadius: 12, paddingVertical: 12, alignItems: 'center' },
+  payoutBtnText: { color: '#fff', fontWeight: '800', fontSize: 14 },
+  policyChip: { borderRadius: 999, paddingHorizontal: 10, paddingVertical: 4, marginLeft: 10 },
+  policyChipActive: { backgroundColor: '#dcfce7' },
+  policyChipInactive: { backgroundColor: '#f1f5f9' },
+  policyChipText: { fontSize: 11, fontWeight: '800' },
+  policyChipTextActive: { color: '#166534' },
+  policyChipTextInactive: { color: '#475569' },
   logoutBtn: { backgroundColor: '#fee2e2', borderRadius: 14, padding: 16, alignItems: 'center', width: '100%' },
   logoutText: { color: '#dc2626', fontWeight: '600' },
   bankBackdrop: { flex: 1, backgroundColor: 'rgba(15,23,42,0.55)', justifyContent: 'flex-end' },
@@ -495,6 +606,15 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase',
   },
   bankFieldLabel: { fontSize: 12, fontWeight: '700', color: '#475569', marginBottom: 6, marginTop: 10 },
+  bankOrLabel: {
+    alignSelf: 'center',
+    marginTop: 12,
+    marginBottom: 6,
+    fontSize: 11,
+    color: '#64748b',
+    fontWeight: '800',
+    letterSpacing: 1,
+  },
   bankHint: { fontSize: 12, color: '#94a3b8', fontWeight: '600', marginBottom: 2 },
   bankInput: {
     borderWidth: 1.5,
@@ -522,4 +642,19 @@ const styles = StyleSheet.create({
   bankSaveText: { color: '#fff', fontWeight: '900', fontSize: 15 },
   bankCloseBtn: { marginTop: 12, alignItems: 'center', paddingVertical: 10 },
   bankCloseText: { color: '#64748b', fontWeight: '700' },
+  coveragePromptCard: {
+    marginHorizontal: 18,
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#dbeafe',
+  },
+  coveragePromptTitle: { fontSize: 18, fontWeight: '900', color: '#0f172a' },
+  coveragePromptSub: { marginTop: 8, fontSize: 13, color: '#475569', lineHeight: 19, fontWeight: '600' },
+  coveragePromptPrimary: { marginTop: 14, backgroundColor: '#1d4ed8', borderRadius: 10, paddingVertical: 12, alignItems: 'center' },
+  coveragePromptPrimaryText: { color: '#fff', fontWeight: '900', fontSize: 14 },
+  coveragePromptSecondary: { marginTop: 10, borderWidth: 1, borderColor: '#bfdbfe', borderRadius: 10, paddingVertical: 11, alignItems: 'center' },
+  coveragePromptSecondaryText: { color: '#1d4ed8', fontWeight: '800' },
+  coveragePromptLater: { textAlign: 'center', marginTop: 12, color: '#64748b', fontWeight: '700' },
 });

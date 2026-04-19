@@ -17,6 +17,7 @@ Orchestrates the full pipeline from a DisruptionEvent to payout:
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timezone
 from typing import Any, Optional
 from uuid import uuid4
@@ -28,11 +29,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.engines.fraud_engine_claims import check_fraud
 from app.engines.payout_engine import PayoutEngine
+from app.engines.dual_gate import evaluate_gate2, gate1_from_disruption_event, gate_status_payload
 from app.models.claim import ClaimLifecycle, DecisionType, DisruptionEvent, Simulation
 from app.models.fraud import FraudFlag, FraudSignal
 from app.models.payout import PayoutRecord
 from app.models.policy import Policy
 from app.models.worker import Profile, User
+from app.models.zone import Zone
+from app.services.claim_ai import persist_ai_explanation_for_simulation_id
 from app.services.realtime_service import publish_claim_update, publish_payout_credited
 from app.utils.logger import get_logger
 
@@ -110,7 +114,7 @@ async def _get_eligible_workers(
             .join(Policy, Policy.user_id == User.id)
             .where(
                 User.is_active.is_(True),
-                Profile.zone_id == zone_id,
+                func.lower(Profile.zone_id) == str(zone_id).lower(),
                 Policy.status == "active",
             )
         )
@@ -301,6 +305,131 @@ async def initiate_claims_for_disruption(
             except Exception:
                 pass
 
+            # ── Dual gate: external disruption (G1) + worker activity (G2) ─────────────
+            zone_row = (
+                await db.execute(select(Zone).where(func.lower(Zone.city_code) == str(zone_id).lower()))
+            ).scalar_one_or_none()
+            if zone_row is not None:
+                base = float(zone_row.zone_baseline_orders or 100.0)
+                zone_row.orders_last_hour = base * 0.42
+
+            g1_ok, g1_src, g1_val = gate1_from_disruption_event(disruption_event)
+            g2_res = evaluate_gate2(profile, zone_row, disruption_event.started_at)
+            if zone_row is not None and str(zone_row.risk_mode or "").upper() == "CRITICAL":
+                g2_res.passed = True
+                g2_res.signals["critical_mode_bypass"] = True
+
+            lc_gate = (
+                await db.execute(
+                    select(ClaimLifecycle).where(ClaimLifecycle.claim_id == f"auto:{user.id}:{disruption_event.id}")
+                )
+            ).scalar_one_or_none()
+            if lc_gate is not None:
+                lc_gate.gate1_passed = bool(g1_ok)
+                lc_gate.gate1_source = g1_src
+                lc_gate.gate1_value = g1_val
+                lc_gate.gate2_passed = bool(g2_res.passed)
+                lc_gate.gate2_signals = dict(g2_res.signals)
+                lc_gate.gate2_failure_reason = None if g2_res.passed else (g2_res.failure_reason or "")
+
+            gs = gate_status_payload(
+                True,
+                bool(g2_res.passed),
+                f"Gate 1: {g1_val} | Gate 2: {g2_res.human_summary}",
+            )
+            gate_msgs = [
+                f"Gate 1: Disruption confirmed — {g1_val} ✅",
+                (
+                    f"Gate 2: Verifying you were working... ✅ {g2_res.human_summary}"
+                    if g2_res.passed
+                    else "Gate 2: Not detected as active during disruption"
+                ),
+            ]
+            try:
+                await publish_claim_update(
+                    redis=redis,
+                    worker_id=user.id,
+                    claim_id=f"auto:{user.id}:{disruption_event.id}",
+                    status="GATE_CHECK",
+                    message=gate_msgs[0],
+                    zone_id=zone_id,
+                    disruption_type=disruption_type,
+                    correlation_id=correlation_id,
+                    gate_status=gs,
+                    gate_messages=gate_msgs,
+                )
+            except Exception:
+                pass
+
+            if not g2_res.passed:
+                reason_nw = (
+                    "Disruption confirmed in your zone, but you were not detected as active"
+                )
+                wd_nw = {
+                    "zone_id": zone_id,
+                    "scenario": disruption_type,
+                    "weather_display": g1_val,
+                    "disruption_type": disruption_type,
+                    "breakdown": {
+                        "hourly_rate": 0.0,
+                        "disruption_hours": disruption_hours,
+                        "coverage_multiplier": 0.8,
+                    },
+                }
+                sim_nw = Simulation(
+                    user_id=user.id,
+                    disruption_event_id=disruption_event.id,
+                    is_active=False,
+                    fraud_flag=False,
+                    fraud_score=0.0,
+                    weather_disruption=True,
+                    traffic_disruption=False,
+                    event_disruption=False,
+                    final_disruption=True,
+                    expected_income=0.0,
+                    actual_income=0.0,
+                    loss=0.0,
+                    payout=0.0,
+                    decision=DecisionType.REJECTED,
+                    reason=f"NO_PAYOUT_NOT_WORKING: {reason_nw}",
+                    weather_data=json.dumps(wd_nw, default=str),
+                    gate1_passed=bool(g1_ok),
+                    gate1_source=g1_src,
+                    gate1_value=g1_val,
+                    gate2_passed=False,
+                    gate2_signals=dict(g2_res.signals),
+                )
+                db.add(sim_nw)
+                await db.flush()
+                if lc_gate is not None:
+                    lc_gate.status = "NO_PAYOUT_NOT_WORKING"
+                    lc_gate.message = reason_nw
+                await db.commit()
+                try:
+                    await persist_ai_explanation_for_simulation_id(db, sim_nw.id)
+                    await db.commit()
+                except Exception:
+                    await db.rollback()
+                try:
+                    await publish_claim_update(
+                        redis=redis,
+                        worker_id=user.id,
+                        claim_id=f"auto:{user.id}:{disruption_event.id}",
+                        status="NO_PAYOUT_NOT_WORKING",
+                        message=reason_nw,
+                        zone_id=zone_id,
+                        disruption_type=disruption_type,
+                        correlation_id=correlation_id,
+                        gate_status=gate_status_payload(True, False, reason_nw),
+                        gate_messages=gate_msgs,
+                    )
+                except Exception:
+                    pass
+                worker_result["status"] = "no_payout_not_working"
+                worker_result["reason"] = reason_nw
+                results.append(worker_result)
+                continue
+
             # ── Step 4: Payout calculation (no DB writes yet — simulation_id unknown) ──
             payout_amount, payout_breakdown, _ = await PayoutEngine.compute_db_payout(
                 db=db,
@@ -315,7 +444,12 @@ async def initiate_claims_for_disruption(
                 correlation_id=correlation_id,
             )
 
-            expected_loss = float(payout_breakdown.get("expected_loss", 0.0))
+            expected_loss = float(
+                payout_breakdown.get("expected_loss")
+                or payout_breakdown.get("raw_payout")
+                or payout_breakdown.get("final_payout")
+                or 0.0
+            )
             severity_factor = float(payout_breakdown.get("severity_factor", severity))
             pool_factor = float(payout_breakdown.get("pool_factor", 1.0))
             zone_factor = float(payout_breakdown.get("zone_factor", 1.0))
@@ -344,6 +478,13 @@ async def initiate_claims_for_disruption(
             reason = _build_reason(claim_status, fraud_score, disruption_type, disruption_hours)
 
             # ── Step 7: Store Simulation ───────────────────────────────────────
+            wd_main = {
+                "zone_id": zone_id,
+                "scenario": disruption_type,
+                "weather_display": g1_val,
+                "disruption_type": disruption_type,
+                "breakdown": dict(payout_breakdown),
+            }
             sim = Simulation(
                 user_id=user.id,
                 disruption_event_id=disruption_event.id,
@@ -360,6 +501,12 @@ async def initiate_claims_for_disruption(
                 payout=payout_amount if claim_status == "approved" else 0.0,
                 decision=decision,
                 reason=reason,
+                weather_data=json.dumps(wd_main, default=str),
+                gate1_passed=bool(g1_ok),
+                gate1_source=g1_src,
+                gate1_value=g1_val,
+                gate2_passed=bool(g2_res.passed),
+                gate2_signals=dict(g2_res.signals),
             )
             db.add(sim)
             await db.flush()
@@ -437,6 +584,11 @@ async def initiate_claims_for_disruption(
                 ))
 
             await db.commit()
+            try:
+                await persist_ai_explanation_for_simulation_id(db, sim.id)
+                await db.commit()
+            except Exception:
+                await db.rollback()
 
             # Real-time status push
             try:

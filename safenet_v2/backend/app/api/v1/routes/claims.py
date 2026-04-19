@@ -1,9 +1,11 @@
+import json
 from datetime import datetime, timezone
 from typing import Any, List
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy import or_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,12 +25,17 @@ from app.services.simulation_labels import disruption_from_simulation
 from app.services.notification_service import create_notification
 from app.services.zone_match import disruption_zone_candidates
 from app.services.income_loss_receipt import build_income_loss_receipt_pdf
+from app.services.gemini_dispute import generate_dispute_verdict
 from app.utils.logger import get_logger
 
 log = get_logger(__name__)
 router = APIRouter()
 
 IST = ZoneInfo("Asia/Kolkata")
+
+
+class DisputeSubmitBody(BaseModel):
+    text: str = Field(..., min_length=1, max_length=8000)
 
 
 def _to_base36(n: int) -> str:
@@ -151,6 +158,8 @@ def _history_row(s: Simulation) -> dict[str, Any]:
         "created_at": created_iso,
         "fraud_score": round(fraud_score, 4),
         "reason": _history_reason(s, "CREDITED" if credited else refined, payout_amt),
+        "ai_explanation": getattr(s, "ai_explanation", None),
+        "dispute_verdict": getattr(s, "dispute_verdict", None),
         "payout_breakdown": payout_breakdown,
         "details": {
             "claim_id": s.id,
@@ -220,6 +229,73 @@ def _amount_from_title(title: str | None) -> float:
         return float(digits) if digits else 0.0
     except Exception:
         return 0.0
+
+
+@router.get("/{claim_id}/ai-explanation")
+async def get_claim_ai_explanation(
+    claim_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    sim = (
+        await db.execute(
+            select(Simulation).where(Simulation.id == int(claim_id), Simulation.user_id == current_user.id)
+        )
+    ).scalar_one_or_none()
+    if sim is None:
+        raise HTTPException(status_code=404, detail="Claim not found")
+    return {
+        "claim_id": sim.id,
+        "ai_explanation": sim.ai_explanation,
+    }
+
+
+@router.post("/{claim_id}/dispute")
+async def submit_claim_dispute(
+    claim_id: int,
+    body: DisputeSubmitBody,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    sim = (
+        await db.execute(
+            select(Simulation).where(Simulation.id == int(claim_id), Simulation.user_id == current_user.id)
+        )
+    ).scalar_one_or_none()
+    if sim is None:
+        raise HTTPException(status_code=404, detail="Claim not found")
+    profile = (
+        await db.execute(select(Profile).where(Profile.user_id == current_user.id))
+    ).scalar_one_or_none()
+    zone_row = None
+    if profile and profile.zone_id:
+        zone_row = (
+            await db.execute(select(Zone).where(func.lower(Zone.city_code) == str(profile.zone_id).lower()))
+        ).scalar_one_or_none()
+    zone_name = zone_row.name if zone_row else (profile.zone_id if profile else "your zone")
+    wd: dict[str, Any] = {}
+    if sim.weather_data:
+        try:
+            wd = json.loads(sim.weather_data) if isinstance(sim.weather_data, str) else {}
+        except Exception:
+            wd = {}
+    claim_dict = {
+        "disruption_type": wd.get("scenario") or "disruption",
+        "status": str(sim.decision.value if hasattr(sim.decision, "value") else sim.decision),
+        "fraud_score": float(sim.fraud_score or 0.0),
+        "gate1_passed": bool(getattr(sim, "gate1_passed", True)),
+        "gate2_passed": bool(getattr(sim, "gate2_passed", True)),
+    }
+    worker_dict = {
+        "name": profile.name if profile else current_user.phone,
+        "platform": profile.platform if profile else "—",
+    }
+    zone_dict = {"name": zone_name}
+    verdict = await generate_dispute_verdict(body.text.strip(), claim_dict, worker_dict, zone_dict)
+    sim.dispute_worker_text = body.text.strip()[:8000]
+    sim.dispute_verdict = verdict
+    await db.commit()
+    return verdict
 
 
 @router.get("/{claim_id}/receipt")

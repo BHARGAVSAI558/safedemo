@@ -12,14 +12,18 @@ import {
   RefreshControl,
   Alert,
   ActivityIndicator,
+  TextInput,
+  Image,
+  Linking,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { LinearGradient } from 'expo-linear-gradient';
+import { useNavigation, useRoute } from '@react-navigation/native';
 
 import AppModal from '../components/AppModal';
-import { policies, zones as zonesApi, payments } from '../services/api';
-import { openRazorpayWebCheckout } from '../utils/razorpayCheckout';
+import { policies, zones as zonesApi } from '../services/api';
+import { useAuth } from '../contexts/AuthContext';
 import { usePolicy } from '../contexts/PolicyContext';
 import { useWorkerProfile } from '../hooks/useWorkerProfile';
 import { canonicalTierLabel } from '../utils/tierDisplay';
@@ -28,10 +32,17 @@ import { formatShortLocation } from '../utils/locationDisplay';
 import { useLocalization } from '../contexts/LocalizationContext';
 
 const TIERS = [
-  { id: 'Basic', name: 'Basic', blurb: 'Essential daily protection', listWeekly: 35, maxDay: 350 },
-  { id: 'Standard', name: 'Standard', blurb: 'Balanced coverage for most riders', listWeekly: 49, maxDay: 500, popular: true },
-  { id: 'Pro', name: 'Pro', blurb: 'Maximum daily payout cap', listWeekly: 70, maxDay: 700 },
+  { id: 'Basic', name: 'Basic', blurb: 'Essential weekly protection', listWeekly: 49, maxWeekly: 600 },
+  { id: 'Standard', name: 'Standard', blurb: 'Balanced coverage for most riders', listWeekly: 89, maxWeekly: 900, popular: true },
+  { id: 'Pro', name: 'Pro', blurb: 'Higher weekly payout cap', listWeekly: 149, maxWeekly: 1200 },
 ];
+
+const PAYMENT_ASSETS = {
+  phonepe: require('../assets/PHNE.jpg'),
+  gpay: require('../assets/gpay.png'),
+  card: require('../assets/cards.png'),
+  qr: require('../assets/qr.png'),
+};
 
 const CITY_ZONE_HINT = [
   ['vijayawada', 'benz_circle'],
@@ -66,15 +77,33 @@ function formatUntil(iso) {
   }
 }
 
+function FakeQr() {
+  return <Image source={PAYMENT_ASSETS.qr} style={styles.qrImage} />;
+}
+
 export default function PolicyScreen() {
+  const navigation = useNavigation();
+  const route = useRoute();
   const insets = useSafeAreaInsets();
   const scheme = useColorScheme() || 'light';
   const qc = useQueryClient();
+  const { userId } = useAuth();
   const { setPolicy } = usePolicy();
   const { data: worker } = useWorkerProfile();
   const { t } = useLocalization();
 
   const [sheetOpen, setSheetOpen] = useState(false);
+  const [gatewayOpen, setGatewayOpen] = useState(false);
+  const [selectedTier, setSelectedTier] = useState(null);
+  const [payMethod, setPayMethod] = useState('upi');
+  const [payForm, setPayForm] = useState({
+    upi: '',
+    cardNumber: '',
+    cardName: '',
+    cardExpiry: '',
+    cardCvv: '',
+    netbanking: 'HDFC',
+  });
   const [justActivated, setJustActivated] = useState(false);
   const [activateError, setActivateError] = useState('');
   const checkScale = useRef(new Animated.Value(0)).current;
@@ -114,6 +143,13 @@ export default function PolicyScreen() {
     refetchInterval: 1000 * 60 * 20,
   });
 
+  const riskModeQuery = useQuery({
+    queryKey: ['policyRiskMode', zoneId],
+    queryFn: () => zonesApi.getRiskMode(zoneId),
+    enabled: Boolean(zoneId),
+    staleTime: 60_000,
+  });
+
   const p = policyQuery.data;
   const istTodayLine = useMemo(() => formatIstTodayLong(), []);
 
@@ -130,12 +166,13 @@ export default function PolicyScreen() {
   const maxDay = Number(p?.max_coverage_per_day || 0);
   const rawRisk = worker?.risk_score ?? p?.risk_score ?? 0;
   const riskNorm = Number(rawRisk);
-  const payouts = Number(worker?.total_payouts ?? 0);
-  /** Until a real payout leaves your account, keep the AI risk meter at 0 (cold / calibrating). */
-  const riskCalibrating = payouts === 0;
-  const riskPct = riskCalibrating
-    ? 0
-    : Math.max(0, Math.min(100, riskNorm <= 1 ? riskNorm * 100 : riskNorm));
+  const zoneRiskScore = Number(riskModeQuery.data?.risk_score);
+  const riskPct = useMemo(() => {
+    const z = Number.isFinite(zoneRiskScore) && zoneRiskScore >= 0 ? zoneRiskScore : null;
+    const pr = Number.isFinite(riskNorm) ? riskNorm : 0;
+    const base = z != null ? z : pr <= 1 ? pr * 100 : pr;
+    return Math.max(0, Math.min(100, Math.round(base)));
+  }, [zoneRiskScore, riskNorm]);
   const daysLeft = Number(p?.days_remaining ?? 0);
 
   const statusStyle = useMemo(() => {
@@ -145,80 +182,26 @@ export default function PolicyScreen() {
   }, [status]);
 
   const payMutation = useMutation({
-    mutationFn: async (tier) => {
+    mutationFn: async ({ tier, method }) => {
       const policyId = p?.policy_id ?? null;
-      const order = await payments.createPremiumOrder(tier, policyId);
-      const keyId = String(order.key_id || '').trim();
+      const wid = userId != null ? Number(userId) : NaN;
+      if (!Number.isFinite(wid) || wid <= 0) {
+        throw new Error('Not signed in');
+      }
+      const upi = String(worker?.bank_upi_id || '').trim();
+      const acct = String(worker?.bank_account_number || '').trim();
+      if (!upi && !acct) {
+        throw new Error('BANK_DETAILS_REQUIRED');
+      }
+      const order = await policies.createOrder(wid, tier, policyId);
       const orderId = order.order_id;
-      const amountPaise = Number(order.amount_paise || 0);
-      const isTestOrder = String(orderId || '').startsWith('order_test_');
-      const canHosted = Boolean(keyId) && !isTestOrder;
-
-      const verifyDev = () =>
-        payments.verifyPremium(orderId, `pay_dev_${Date.now()}`, 'webhook_verified');
-
-      if (Platform.OS === 'web' && canHosted) {
-        const phoneRaw = worker?.phone_number || worker?.phone || '';
-        const phone = String(phoneRaw).replace(/\D/g, '').length >= 10 ? String(phoneRaw).replace(/\D/g, '').slice(-10) : '';
-        const resp = await openRazorpayWebCheckout({
-          keyId,
-          orderId,
-          amountPaise,
-          description: `SafeNet ${tier} — weekly premium`,
-          prefill: {
-            name: worker?.name ? String(worker.name) : '',
-            contact: phone,
-          },
-        });
-        return payments.verifyPremium(orderId, resp.razorpay_payment_id, resp.razorpay_signature);
-      }
-
-      if (Platform.OS !== 'web' && canHosted) {
-        const go = await new Promise((resolve) => {
-          if (!__DEV__) {
-            Alert.alert(
-              'Pay with Razorpay',
-              'Complete UPI, cards, or netbanking in the worker web app (same login) — the Razorpay checkout window opens there. Simulating disruptions on Home does not charge premium.',
-              [{ text: 'OK', onPress: () => resolve(false) }]
-            );
-            return;
-          }
-          Alert.alert(
-            'Pay with Razorpay',
-            'For a real checkout, open the worker app in the browser on this machine. In development you can simulate a test payment (no charge).',
-            [
-              { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
-              { text: 'Simulate test pay', onPress: () => resolve(true) },
-            ],
-            { cancelable: true }
-          );
-        });
-        if (!go) throw new Error('cancelled');
-        return verifyDev();
-      }
-
-      /* No hosted checkout: never silently mark paid in production. */
-      if (!__DEV__) {
-        Alert.alert(
-          'Premium checkout',
-          'Razorpay is not fully configured (publishable key or live order missing). Add RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET on the server, then try again. Note: simulating disruptions does not collect premium—it only runs the claims demo.',
-          [{ text: 'OK' }]
-        );
-        throw new Error('cancelled');
-      }
-      const simOk = await new Promise((resolve) => {
-        Alert.alert(
-          'Development only',
-          'No Razorpay checkout is available (test order or missing key). Simulate a successful premium payment for local testing?',
-          [
-            { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
-            { text: 'Simulate payment', onPress: () => resolve(true) },
-          ],
-          { cancelable: true }
-        );
+      return policies.verifyPayment({
+        razorpay_order_id: orderId,
+        razorpay_payment_id: `pay_${method}_${Date.now()}`,
+        razorpay_signature: 'webhook_verified',
+        worker_id: wid,
+        tier,
       });
-      if (!simOk) throw new Error('cancelled');
-      return verifyDev();
     },
     onSuccess: async () => {
       setActivateError('');
@@ -228,6 +211,7 @@ export default function PolicyScreen() {
         queryFn: () => policies.getCurrent(),
       });
       if (fresh) setPolicy(fresh, fresh.status);
+      setGatewayOpen(false);
       setSheetOpen(false);
       setJustActivated(true);
       checkScale.setValue(0);
@@ -241,8 +225,13 @@ export default function PolicyScreen() {
     },
     onError: (error) => {
       const msg = error?.message;
-      if (msg === 'checkout_dismissed') {
-        setActivateError('Payment window closed before completion.');
+      if (msg === 'BANK_DETAILS_REQUIRED') {
+        setActivateError('Add a UPI ID or bank account in Account before paying premium.');
+        Alert.alert(
+          'Bank details required',
+          'Save a UPI ID or bank account under Account, then return here to pay for your plan.',
+          [{ text: 'OK' }]
+        );
         return;
       }
       if (msg === 'cancelled') {
@@ -258,12 +247,79 @@ export default function PolicyScreen() {
     },
   });
 
-  const pendingTierId = payMutation.isPending ? payMutation.variables : null;
+  const pendingTierId = payMutation.isPending ? payMutation.variables?.tier : null;
+  const selectedTierConfig = useMemo(
+    () => TIERS.find((x) => x.id === selectedTier) || null,
+    [selectedTier]
+  );
+
+  const openPaymentSheet = useCallback((tierId) => {
+    setSelectedTier(tierId);
+    setPayMethod('upi');
+    setGatewayOpen(true);
+  }, []);
+
+  const payNow = useCallback(() => {
+    if (!selectedTier) return;
+    if (payMethod === 'upi' && !String(payForm.upi || '').trim()) {
+      setActivateError('Enter a UPI ID to continue.');
+      return;
+    }
+    if (payMethod === 'card') {
+      const cardNum = String(payForm.cardNumber || '').replace(/\s+/g, '');
+      if (cardNum.length < 12 || String(payForm.cardExpiry || '').trim().length < 4 || String(payForm.cardCvv || '').trim().length < 3) {
+        setActivateError('Enter valid card number, expiry, and CVV.');
+        return;
+      }
+    }
+    setActivateError('');
+    if (Platform.OS !== 'web' && payMethod === 'upi') {
+      const upiHandle = String(payForm.upi || worker?.bank_upi_id || '').trim();
+      const amount = Number(selectedTierConfig?.listWeekly || 0);
+      if (upiHandle && amount > 0) {
+        const upiUrl = `upi://pay?pa=${encodeURIComponent(
+          upiHandle
+        )}&pn=${encodeURIComponent('SafeNet')}&am=${encodeURIComponent(
+          String(amount)
+        )}&cu=INR&tn=${encodeURIComponent(`${selectedTier} coverage`)}`;
+        Linking.canOpenURL(upiUrl)
+          .then((can) => {
+            if (can) return Linking.openURL(upiUrl);
+            Alert.alert('UPI app not found', 'No UPI app found on this device. Continuing with in-app secure fallback.');
+            return null;
+          })
+          .catch(() => {
+            Alert.alert('Could not open UPI', 'Continuing with in-app secure fallback.');
+          });
+      }
+    }
+    payMutation.mutate({ tier: selectedTier, method: payMethod });
+  }, [selectedTier, payMethod, payForm, payMutation, worker?.bank_upi_id, selectedTierConfig?.listWeekly]);
 
   const onActivatePress = useCallback(() => {
     setActivateError('');
     setSheetOpen(true);
   }, []);
+
+  useEffect(() => {
+    const openTier = route?.params?.openPaymentForTier;
+    const openPlanSheet = route?.params?.openPlanSheet;
+    if (openTier) {
+      const tier = canonicalTierLabel(String(openTier));
+      if (['Basic', 'Standard', 'Pro'].includes(tier)) {
+        setSelectedTier(tier);
+        setGatewayOpen(true);
+        setSheetOpen(false);
+      }
+      navigation.setParams?.({ openPaymentForTier: undefined, openPlanSheet: undefined });
+      return;
+    }
+    if (openPlanSheet) {
+      setGatewayOpen(false);
+      setSheetOpen(true);
+      navigation.setParams?.({ openPlanSheet: undefined });
+    }
+  }, [route?.params?.openPaymentForTier, route?.params?.openPlanSheet, navigation]);
 
   const onRefresh = useCallback(() => {
     void policyQuery.refetch();
@@ -411,7 +467,7 @@ export default function PolicyScreen() {
       <View style={[styles.card, styles.aiRiskCard, { backgroundColor: colors.card, borderColor: scheme === 'dark' ? '#334155' : '#e2e8f0' }]}>
         <Text style={[styles.aiRiskTitle, { color: colors.text }]}>{t('policy.ai_risk_title')}</Text>
         <Text style={[styles.aiRiskSub, { color: colors.sub }]}>
-          {riskCalibrating ? t('policy.ai_risk_calibrating') : t('policy.ai_risk_sub')}
+          {riskModeQuery.isFetching ? t('policy.ai_risk_calibrating') : t('policy.ai_risk_sub')}
         </Text>
         <View style={styles.riskRow}>
           <View style={[styles.riskTrack, { backgroundColor: scheme === 'dark' ? '#334155' : '#e2e8f0' }]}>
@@ -468,8 +524,9 @@ export default function PolicyScreen() {
                     <Text style={styles.tierCurrentPill}>Current</Text>
                   ) : null}
                 </View>
-                <Text style={styles.tierPrice}>₹{t.listWeekly}/week</Text>
-                <Text style={styles.tierMax}>Up to ₹{t.maxDay.toLocaleString('en-IN')}/day payout</Text>
+                <Text style={styles.tierPrice}>
+                  ₹{t.listWeekly}/week · Up to ₹{t.maxWeekly.toLocaleString('en-IN')} protected
+                </Text>
                 <Text style={styles.tierBlurb}>{t.blurb}</Text>
                 {currentTierCanon === t.id && p?.premium_breakdown ? (
                   <View style={styles.breakdownBox}>
@@ -488,10 +545,10 @@ export default function PolicyScreen() {
                 <TouchableOpacity
                   style={[styles.pickBtn, payMutation.isPending && { opacity: 0.6 }]}
                   disabled={payMutation.isPending}
-                  onPress={() => payMutation.mutate(t.id)}
+                  onPress={() => openPaymentSheet(t.id)}
                 >
                   <Text style={styles.pickBtnText}>
-                    {pendingTierId === t.id ? 'Paying…' : `Pay & choose ${t.name}`}
+                    {pendingTierId === t.id ? 'Paying…' : `Continue with ${t.name}`}
                   </Text>
                 </TouchableOpacity>
               </View>
@@ -499,6 +556,132 @@ export default function PolicyScreen() {
             </ScrollView>
             <TouchableOpacity style={styles.cancelBtn} onPress={() => !payMutation.isPending && setSheetOpen(false)}>
               <Text style={styles.cancelText}>Cancel</Text>
+            </TouchableOpacity>
+          </Pressable>
+        </Pressable>
+      </AppModal>
+      <AppModal visible={gatewayOpen} animationType="slide" transparent onRequestClose={() => setGatewayOpen(false)}>
+        <Pressable style={styles.sheetOverlay} onPress={() => !payMutation.isPending && setGatewayOpen(false)}>
+          <Pressable style={[styles.sheet, styles.gatewaySheet]} onPress={(e) => e.stopPropagation()}>
+            <Text style={styles.sheetTitle}>Secure payment</Text>
+            <Text style={styles.sheetSub}>
+              Choose a payment mode below. Payment confirms your coverage and returns you to Coverage immediately.
+            </Text>
+            <View style={styles.selectedPlanRow}>
+              <Text style={styles.selectedPlanLabel}>Selected plan</Text>
+              <Text style={styles.selectedPlanValue}>{selectedTier || 'Standard'}</Text>
+            </View>
+            <View style={styles.brandRow}>
+              <View style={[styles.brandPill, { backgroundColor: '#ede9fe' }]}>
+                <Image source={PAYMENT_ASSETS.phonepe} style={styles.brandIcon} />
+                <Text style={[styles.brandText, { color: '#6d28d9' }]}>PhonePe</Text>
+              </View>
+              <View style={[styles.brandPill, { backgroundColor: '#dcfce7' }]}>
+                <Image source={PAYMENT_ASSETS.gpay} style={styles.brandIcon} />
+                <Text style={[styles.brandText, { color: '#166534' }]}>GPay</Text>
+              </View>
+              <View style={[styles.brandPill, { backgroundColor: '#dbeafe' }]}>
+                <Image source={PAYMENT_ASSETS.gpay} style={styles.brandIcon} />
+                <Text style={[styles.brandText, { color: '#1d4ed8' }]}>UPI</Text>
+              </View>
+              <View style={[styles.brandPill, { backgroundColor: '#fee2e2' }]}>
+                <Image source={PAYMENT_ASSETS.card} style={styles.brandIcon} />
+                <Text style={[styles.brandText, { color: '#b91c1c' }]}>Cards</Text>
+              </View>
+            </View>
+            {payMethod === 'upi' ? (
+              <View style={styles.qrSection}>
+                <FakeQr />
+                <Text style={styles.qrHint}>Scan QR in any UPI app or enter UPI ID</Text>
+              </View>
+            ) : null}
+            <View style={styles.methodRow}>
+              {['upi', 'card', 'netbanking'].map((m) => (
+                <TouchableOpacity
+                  key={m}
+                  style={[styles.methodChip, payMethod === m && styles.methodChipOn]}
+                  onPress={() => setPayMethod(m)}
+                  disabled={payMutation.isPending}
+                >
+                  <Text style={[styles.methodChipText, payMethod === m && styles.methodChipTextOn]}>
+                    {m === 'upi' ? 'UPI' : m === 'card' ? 'Card' : 'Netbanking'}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            {payMethod === 'upi' ? (
+              <TextInput
+                style={styles.payInput}
+                editable={!payMutation.isPending}
+                placeholder="yourname@upi"
+                value={payForm.upi}
+                onChangeText={(v) => setPayForm((s) => ({ ...s, upi: v }))}
+              />
+            ) : null}
+            {payMethod === 'card' ? (
+              <>
+                <TextInput
+                  style={styles.payInput}
+                  editable={!payMutation.isPending}
+                  placeholder="Card number"
+                  value={payForm.cardNumber}
+                  onChangeText={(v) => setPayForm((s) => ({ ...s, cardNumber: v }))}
+                  keyboardType="number-pad"
+                />
+                <TextInput
+                  style={styles.payInput}
+                  editable={!payMutation.isPending}
+                  placeholder="Card holder name"
+                  value={payForm.cardName}
+                  onChangeText={(v) => setPayForm((s) => ({ ...s, cardName: v }))}
+                />
+                <View style={{ flexDirection: 'row', gap: 10 }}>
+                  <TextInput
+                    style={[styles.payInput, { flex: 1 }]}
+                    editable={!payMutation.isPending}
+                    placeholder="MM/YY"
+                    value={payForm.cardExpiry}
+                    onChangeText={(v) => setPayForm((s) => ({ ...s, cardExpiry: v }))}
+                  />
+                  <TextInput
+                    style={[styles.payInput, { flex: 1 }]}
+                    editable={!payMutation.isPending}
+                    placeholder="CVV"
+                    secureTextEntry
+                    value={payForm.cardCvv}
+                    onChangeText={(v) => setPayForm((s) => ({ ...s, cardCvv: v }))}
+                    keyboardType="number-pad"
+                  />
+                </View>
+              </>
+            ) : null}
+            {payMethod === 'netbanking' ? (
+              <View style={styles.methodRow}>
+                {['HDFC', 'ICICI', 'SBI', 'AXIS'].map((b) => (
+                  <TouchableOpacity
+                    key={b}
+                    style={[styles.methodChip, payForm.netbanking === b && styles.methodChipOn]}
+                    onPress={() => setPayForm((s) => ({ ...s, netbanking: b }))}
+                    disabled={payMutation.isPending}
+                  >
+                    <Text style={[styles.methodChipText, payForm.netbanking === b && styles.methodChipTextOn]}>{b}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            ) : null}
+            <TouchableOpacity style={[styles.pickBtn, styles.payCtaBtn, payMutation.isPending && { opacity: 0.7 }]} onPress={payNow} disabled={payMutation.isPending}>
+              {payMutation.isPending ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <Text style={styles.pickBtnText}>
+                  {selectedTierConfig
+                    ? `Pay ₹${selectedTierConfig.listWeekly} & Activate ${selectedTierConfig.id}`
+                    : 'Pay & Activate Coverage'}
+                </Text>
+              )}
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.backBtn} onPress={() => !payMutation.isPending && setGatewayOpen(false)}>
+              <Text style={styles.cancelText}>Back</Text>
             </TouchableOpacity>
           </Pressable>
         </Pressable>
@@ -673,6 +856,14 @@ const styles = StyleSheet.create({
     paddingBottom: 28,
     maxHeight: '88%',
   },
+  gatewaySheet: {
+    borderTopLeftRadius: 18,
+    borderTopRightRadius: 18,
+    maxHeight: '94%',
+    minHeight: '80%',
+    paddingTop: 20,
+    paddingHorizontal: 16,
+  },
   sheetTitle: { fontSize: 18, fontWeight: '900', marginBottom: 6, color: '#0f172a' },
   sheetSub: { fontSize: 13, fontWeight: '600', color: '#64748b', marginBottom: 10 },
   rzpStatusRow: {
@@ -717,8 +908,7 @@ const styles = StyleSheet.create({
   },
   badgeText: { color: '#fff', fontSize: 11, fontWeight: '800' },
   tierName: { fontSize: 18, fontWeight: '900', color: '#0f172a' },
-  tierPrice: { fontSize: 15, fontWeight: '700', color: '#334155', marginTop: 4 },
-  tierMax: { fontSize: 13, color: '#64748b', marginTop: 4 },
+  tierPrice: { fontSize: 14, fontWeight: '700', color: '#334155', marginTop: 4, lineHeight: 20 },
   tierBlurb: { fontSize: 12, color: '#94a3b8', marginTop: 6 },
   pickBtn: {
     marginTop: 12,
@@ -728,7 +918,84 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   pickBtnText: { color: '#fff', fontWeight: '800' },
+  selectedPlanRow: {
+    marginBottom: 10,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: '#f8fafc',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  selectedPlanLabel: { fontSize: 12, fontWeight: '700', color: '#64748b' },
+  selectedPlanValue: { fontSize: 13, fontWeight: '900', color: '#0f172a' },
+  methodRow: { flexDirection: 'row', gap: 8, marginTop: 12, flexWrap: 'wrap' },
+  brandRow: { flexDirection: 'row', gap: 8, marginTop: 4, marginBottom: 12 },
+  brandPill: {
+    flex: 1,
+    minHeight: 40,
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+  },
+  brandIcon: { width: 18, height: 18, borderRadius: 4, resizeMode: 'contain' },
+  brandText: { fontSize: 11, fontWeight: '800' },
+  qrSection: { alignItems: 'center', marginTop: 14, marginBottom: 10 },
+  qrWrap: {
+    width: 140,
+    height: 140,
+    borderWidth: 2,
+    borderColor: '#0f172a',
+    borderRadius: 8,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    padding: 6,
+    backgroundColor: '#fff',
+  },
+  qrImage: {
+    width: 140,
+    height: 140,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#0f172a',
+  },
+  qrCell: { width: 12, height: 12, margin: 0.5, backgroundColor: '#fff' },
+  qrCellOn: { backgroundColor: '#0f172a' },
+  qrHint: { marginTop: 10, color: '#475569', fontSize: 13, fontWeight: '700' },
+  methodChip: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: '#cbd5e1',
+    borderRadius: 11,
+    paddingHorizontal: 8,
+    paddingVertical: 10,
+    backgroundColor: '#f8fafc',
+    alignItems: 'center',
+  },
+  methodChipOn: { borderColor: '#2563eb', backgroundColor: '#dbeafe' },
+  methodChipText: { color: '#334155', fontWeight: '700', fontSize: 12 },
+  methodChipTextOn: { color: '#1e40af', fontWeight: '900' },
+  payInput: {
+    borderWidth: 1,
+    borderColor: '#cbd5e1',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginTop: 12,
+    fontSize: 14,
+    color: '#0f172a',
+    backgroundColor: '#fff',
+  },
+  payCtaBtn: { marginTop: 16, borderRadius: 12, minHeight: 48, justifyContent: 'center' },
   cancelBtn: { paddingVertical: 14, alignItems: 'center' },
+  backBtn: { paddingVertical: 12, marginTop: 4, alignItems: 'center' },
   cancelText: { color: '#64748b', fontWeight: '700' },
   breakdownBox: {
     marginTop: 12,

@@ -2,6 +2,7 @@ import { BASE_URL } from '../api';
 import { useAdminConnectionStore } from '../stores/adminConnection';
 import { useClaimsFeedStore, type AdminClaimUpdate } from '../stores/claimsFeed';
 import { useFraudQueueStore, type AdminFraudAlert } from '../stores/fraudQueue';
+import { useZeroDayStore, type ZeroDayRow } from '../stores/zeroDay';
 import { usePoolHealthStore, type AdminPoolHealth } from '../stores/poolHealth';
 import { useZoneEventsStore, type AdminZoneEvent } from '../stores/zoneEvents';
 
@@ -101,6 +102,15 @@ export function connectAdminWebSocket(jwt: string) {
       if (payloadType === 'POOL_UPDATE') {
         const health: AdminPoolHealth = { ...payload, timestamp: Date.parse(outer.timestamp || new Date().toISOString()) };
         poolStore.upsertPoolHealth(health);
+      }
+
+      if (payloadType === 'ZERO_DAY_ALERT') {
+        const zd = payload as ZeroDayRow;
+        useZeroDayStore.getState().upsert({
+          ...zd,
+          id: typeof (zd as any).id === 'number' ? (zd as any).id : Date.now(),
+          timestamp: Date.parse(outer.timestamp || new Date().toISOString()),
+        });
       }
 
       if (payloadType === 'PAYOUT_CREDITED') {

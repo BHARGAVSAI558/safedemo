@@ -22,3 +22,15 @@ class Zone(Base):
     zone_risk_multiplier: Mapped[float] = mapped_column(Float, default=1.0)
     risk_tier: Mapped[str] = mapped_column(String(32), default="medium")
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    # Dual-gate / order proxy
+    zone_radius_km: Mapped[float] = mapped_column(Float, default=15.0)
+    zone_baseline_orders: Mapped[float] = mapped_column(Float, default=100.0)
+    orders_last_hour: Mapped[float] = mapped_column(Float, default=85.0)
+
+    # Risk mode engine
+    total_registered_workers: Mapped[int] = mapped_column(Integer, default=0)
+    current_online_workers: Mapped[int] = mapped_column(Integer, default=0)
+    risk_score: Mapped[int] = mapped_column(Integer, default=0)
+    risk_mode: Mapped[str] = mapped_column(String(32), default="NORMAL")
+    risk_mode_updated_at: Mapped[Optional[DateTime]] = mapped_column(DateTime(timezone=True), nullable=True)

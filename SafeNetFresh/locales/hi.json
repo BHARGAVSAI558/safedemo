@@ -28,12 +28,12 @@
     "title": "डैशबोर्ड",
     "coverage": "कवरेज",
     "zone": "आपका क्षेत्र",
-    "earnings_dna": "आय पैटर्न",
+    "earnings_dna": "आय DNA",
     "weekly_protection": "साप्ताहिक सुरक्षा",
     "recent_payouts": "हाल के भुगतान",
     "active_claim": "सक्रिय दावा",
     "no_claims": "कोई सक्रिय दावे नहीं",
-    "greeting_morning": "सुप्रभात",
+    "greeting_morning": "शुभ प्रभात",
     "greeting_afternoon": "नमस्कार",
     "greeting_evening": "शुभ संध्या",
     "zone_fallback": "आपका क्षेत्र",
@@ -81,7 +81,10 @@
     "payout_basis": "भुगतान आपकी पॉलिस, पुष्ट व्यवधान और इस समय स्लॉट की कमाई के अनुसार है।",
     "payout_basis_title": "भुगतान कैसे तय हुआ",
     "fingerprint_hint": "इस दिन और समय के लिए आपकी सामान्य कमाई के स्तर के अनुरूप।",
-    "history_empty_hint": "पुष्ट व्यवधानों के बाद पुराने दावे दिखेंगे।"
+    "history_empty_hint": "पुष्ट व्यवधानों के बाद पुराने दावे दिखेंगे।",
+    "past_summaries": "पिछले सारांश",
+    "summaries_hint": "रविवार 8 PM IST",
+    "summaries_empty": "अभी कोई साप्ताहिक सारांश नहीं — रविवार 8 PM IST पर।"
   },
   "policy": {
     "title": "कवरेज",
@@ -115,14 +118,32 @@
     "gps_denied": "स्थान अनुमति अस्वीकृत",
     "gps_failed": "क्षेत्र का पता नहीं लगा सका"
   },
+  "tabs": {
+    "home": "होम",
+    "claims": "दावे",
+    "coverage": "कवरेज",
+    "account": "खाता"
+  },
   "greeting": "शुभ संध्या",
+  "good_morning": "शुभ प्रभात",
+  "your_zone": "आपका क्षेत्र",
   "zone": "आपका क्षेत्र",
-  "covered": "कवर्ड",
+  "covered": "सुरक्षित",
   "weather": "मौसम",
   "aqi": "वायु गुणवत्ता",
   "alerts": "अलर्ट",
   "earnings_dna": "आय DNA",
   "weekly_protection": "साप्ताहिक सुरक्षा",
-  "simulate": "व्यवधान सिमुलेट करें",
-  "claim_processing": "आपका दावा प्रक्रिया में है..."
+  "simulate": "व्यवधान देखें",
+  "simulate_disruption": "व्यवधान देखें",
+  "claim_processing": "दावा प्रक्रिया में है...",
+  "payout_credited": "भुगतान जमा हुआ",
+  "trust_score": "विश्वास स्कोर",
+  "download_receipt": "रसीद डाउनलोड करें",
+  "no_disruptions": "कोई व्यवधान नहीं ✓",
+  "be_careful": "सावधान रहें",
+  "home": "होम",
+  "coverage": "कवरेज",
+  "account": "खाता",
+  "support": "सहायता"
 }

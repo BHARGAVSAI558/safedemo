@@ -8,9 +8,12 @@ import {
   ActivityIndicator,
   TouchableOpacity,
   Alert,
+  TextInput,
+  Platform,
 } from 'react-native';
 import * as FileSystem from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
+import { Buffer } from 'buffer';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -81,11 +84,16 @@ function disruptionIcon(label) {
 }
 
 function arrayBufferToBase64(buffer) {
-  let binary = '';
-  const bytes = new Uint8Array(buffer);
-  const len = bytes.byteLength;
-  for (let i = 0; i < len; i += 1) binary += String.fromCharCode(bytes[i]);
-  return btoa(binary);
+  try {
+    return Buffer.from(buffer).toString('base64');
+  } catch (_) {
+    let binary = '';
+    const bytes = new Uint8Array(buffer);
+    const len = bytes.byteLength;
+    for (let i = 0; i < len; i += 1) binary += String.fromCharCode(bytes[i]);
+    if (typeof btoa === 'function') return btoa(binary);
+    return '';
+  }
 }
 
 export default function ClaimsScreen({ navigation }) {
@@ -97,6 +105,9 @@ export default function ClaimsScreen({ navigation }) {
   const [elapsed, setElapsed] = useState(0);
   const [manualRefreshing, setManualRefreshing] = useState(false);
   const [selectedTx, setSelectedTx] = useState(null);
+  const [disputeRow, setDisputeRow] = useState(null);
+  const [disputeText, setDisputeText] = useState('');
+  const [disputeBusy, setDisputeBusy] = useState(false);
   const { data: workerProfile } = useWorkerProfile();
 
   const [payoutRemainSec, setPayoutRemainSec] = useState(null);
@@ -128,7 +139,7 @@ export default function ClaimsScreen({ navigation }) {
   const list = useMemo(() => {
     const raw = historyQuery.data;
     const rows = Array.isArray(raw) ? raw : [];
-    return rows.filter((r) => {
+    const filtered = rows.filter((r) => {
       const reason = String(r?.reason || '').toLowerCase();
       if (!reason) return true;
       return !(
@@ -136,6 +147,16 @@ export default function ClaimsScreen({ navigation }) {
         reason.includes('already simulated and paid today')
       );
     });
+    const seen = new Set();
+    const out = [];
+    for (const r of filtered) {
+      const id = String(r?.id ?? r?.claim_id ?? '');
+      const key = id || `${r?.created_at}-${r?.disruption_type}-${r?.status}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(r);
+    }
+    return out;
   }, [historyQuery.data]);
 
   const inflight = useMemo(
@@ -263,6 +284,12 @@ export default function ClaimsScreen({ navigation }) {
           </>
         ) : (
           <>
+            {elapsed > 0 ? (
+              <View style={styles.activeTimerRow}>
+                <Text style={styles.activeTimerLabel}>{t('claims.active')}</Text>
+                <Text style={styles.activeTimerValue}>{elapsed}s</Text>
+              </View>
+            ) : null}
             <View style={styles.stepRow}>
               {STEPS.map((label, i) => {
                 const done = i < currentStep;
@@ -303,7 +330,13 @@ export default function ClaimsScreen({ navigation }) {
       </View>
 
       <View style={styles.sectionHead}>
-        <Text style={styles.sectionLabel}>Past summaries</Text>
+        <Text style={styles.sectionLabel}>{t('claims.past_summaries')}</Text>
+        <View style={styles.hintChip}>
+          <Text style={styles.hintChipText} numberOfLines={2}>
+            {summariesQuery.isLoading ? '…' : t('claims.summaries_hint')}
+          </Text>
+        </View>
+      </View>
       {Array.isArray(summariesQuery.data) && summariesQuery.data.length > 0 ? (
         summariesQuery.data.slice(0, 6).map((s) => (
           <View key={String(s.id)} style={styles.card}>
@@ -318,13 +351,21 @@ export default function ClaimsScreen({ navigation }) {
       ) : (
         <View style={styles.card}>
           <Text style={styles.emptyHist}>
-            {summariesQuery.isLoading ? 'Loading summaries…' : 'No weekly summaries yet — delivered Sundays 8 PM IST.'}
+            {summariesQuery.isLoading ? 'Loading summaries…' : t('claims.summaries_empty')}
           </Text>
         </View>
       )}
 
-      <Text style={styles.sectionLabel}>{t('claims.history')}</Text>
-        <TouchableOpacity style={styles.bankMiniBtn} onPress={() => setSelectedTx({ _viewBank: true })}>
+      <View style={[styles.sectionHead, { marginTop: 4 }]}>
+        <Text style={styles.sectionLabel}>{t('claims.history')}</Text>
+        <TouchableOpacity
+          style={[
+            styles.bankMiniBtn,
+            !(workerProfile?.bank_upi_id || workerProfile?.bank_account_number) && { opacity: 0.5 },
+          ]}
+          disabled={!(workerProfile?.bank_upi_id || workerProfile?.bank_account_number)}
+          onPress={() => setSelectedTx({ _viewBank: true })}
+        >
           <Text style={styles.bankMiniBtnText}>View bank details</Text>
         </TouchableOpacity>
       </View>
@@ -359,55 +400,78 @@ export default function ClaimsScreen({ navigation }) {
           else if (isNoPayout) chipLabel = 'NO PAYOUT';
           else if (isBlock) chipLabel = 'BLOCKED';
           return (
-            <TouchableOpacity key={String(row.id)} style={styles.card} activeOpacity={0.88} onPress={() => setSelectedTx(row)}>
-              <View style={styles.histTop}>
-                <Text style={styles.histIcon}>{disruptionIcon(row.disruption_type)}</Text>
-                <View style={styles.histMain}>
-                  <Text style={styles.histTitle}>{row.disruption_type || 'Disruption'}</Text>
-                  <Text style={styles.histWhen}>{formatIstDateTime(row.created_at)}</Text>
-                </View>
-                <View
-                  style={[
-                    styles.statusChip,
-                    isApp && styles.chipGreen,
-                    isBlock && styles.chipRed,
-                    isFlagged && styles.chipYellow,
-                    isNoPayout && styles.chipInfo,
-                    (isRej || (!isApp && !isBlock && !isFlagged && !isNoPayout)) && styles.chipAmber,
-                  ]}
-                >
-                  <Text
+            <View key={String(row.id)} style={styles.card}>
+              <TouchableOpacity activeOpacity={0.88} onPress={() => setSelectedTx(row)}>
+                <View style={styles.histTop}>
+                  <Text style={styles.histIcon}>{disruptionIcon(row.disruption_type)}</Text>
+                  <View style={styles.histMain}>
+                    <Text style={styles.histTitle}>{row.disruption_type || 'Disruption'}</Text>
+                    <Text style={styles.histWhen}>{formatIstDateTime(row.created_at)}</Text>
+                  </View>
+                  <View
                     style={[
-                      styles.statusChipText,
-                      isApp && styles.chipTextGreen,
-                      isBlock && styles.chipTextRed,
-                      isFlagged && styles.chipTextYellow,
-                      isNoPayout && styles.chipTextInfo,
+                      styles.statusChip,
+                      isApp && styles.chipGreen,
+                      isBlock && styles.chipRed,
+                      isFlagged && styles.chipYellow,
+                      isNoPayout && styles.chipInfo,
+                      (isRej || (!isApp && !isBlock && !isFlagged && !isNoPayout)) && styles.chipAmber,
                     ]}
                   >
-                    {chipLabel}
+                    <Text
+                      style={[
+                        styles.statusChipText,
+                        isApp && styles.chipTextGreen,
+                        isBlock && styles.chipTextRed,
+                        isFlagged && styles.chipTextYellow,
+                        isNoPayout && styles.chipTextInfo,
+                      ]}
+                    >
+                      {chipLabel}
+                    </Text>
+                  </View>
+                </View>
+                <Text style={styles.histAmount}>
+                  {isApp ? `₹${Math.round(showAmt)}` : '₹0'}
+                </Text>
+                {isApp ? (
+                  <View style={styles.breakdownBox}>
+                    <Text style={styles.breakdownLabel}>{t('claims.payout_basis_title')}</Text>
+                    <Text style={styles.breakdownFormula}>{t('claims.payout_basis')}</Text>
+                  </View>
+                ) : null}
+                {isApp ? (
+                  <Text style={styles.histHint}>{t('claims.fingerprint_hint')}</Text>
+                ) : null}
+                {isBlock ? (
+                  <Text style={styles.fraudNote}>Fraud check failed — GPS anomaly detected</Text>
+                ) : null}
+                {row.reason && !isBlock ? (
+                  <Text style={styles.reasonLine}>{row.reason}</Text>
+                ) : null}
+                {row.ai_explanation ? (
+                  <Text style={styles.aiCard}>
+                    🤖 SafeNet AI: {row.ai_explanation}
                   </Text>
-                </View>
-              </View>
-              <Text style={styles.histAmount}>
-                {isApp ? `₹${Math.round(showAmt)}` : '₹0'}
-              </Text>
-              {isApp ? (
-                <View style={styles.breakdownBox}>
-                  <Text style={styles.breakdownLabel}>{t('claims.payout_basis_title')}</Text>
-                  <Text style={styles.breakdownFormula}>{t('claims.payout_basis')}</Text>
-                </View>
+                ) : null}
+                {row.dispute_verdict?.reasoning ? (
+                  <Text style={styles.disputeVerdict}>
+                    Dispute review: {row.dispute_verdict.verdict} — {row.dispute_verdict.reasoning}
+                  </Text>
+                ) : null}
+              </TouchableOpacity>
+              {!isCredited && (isRej || isNoPayout || isBlock) ? (
+                <TouchableOpacity
+                  style={styles.disputeBtn}
+                  onPress={() => {
+                    setDisputeText('');
+                    setDisputeRow(row);
+                  }}
+                >
+                  <Text style={styles.disputeBtnText}>Dispute this decision</Text>
+                </TouchableOpacity>
               ) : null}
-              {isApp ? (
-                <Text style={styles.histHint}>{t('claims.fingerprint_hint')}</Text>
-              ) : null}
-              {isBlock ? (
-                <Text style={styles.fraudNote}>Fraud check failed — GPS anomaly detected</Text>
-              ) : null}
-              {row.reason && !isBlock ? (
-                <Text style={styles.reasonLine}>{row.reason}</Text>
-              ) : null}
-            </TouchableOpacity>
+            </View>
           );
         })
       )}
@@ -417,10 +481,12 @@ export default function ClaimsScreen({ navigation }) {
             <Text style={styles.modalTitle}>Payment details</Text>
             {selectedTx?._viewBank ? (
               <>
-                <Text style={styles.modalLine}>UPI: {workerProfile?.bank_upi_id || '—'}</Text>
-                <Text style={styles.modalLine}>Account: {workerProfile?.bank_account_number || '—'}</Text>
-                <Text style={styles.modalLine}>IFSC: {workerProfile?.bank_ifsc || '—'}</Text>
-                <Text style={styles.modalLine}>Name: {workerProfile?.bank_account_name || '—'}</Text>
+                <Text style={styles.modalLine}>UPI: {workerProfile?.bank_upi_id || 'Not added'}</Text>
+                <Text style={styles.modalLine}>
+                  Account: {workerProfile?.bank_account_number ? `••••${String(workerProfile.bank_account_number).slice(-4)}` : 'Not added'}
+                </Text>
+                <Text style={styles.modalLine}>IFSC: {workerProfile?.bank_ifsc || 'Not added'}</Text>
+                <Text style={styles.modalLine}>Name: {workerProfile?.bank_account_name || 'Not added'}</Text>
                 <TouchableOpacity style={styles.modalBtn} onPress={() => {
                   setSelectedTx(null);
                   navigation?.navigate?.('Account');
@@ -461,6 +527,18 @@ export default function ClaimsScreen({ navigation }) {
                         const res = await claims.downloadReceipt(cid);
                         const data = res?.data;
                         if (!data) throw new Error('empty');
+                        if (Platform.OS === 'web') {
+                          const blob = new Blob([data], { type: 'application/pdf' });
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement('a');
+                          a.href = url;
+                          a.download = `safenet-receipt-${cid}.pdf`;
+                          document.body.appendChild(a);
+                          a.click();
+                          a.remove();
+                          URL.revokeObjectURL(url);
+                          return;
+                        }
                         const b64 = arrayBufferToBase64(data);
                         const name = `safenet-receipt-${cid}.pdf`;
                         const path = `${FileSystem.cacheDirectory || ''}${name}`;
@@ -492,17 +570,124 @@ export default function ClaimsScreen({ navigation }) {
           </View>
         </View>
       </AppModal>
+      <AppModal
+        visible={Boolean(disputeRow)}
+        transparent
+        animationType="slide"
+        onRequestClose={() => {
+          if (!disputeBusy) setDisputeRow(null);
+        }}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalSheet}>
+            <Text style={styles.modalTitle}>Dispute claim decision</Text>
+            <Text style={styles.modalLine}>
+              Explain why you believe this decision should be reviewed (max 8000 characters).
+            </Text>
+            <TextInput
+              style={styles.disputeInput}
+              multiline
+              numberOfLines={5}
+              value={disputeText}
+              onChangeText={setDisputeText}
+              editable={!disputeBusy}
+              placeholder="Your message…"
+              placeholderTextColor="#94a3b8"
+            />
+            <TouchableOpacity
+              style={[styles.modalBtn, disputeBusy && { opacity: 0.6 }]}
+              disabled={disputeBusy || !disputeText.trim()}
+              onPress={async () => {
+                const cid = disputeRow?.id;
+                if (!cid || !disputeText.trim()) return;
+                setDisputeBusy(true);
+                try {
+                  const verdict = await claims.submitDispute(cid, disputeText.trim());
+                  await historyQuery.refetch();
+                  setDisputeRow(null);
+                  setDisputeText('');
+                  Alert.alert(
+                    'Dispute submitted',
+                    verdict?.reasoning
+                      ? `${verdict.verdict}: ${verdict.reasoning}`
+                      : 'Your dispute was recorded.',
+                  );
+                } catch (e) {
+                  Alert.alert('Could not submit', 'Try again when online.');
+                } finally {
+                  setDisputeBusy(false);
+                }
+              }}
+            >
+              <Text style={styles.modalBtnText}>{disputeBusy ? 'Submitting…' : 'Submit dispute'}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.modalBtn, { backgroundColor: '#64748b' }]}
+              disabled={disputeBusy}
+              onPress={() => setDisputeRow(null)}
+            >
+              <Text style={styles.modalBtnText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </AppModal>
     </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: '#f0f4ff' },
+  disruptionBanner: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 12,
+    backgroundColor: '#fff',
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(26,115,232,0.2)',
+    shadowColor: '#000',
+    shadowOpacity: 0.04,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 1,
+  },
+  disruptionBannerIcon: { fontSize: 26, lineHeight: 30 },
+  disruptionBannerTitle: { fontSize: 14, fontWeight: '800', color: '#0f172a' },
+  disruptionBannerSub: { fontSize: 12, color: '#64748b', marginTop: 4, fontWeight: '600' },
   content: { padding: 20 },
   screenTitle: { fontSize: 26, fontWeight: '900', color: '#0f172a' },
   screenSub: { fontSize: 14, color: '#64748b', marginTop: 6, marginBottom: 20 },
   sectionLabel: { fontSize: 13, fontWeight: '800', color: '#475569', marginBottom: 10, textTransform: 'uppercase' },
-  sectionHead: { marginTop: 8, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  sectionHead: {
+    marginTop: 8,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    gap: 10,
+  },
+  hintChip: {
+    maxWidth: '52%',
+    backgroundColor: '#f1f5f9',
+    borderRadius: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  hintChipText: { fontSize: 11, fontWeight: '700', color: '#64748b', lineHeight: 15 },
+  activeTimerRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+    paddingBottom: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+  },
+  activeTimerLabel: { fontSize: 12, fontWeight: '800', color: '#475569', textTransform: 'uppercase' },
+  activeTimerValue: { fontSize: 14, fontWeight: '900', color: BRAND },
   bankMiniBtn: { borderWidth: 1, borderColor: '#93c5fd', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6, backgroundColor: '#eff6ff' },
   bankMiniBtnText: { color: '#1d4ed8', fontSize: 11, fontWeight: '800' },
   card: {
@@ -583,6 +768,42 @@ const styles = StyleSheet.create({
   histHint: { fontSize: 12, color: '#64748b', marginTop: 6, lineHeight: 18 },
   fraudNote: { fontSize: 12, color: '#b91c1c', fontWeight: '700', marginTop: 10 },
   reasonLine: { fontSize: 12, color: '#475569', marginTop: 8, lineHeight: 18 },
+  aiCard: {
+    marginTop: 10,
+    padding: 10,
+    borderRadius: 10,
+    backgroundColor: 'rgba(26,115,232,0.08)',
+    borderLeftWidth: 3,
+    borderLeftColor: '#1a73e8',
+    fontSize: 12,
+    color: '#0f172a',
+    lineHeight: 18,
+    fontWeight: '600',
+  },
+  disputeVerdict: { fontSize: 11, color: '#334155', marginTop: 8, lineHeight: 16 },
+  disputeBtn: {
+    marginTop: 10,
+    alignSelf: 'flex-start',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#cbd5e1',
+    backgroundColor: '#f8fafc',
+  },
+  disputeBtnText: { fontSize: 12, fontWeight: '800', color: '#334155' },
+  disputeInput: {
+    minHeight: 100,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    borderRadius: 10,
+    padding: 10,
+    marginTop: 8,
+    marginBottom: 4,
+    fontSize: 14,
+    color: '#0f172a',
+    textAlignVertical: 'top',
+  },
   modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'flex-end' },
   modalSheet: { backgroundColor: '#fff', borderTopLeftRadius: 16, borderTopRightRadius: 16, padding: 16 },
   modalTitle: { fontSize: 16, fontWeight: '900', color: '#0f172a', marginBottom: 8 },

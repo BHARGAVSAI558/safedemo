@@ -13,7 +13,7 @@ import { AuthProvider, useAuth, setQueryClientRef } from './contexts/AuthContext
 import { WsConnectionProvider } from './contexts/WsConnectionContext';
 import { ClaimProvider } from './contexts/ClaimContext';
 import { PolicyProvider } from './contexts/PolicyContext';
-import { LocalizationProvider } from './contexts/LocalizationContext';
+import { LocalizationProvider, useLocalization } from './contexts/LocalizationContext';
 import WebSocketBridge from './components/WebSocketBridge';
 import DisruptionModal from './components/DisruptionModal';
 import PremiumDueModal from './components/PremiumDueModal';
@@ -79,6 +79,7 @@ function tabIcon(name, focused) {
 }
 
 function MainTabs() {
+  const { t } = useLocalization();
   const insets = useSafeAreaInsets();
   const bottomPad = Math.max(insets.bottom, Platform.OS === 'web' ? 12 : 8);
   const tabBarHeight = 52 + bottomPad;
@@ -101,7 +102,7 @@ function MainTabs() {
         name="Home"
         component={DashboardScreen}
         options={{
-          tabBarLabel: 'Home',
+          tabBarLabel: t('tabs.home'),
           tabBarIcon: ({ focused }) => tabIcon('home', focused),
         }}
       />
@@ -109,7 +110,7 @@ function MainTabs() {
         name="Claims"
         component={ClaimsScreen}
         options={{
-          tabBarLabel: 'Claims',
+          tabBarLabel: t('tabs.claims'),
           tabBarIcon: ({ focused }) => tabIcon('document-text', focused),
         }}
       />
@@ -117,7 +118,7 @@ function MainTabs() {
         name="Coverage"
         component={PolicyScreen}
         options={{
-          tabBarLabel: 'Coverage',
+          tabBarLabel: t('tabs.coverage'),
           tabBarIcon: ({ focused }) => tabIcon('shield-checkmark', focused),
         }}
       />
@@ -125,7 +126,7 @@ function MainTabs() {
         name="Account"
         component={ProfileScreen}
         options={{
-          tabBarLabel: 'Account',
+          tabBarLabel: t('tabs.account'),
           tabBarIcon: ({ focused }) => tabIcon('person', focused),
         }}
       />

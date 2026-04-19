@@ -103,6 +103,8 @@ async def publish_claim_update(
     disruption_hours: Optional[float] = None,
     daily_coverage: Optional[float] = None,
     payout_countdown_seconds: Optional[int] = None,
+    gate_status: Optional[Dict[str, str]] = None,
+    gate_messages: Optional[list[str]] = None,
 ) -> None:
     channel_personal = f"claim_updates:{worker_id}"
     payload_data: Dict[str, Any] = {
@@ -127,6 +129,10 @@ async def publish_claim_update(
         payload_data["daily_coverage"] = daily_coverage
     if payout_countdown_seconds is not None:
         payload_data["payout_countdown_seconds"] = int(payout_countdown_seconds)
+    if gate_status is not None:
+        payload_data["gate_status"] = gate_status
+    if gate_messages is not None:
+        payload_data["gate_messages"] = gate_messages
     payload = _event_envelope("CLAIM_UPDATE", payload_data, correlation_id=correlation_id)
 
     ok_personal = await _redis_publish_safe(redis, channel_personal, payload)
@@ -136,6 +142,31 @@ async def publish_claim_update(
         await _bus.publish(channel_personal, payload)
     if not ok_feed:
         await _bus.publish("all_claims_feed", payload)
+
+
+async def publish_zero_day_alert(
+    *,
+    redis: Any,
+    zone_id: str,
+    confidence: float,
+    offline_ratio: float,
+    offline_count: int,
+    total_count: int,
+    correlation_id: Optional[str] = None,
+) -> None:
+    channel = "zero_day_alerts"
+    payload_data: Dict[str, Any] = {
+        "zone_id": zone_id,
+        "confidence": confidence,
+        "offline_ratio": offline_ratio,
+        "offline_count": offline_count,
+        "total_count": total_count,
+        "event_epoch_ms": int(time.time() * 1000),
+    }
+    payload = _event_envelope("ZERO_DAY_ALERT", payload_data, correlation_id=correlation_id)
+    ok = await _redis_publish_safe(redis, channel, payload)
+    if not ok:
+        await _bus.publish(channel, payload)
 
 
 async def publish_fraud_alert(

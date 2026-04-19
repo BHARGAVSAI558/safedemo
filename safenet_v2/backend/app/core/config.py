@@ -1,3 +1,4 @@
+import os
 from functools import lru_cache
 from typing import List, Optional
 
@@ -31,8 +32,9 @@ class Settings(BaseSettings):
         "exp://localhost:8081"
     )
 
-    # SQLite fallback so the app starts without a Postgres instance
-    DATABASE_URL: str = "sqlite+aiosqlite:///./safenet.db"
+    # Resolved from process env only for the DSN string (never embed Supabase/project URLs in code).
+    # When unset or empty, local SQLite is used via async_database_url.
+    DATABASE_URL: Optional[str] = Field(default=None, validation_alias="DATABASE_URL")
 
     # Optional — None disables Redis; cache_service already guards for None
     REDIS_URL: Optional[str] = None
@@ -110,7 +112,9 @@ class Settings(BaseSettings):
     @computed_field
     @property
     def async_database_url(self) -> str:
-        u = self.DATABASE_URL
+        u = (os.getenv("DATABASE_URL") or "").strip() or (self.DATABASE_URL or "").strip()
+        if not u:
+            u = "sqlite+aiosqlite:///./safenet_local.db"
         if u.startswith("sqlite"):
             # Ensure aiosqlite driver is specified
             if "+aiosqlite" not in u:
@@ -129,7 +133,7 @@ class Settings(BaseSettings):
     @computed_field
     @property
     def is_sqlite(self) -> bool:
-        return self.DATABASE_URL.startswith("sqlite")
+        return self.async_database_url.startswith("sqlite")
 
     @computed_field
     @property

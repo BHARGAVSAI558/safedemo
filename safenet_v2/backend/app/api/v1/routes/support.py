@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import hashlib
 import random
 from typing import Any
 
@@ -67,6 +68,15 @@ def _normalize_analysis(payload: dict[str, Any] | None) -> TicketAnalysis:
     return TicketAnalysis(priority=p, category=c, reason=r or "Rule/AI classification", score=s)
 
 
+def _score_jitter(seed: str, lo: int, hi: int) -> int:
+    """Deterministic 0–100 score in [lo, hi] from message text (stable per ticket, not always 88)."""
+    if hi <= lo:
+        return lo
+    h = hashlib.sha256(seed.encode("utf-8", errors="ignore")).digest()
+    n = int.from_bytes(h[:4], "big")
+    return lo + (n % (hi - lo + 1))
+
+
 def _keyword_analysis(message: str) -> TicketAnalysis:
     t = str(message or "").lower()
     high_keys = [
@@ -80,11 +90,14 @@ def _keyword_analysis(message: str) -> TicketAnalysis:
         payment_tokens = ["payment", "transaction", "भुगतान", "पेमेंट", "लेनदेन", "ట్రాన్సాక్షన్", "లావాదేవీ", "చెల్లింపు"]
         weather_tokens = ["rain", "flood", "बारिश", "बाढ़", "వర్షం", "వరద"]
         category = "payment" if any(k in t for k in payment_tokens) else ("weather" if any(k in t for k in weather_tokens) else "safety")
-        return TicketAnalysis(priority="HIGH", category=category, reason="High-risk keyword detected", score=88)
+        sc = _score_jitter(f"{category}|{t[:240]}", 71, 94)
+        return TicketAnalysis(priority="HIGH", category=category, reason="High-risk keyword detected", score=sc)
     if any(k in t for k in med_keys):
         category = "payment" if "payment" in t else "technical"
-        return TicketAnalysis(priority="MEDIUM", category=category, reason="Medium priority keyword detected", score=56)
-    return TicketAnalysis(priority="LOW", category="other", reason="General support query", score=20)
+        sc = _score_jitter(f"med|{category}|{t[:240]}", 42, 68)
+        return TicketAnalysis(priority="MEDIUM", category=category, reason="Medium priority keyword detected", score=sc)
+    sc = _score_jitter(f"low|{t[:240]}", 8, 38)
+    return TicketAnalysis(priority="LOW", category="other", reason="General support query", score=sc)
 
 
 async def _analyze_ticket_llm(message: str, user_id: str) -> TicketAnalysis:

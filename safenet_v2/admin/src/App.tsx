@@ -2,7 +2,7 @@ import React from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
-import Layout from './components/Layout';
+import AdminLayout from './layouts/AdminLayout';
 import Login from './pages/Login';
 import AdminLogin from './pages/AdminLogin';
 import { useAuthStore } from './stores/auth';
@@ -66,6 +66,9 @@ const Workers = React.lazy(() => import('./pages/Workers'));
 const ZoneHeatmap = React.lazy(() => import('./pages/ZoneHeatmap'));
 const FraudInsights = React.lazy(() => import('./pages/FraudInsights'));
 const SupportQueries = React.lazy(() => import('./pages/SupportQueries'));
+const PoolHealth = React.lazy(() => import('./pages/PoolHealth'));
+const Claims = React.lazy(() => import('./pages/Claims'));
+const Simulations = React.lazy(() => import('./pages/Simulations'));
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   const jwt = useAuthStore((s) => s.jwt);
@@ -94,7 +97,7 @@ export default function App() {
             path="/"
             element={
               <PrivateRoute>
-                <Layout />
+                <AdminLayout />
               </PrivateRoute>
             }
           >
@@ -102,6 +105,9 @@ export default function App() {
             <Route path="zones" element={<React.Suspense fallback={<PageSkeleton />}><ZoneHeatmap /></React.Suspense>} />
             <Route path="workers" element={<React.Suspense fallback={<PageSkeleton />}><Workers /></React.Suspense>} />
             <Route path="fraud" element={<React.Suspense fallback={<PageSkeleton />}><FraudInsights /></React.Suspense>} />
+            <Route path="pool-health" element={<React.Suspense fallback={<PageSkeleton />}><PoolHealth /></React.Suspense>} />
+            <Route path="claims" element={<React.Suspense fallback={<PageSkeleton />}><Claims /></React.Suspense>} />
+            <Route path="simulations" element={<React.Suspense fallback={<PageSkeleton />}><Simulations /></React.Suspense>} />
             <Route path="support" element={<React.Suspense fallback={<PageSkeleton />}><SupportQueries /></React.Suspense>} />
           </Route>
         </Routes>

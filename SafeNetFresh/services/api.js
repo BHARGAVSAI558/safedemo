@@ -58,8 +58,6 @@ const getBackendURL = () => {
 
 export const BASE_URL = getBackendURL();
 export const BACKEND_URL = BASE_URL;
-// eslint-disable-next-line no-console
-console.log('API URL:', BASE_URL);
 
 function _isLikelyLocalApi(url) {
   if (!url || typeof url !== 'string') return false;
@@ -74,31 +72,9 @@ function _isLikelyLocalApi(url) {
 const TIMEOUT_MS = /onrender\.com|render\.com|amazonaws\.com|vercel\.app/i.test(BACKEND_URL)
   ? 90000
   : _isLikelyLocalApi(BACKEND_URL)
-    ? 45000
+    ? 90000
     : 30000;
 
-if (__DEV__) {
-  // eslint-disable-next-line no-console
-  console.log('[API] BACKEND_URL =', BACKEND_URL, '| timeout', TIMEOUT_MS, 'ms');
-  if (
-    Platform.OS === 'web' &&
-    _isLikelyLocalApi(BACKEND_URL) &&
-    !/localhost|127\.0\.0\.1/i.test(BACKEND_URL)
-  ) {
-    // eslint-disable-next-line no-console
-    console.warn(
-      '[API] Expo Web runs in this browser. If you see ERR_CONNECTION_TIMED_OUT, try EXPO_PUBLIC_API_URL=http://127.0.0.1:8000 when uvicorn is on the same PC, or confirm the LAN IP + Windows firewall (npm run windows:firewall-api).'
-    );
-  }
-  if (Platform.OS === 'ios' && _isLikelyLocalApi(BACKEND_URL)) {
-    // eslint-disable-next-line no-console
-    console.warn(
-      '[API] iOS device → PC: iPhone hotspot makes Windows treat the link as Public. If calls time out, run PowerShell as Admin: npm run windows:firewall-api (opens TCP 8000 on all profiles). In Safari on the phone open:',
-      `${BACKEND_URL}/`,
-      '— if that fails, it is firewall or uvicorn not on 0.0.0.0:8000.'
-    );
-  }
-}
 
 const api = axios.create({
   baseURL: `${BACKEND_URL}/api/v1`,
@@ -167,26 +143,6 @@ axiosRetry(api, {
     return isRetryableStatus;
   },
 });
-
-if (__DEV__) {
-  api.interceptors.request.use((config) => {
-    // eslint-disable-next-line no-console
-    console.log('[API]', (config.method || 'GET').toUpperCase(), config.url);
-    return config;
-  });
-  api.interceptors.response.use(
-    (response) => {
-      // eslint-disable-next-line no-console
-      console.log('[API OK]', response.status, response.config.url);
-      return response;
-    },
-    (error) => {
-      // eslint-disable-next-line no-console
-      console.log('[API ERR]', error?.response?.status, error?.config?.url, error?.message);
-      return Promise.reject(error);
-    }
-  );
-}
 
 const unwrap = (res) => res.data;
 
@@ -269,6 +225,16 @@ export const policies = {
   quote: async (workerId, tier) =>
     unwrap(await api.get('/policies/quote', { params: { worker_id: workerId, tier } })),
   activate: async (body) => unwrap(await api.post('/policies/activate', body)),
+  /** Razorpay Checkout: create order (paise amount + key) */
+  createOrder: async (workerId, tier, policyId = null) =>
+    unwrap(
+      await api.post('/policies/create-order', {
+        worker_id: workerId,
+        tier,
+        policy_id: policyId,
+      })
+    ),
+  verifyPayment: async (body) => unwrap(await api.post('/policies/verify-payment', body)),
 };
 
 export const pools = {
@@ -302,6 +268,10 @@ export const claims = {
   },
   downloadReceipt: async (claimId) =>
     api.get(`/claims/${encodeURIComponent(claimId)}/receipt`, { responseType: 'arraybuffer' }),
+  getAiExplanation: async (claimId) =>
+    unwrap(await api.get(`/claims/${encodeURIComponent(claimId)}/ai-explanation`)),
+  submitDispute: async (claimId, text) =>
+    unwrap(await api.post(`/claims/${encodeURIComponent(claimId)}/dispute`, { text })),
 };
 
 export const payouts = {
@@ -324,6 +294,8 @@ export const zones = {
     unwrap(await api.get('/zones/detect', { params: { lat, lng } })),
   getActiveDisruptions: async (zoneId) =>
     unwrap(await api.get(`/zones/${encodeURIComponent(zoneId)}/disruptions/active`)),
+  getRiskMode: async (zoneId) =>
+    unwrap(await api.get(`/zones/${encodeURIComponent(zoneId)}/risk-mode`)),
 };
 
 export const payments = {

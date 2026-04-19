@@ -231,8 +231,8 @@ export default function OTPVerifyScreen({ navigation, route }) {
       <Text style={styles.subMuted}>
         {demoAuto
           ? isWeb
-            ? 'Demo mode: auto-fills a random code in ~3–4s, or type any 6 digits.'
-            : 'Demo mode: auto-fills in ~3–4s, or enter any 6 digits below.'
+            ? 'Auto-fills a random code in ~3–4s, or type any 6 digits.'
+            : 'Auto-fills in ~3–4s, or enter any 6 digits below.'
           : isWeb
             ? 'Type or paste the 6-digit code from your SMS (check spam folder).'
             : 'Enter the 6-digit code from your SMS.'}

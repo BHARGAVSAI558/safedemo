@@ -1,4 +1,5 @@
 import React, { useEffect } from 'react';
+import Constants from 'expo-constants';
 
 import { useAuth } from '../contexts/AuthContext';
 import { useClaims } from '../contexts/ClaimContext';
@@ -9,6 +10,7 @@ export default function NotificationInitializer() {
   const { setDisruptionAlert, setPremiumDue } = useClaims();
 
   useEffect(() => {
+    if (Constants.appOwnership === 'expo') return undefined;
     const cleanup = setupNotificationHandlers({
       onDisruptionAlert: (data) => {
         setDisruptionAlert({
@@ -36,6 +38,7 @@ export default function NotificationInitializer() {
   }, [setDisruptionAlert, setPremiumDue]);
 
   useEffect(() => {
+    if (Constants.appOwnership === 'expo') return undefined;
     if (!token) return undefined;
     let cancelled = false;
     (async () => {

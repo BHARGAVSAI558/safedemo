@@ -1,7 +1,7 @@
 import enum
 from typing import TYPE_CHECKING, List, Optional
 
-from sqlalchemy import Boolean, DateTime, Enum, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, Enum, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
 
@@ -57,6 +57,14 @@ class Simulation(Base):
     decision: Mapped[DecisionType] = mapped_column(Enum(DecisionType), nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     weather_data: Mapped[Optional[str]] = mapped_column(Text)
+    ai_explanation: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    dispute_worker_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    dispute_verdict: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    gate1_passed: Mapped[bool] = mapped_column(Boolean, default=True)
+    gate1_source: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    gate1_value: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    gate2_passed: Mapped[bool] = mapped_column(Boolean, default=True)
+    gate2_signals: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[Optional[DateTime]] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     user: Mapped["User"] = relationship("User", back_populates="simulations")
@@ -90,5 +98,12 @@ class ClaimLifecycle(Base):
     message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     payout_amount: Mapped[float] = mapped_column(Float, default=0.0)
     error_detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    gate1_passed: Mapped[bool] = mapped_column(Boolean, default=False)
+    gate1_source: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    gate1_value: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    gate2_passed: Mapped[bool] = mapped_column(Boolean, default=False)
+    gate2_signals: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    gate2_failure_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    ai_explanation: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[Optional[DateTime]] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[Optional[DateTime]] = mapped_column(DateTime(timezone=True), onupdate=func.now())

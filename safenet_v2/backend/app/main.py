@@ -1,5 +1,9 @@
 from contextlib import asynccontextmanager
+import asyncio
+import subprocess
+import sys
 import traceback
+from pathlib import Path
 
 import redis.asyncio as aioredis
 from fastapi import FastAPI, HTTPException, Request
@@ -10,7 +14,7 @@ from pydantic import ValidationError
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 
 from app.api.v1.routes import admin, auth, claims, notifications, policies, pools, profile, simulation, support, weather_aqi, websockets, workers, zones
 from app.api.v1.routes import events, payments
@@ -20,16 +24,51 @@ from app.db.mongo import connect_mongo, disconnect_mongo
 from app.services.event_service import load_government_alerts_from_path
 from app.core.middleware import MaxBodySizeMiddleware, RequestIDMiddleware, RequestTimingMiddleware, RateLimitMiddleware
 from app.core.rate_limit import limiter
-from app.db.session import engine, init_db, sqlite_uses_memory_fallback
+from app.db.session import AsyncSessionLocal, engine, init_db, sqlite_uses_memory_fallback
+from app.models.zone import Zone
 from app.tasks.background_scheduler import shutdown_background_scheduler, start_background_scheduler
 from app.utils.logger import logger
+
+BACKEND_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _run_alembic_upgrade_sync() -> None:
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "head"],
+            cwd=str(BACKEND_ROOT),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except Exception as exc:
+        logger.warning("alembic_upgrade_skipped: %s", exc)
+
+
+async def _post_init_zones_and_log() -> None:
+    from seed_db import seed_demo_workers, seed_zones
+
+    async with AsyncSessionLocal() as session:
+        zcount = int((await session.execute(select(func.count()).select_from(Zone))).scalar_one() or 0)
+    if zcount == 0:
+        await seed_zones()
+    await seed_demo_workers()
+    async with AsyncSessionLocal() as session:
+        zcount = int((await session.execute(select(func.count()).select_from(Zone))).scalar_one() or 0)
+    logger.info("DB ready. Zones: %s", zcount)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
+        import os
+
+        if (os.getenv("DATABASE_URL") or "").strip():
+            await asyncio.to_thread(_run_alembic_upgrade_sync)
+
         await init_db()
         logger.info("Database initialized")
+        await _post_init_zones_and_log()
         logger.info(
             "startup_db",
             engine_name="main",
@@ -273,6 +312,7 @@ async def health(request: Request):
     return {
         "status": overall,
         "version": settings.APP_VERSION,
+        "db": "connected" if db_ok else "disconnected",
         "storage": {
             "driver": "sqlite" if settings.is_sqlite else "postgres",
             "persistent": not (settings.is_sqlite and sqlite_uses_memory_fallback()),

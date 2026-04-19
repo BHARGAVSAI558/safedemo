@@ -11,6 +11,7 @@ import {
   Animated,
   Pressable,
   Platform,
+  Alert,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
@@ -19,7 +20,7 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import Svg, { Circle, Rect } from 'react-native-svg';
 
-import api, { notifications, simulation, workers as workersApi, zones as zonesApi } from '../services/api';
+import api, { notifications, simulation, claims as claimsApi, workers as workersApi, zones as zonesApi } from '../services/api';
 import { useAuth } from '../contexts/AuthContext';
 import { useClaims } from '../contexts/ClaimContext';
 import { useWsConnection } from '../contexts/WsConnectionContext';
@@ -144,50 +145,129 @@ function dnaHeatColorEarnings(t) {
 }
 
 const DEMO_SCENARIOS = [
-  { label: 'Heavy Rain', value: 'HEAVY_RAIN', emoji: '🌧️', hint: 'Most common disruption' },
-  { label: 'Extreme Heat', value: 'EXTREME_HEAT', emoji: '🌡️', hint: 'Summer peak risk' },
-  { label: 'Air Quality Alert', value: 'AQI_SPIKE', emoji: '🏭', hint: 'Hazardous AQI >300' },
-  { label: 'Others', value: 'CURFEW', emoji: '🚫', hint: 'Other disruption types' },
+  { label: 'Heavy Rain', value: 'HEAVY_RAIN', emoji: '🌧️', hint: 'Most common disruption', payoutEligible: true },
+  { label: 'Extreme Heat', value: 'EXTREME_HEAT', emoji: '🌡️', hint: 'Summer peak risk', payoutEligible: false },
+  { label: 'Air Quality Alert', value: 'AQI_SPIKE', emoji: '🏭', hint: 'Hazardous AQI >300', payoutEligible: false },
+  { label: 'Others', value: 'CURFEW', emoji: '🚫', hint: 'Other disruption types', payoutEligible: false },
 ];
 
-function demoCompletedSteps(status) {
-  const s = String(status || '').toUpperCase();
-  if (s === 'INITIATED') return 0;
-  if (s === 'VERIFYING') return 1;
-  if (s === 'BEHAVIORAL_CHECK') return 2;
-  if (s === 'FRAUD_CHECK') return 3;
-  if (s === 'APPROVED' || s === 'BLOCKED') return 4;
-  return 0;
+function extractGate1ApiValue(update) {
+  const gm0 = update?.gate_messages?.[0];
+  if (typeof gm0 === 'string') {
+    const m = gm0.match(/[—–-]\s*(.+?)\s*[✅✓]/u);
+    if (m) return m[1].trim();
+    return gm0.replace(/^Gate\s*1:\s*/i, '').trim();
+  }
+  return 'Signal verified';
 }
 
-const DEMO_STEP_LABELS = ['Disruption Detected', 'Verifying Signals', 'Fraud Check', 'Decision'];
+function gate1PassSubtitle(update) {
+  const raw = extractGate1ApiValue(update);
+  const cleaned = String(raw)
+    .replace(/\s*in your zone\s*$/i, '')
+    .replace(/\s*in your zone\s+/gi, ' ')
+    .trim();
+  return cleaned || 'Signal verified';
+}
 
-function DemoClaimProgress({ status, colors, primary }) {
-  const doneSteps = demoCompletedSteps(status);
-  const isTerminal = ['APPROVED', 'BLOCKED'].includes(String(status || '').toUpperCase());
-  const isApproved = String(status || '').toUpperCase() === 'APPROVED';
+function extractGate2AppMinutes(update) {
+  const gm1 = update?.gate_messages?.[1];
+  const candidates = [gm1, String(update?.message || '')].filter((x) => typeof x === 'string');
+  for (const s of candidates) {
+    const m = s.match(/(\d+)\s*min/i);
+    if (m) return m[1];
+  }
+  return 'recent';
+}
+
+function buildPayoutFormulaLine(update) {
+  const st = String(update?.status || '').toUpperCase();
+  const done = ['APPROVED', 'PAYOUT_CREDITED'].includes(st);
+  const pb = update?.payout_breakdown;
+  const amt = Number(update?.payout_amount ?? (pb && pb.final_payout) ?? 0);
+  if (st === 'NO_PAYOUT') return '✅ No payout credited for this simulation run';
+  if (st === 'CLAIM_REJECTED' || st === 'DECISION_REJECTED' || st === 'REJECTED') {
+    return '✅ Decision recorded — no payout';
+  }
+  if (!done) return '✅ Payout finalizing…';
+  if (!pb || typeof pb !== 'object') {
+    return amt > 0 ? `✅ ₹${Math.round(amt)} credited` : '✅ Decision recorded';
+  }
+  const rate = Number(pb.hourly_rate ?? 0);
+  const hours = Number(pb.disruption_hours ?? 0);
+  const mult = Number(pb.coverage_multiplier ?? 0);
+  if (!Number.isFinite(rate) || !Number.isFinite(hours) || !Number.isFinite(mult)) {
+    return `✅ ₹${Math.round(amt)} credited`;
+  }
+  return `✅ ₹${Math.round(amt)} credited — Formula: ₹${rate.toFixed(0)}/hr × ${hours.toFixed(1)}h × ${mult}`;
+}
+
+function simulationDoneStepIndex(update) {
+  if (!update) return -1;
+  const st = String(update.status || '').toUpperCase();
+  const gm = Array.isArray(update.gate_messages) ? update.gate_messages : [];
+  const msg = String(update.message || '');
+  if (st === 'INITIATED') return -1;
+  if (st === 'VERIFYING') return 0;
+  if (st === 'GATE_CHECK') {
+    const second =
+      gm.length >= 2 &&
+      msg &&
+      (msg === gm[1] || (gm[1] && msg.includes(gm[1].slice(0, Math.min(24, gm[1].length)))));
+    return second ? 2 : 1;
+  }
+  if (st === 'FRAUD_CHECK') return 3;
+  if (st === 'BEHAVIORAL_CHECK') return 4;
+  if (st === 'PROCESSING_PAYOUT') return 5;
+  if (['APPROVED', 'NO_PAYOUT', 'CLAIM_REJECTED', 'PAYOUT_CREDITED'].includes(st)) return 7;
+  if (st === 'BLOCKED') return 4;
+  return -1;
+}
+
+function SimulationClaimProgress({ update, colors, primary }) {
+  const st = String(update?.status || '').toUpperCase();
+  const fraud = update?.fraud_score;
+  const fraudNum = Number(fraud);
+  const fraudLabel = Number.isFinite(fraudNum) ? fraudNum.toFixed(0) : '—';
+  const g1 = gate1PassSubtitle(update);
+  const g2m = extractGate2AppMinutes(update);
+  const steps = [
+    '🌧 Gate 1: Validating disruption signals...',
+    `✅ Gate 1 PASSED — Weather signal confirmed (${g1})`,
+    '📍 Gate 2: Verifying on-duty activity...',
+    `✅ Gate 2 PASSED — App active ${g2m} min ago with in-zone GPS`,
+    '🛡 Running anti-fraud and integrity checks...',
+    `✅ Fraud Score: ${fraudLabel} — All layers passed`,
+    '💰 Calculating payout from Earnings DNA...',
+    '✅ Payout approved and being credited...',
+  ];
+  const doneIdx = simulationDoneStepIndex(update);
+  const terminal = ['APPROVED', 'NO_PAYOUT', 'CLAIM_REJECTED', 'PAYOUT_CREDITED'].includes(st);
+  const blocked = st === 'BLOCKED';
 
   return (
     <View style={{ marginTop: 8 }}>
-      {DEMO_STEP_LABELS.map((label, i) => {
-        const complete = doneSteps > i || isTerminal;
-        const active = !isTerminal && doneSteps === i;
-        const decisionFail = isTerminal && String(status).toUpperCase() === 'BLOCKED' && i === 3;
+      {steps.map((label, i) => {
+        const failRow = blocked && i === 4;
+        const complete = blocked ? i < 4 : terminal || doneIdx > i;
+        const active = !blocked && !terminal && doneIdx === i;
 
         return (
           <View
-            key={label}
+            key={`sim-step-${i}`}
             style={{
               flexDirection: 'row',
               alignItems: 'center',
-              paddingVertical: 12,
-              borderBottomWidth: i < 3 ? 1 : 0,
+              paddingVertical: 10,
+              borderBottomWidth: i < steps.length - 1 ? 1 : 0,
               borderBottomColor: colors.border,
             }}
           >
             <View style={{ width: 36, alignItems: 'center' }}>
-              {complete ? (
-                <Text style={{ fontSize: 18, color: isApproved && i === 3 ? '#2e7d32' : primary }}>✓</Text>
+              {failRow ? (
+                <Text style={{ fontSize: 18, color: '#c62828' }}>✕</Text>
+              ) : complete ? (
+                <Text style={{ fontSize: 18, color: '#16a34a' }}>✓</Text>
               ) : active ? (
                 <ActivityIndicator size="small" color={primary} />
               ) : (
@@ -195,17 +275,74 @@ function DemoClaimProgress({ status, colors, primary }) {
               )}
             </View>
             <View style={{ flex: 1 }}>
-              <Text style={{ fontSize: 13, fontWeight: '800', color: complete || active ? colors.text : colors.muted }}>
+              <Text
+                style={{
+                  fontSize: 12,
+                  fontWeight: '800',
+                  color: failRow ? '#c62828' : complete || active ? colors.text : colors.muted,
+                }}
+              >
                 {label}
               </Text>
-              {active ? (
+              {active && !failRow ? (
                 <Text style={{ fontSize: 11, color: colors.muted, marginTop: 2 }}>Working…</Text>
               ) : null}
             </View>
-            {decisionFail ? <Text style={{ fontSize: 18 }}>✕</Text> : null}
           </View>
         );
       })}
+    </View>
+  );
+}
+
+function TrustScoreCard({ score, tierLabel, colors, scheme }) {
+  const level =
+    score > 90
+      ? { label: 'Elite ⚡', color: '#2563EB', bg: '#EFF6FF', benefit: 'Instant payouts' }
+      : score > 70
+        ? { label: 'Trusted ✓', color: '#16a34a', bg: '#F0FDF4', benefit: 'Priority 30s payouts' }
+        : score > 40
+          ? { label: 'Reliable', color: '#d97706', bg: '#FFFBEB', benefit: 'Standard 2-min payouts' }
+          : { label: 'Emerging', color: '#dc2626', bg: '#FEF2F2', benefit: 'Build score for faster payouts' };
+  const badgeText = tierLabel ? String(tierLabel) : level.label;
+  const pct = Math.min(100, Math.max(0, score));
+  const cardBg = colors?.card || '#fff';
+  const border = colors?.border || '#E5E7EB';
+  const text = colors?.text || '#111827';
+  const muted = colors?.muted || '#6B7280';
+  const dark = scheme === 'dark';
+  const track = dark ? 'rgba(255,255,255,0.12)' : '#F3F4F6';
+  const subMuted = dark ? '#94a3b8' : '#9CA3AF';
+  return (
+    <View
+      style={{
+        backgroundColor: cardBg,
+        borderRadius: 16,
+        padding: 20,
+        marginVertical: 8,
+        borderWidth: 1,
+        borderColor: border,
+      }}
+    >
+      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+        <Text style={{ fontSize: 13, fontWeight: '600', color: muted }}>Trust Score</Text>
+        <View style={{ backgroundColor: level.bg, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 20 }}>
+          <Text style={{ fontSize: 12, fontWeight: '700', color: level.color }}>{badgeText}</Text>
+        </View>
+      </View>
+      <View style={{ height: 8, backgroundColor: track, borderRadius: 4, overflow: 'hidden', marginBottom: 8 }}>
+        <View style={{ height: '100%', width: `${pct}%`, backgroundColor: level.color, borderRadius: 4 }} />
+      </View>
+      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+        <Text style={{ fontSize: 26, fontWeight: '900', color: text }}>
+          {score}
+          <Text style={{ fontSize: 13, color: subMuted }}>/100</Text>
+        </Text>
+        <Text style={{ fontSize: 11, color: muted, flex: 1, textAlign: 'right', marginLeft: 8 }}>{level.benefit}</Text>
+      </View>
+      <Text style={{ marginTop: 10, fontSize: 11, color: muted, lineHeight: 16 }}>
+        Higher trust unlocks faster payouts after approved claims.
+      </Text>
     </View>
   );
 }
@@ -233,10 +370,14 @@ function isInFlightClaim(lastUpdate, activeClaims) {
     'APPROVED',
     'BLOCKED',
   ]);
-  const lastStatus = String(lastUpdate?.status || '');
+  const lastStatus = String(lastUpdate?.status || '').toUpperCase();
+  const tsRaw = String(lastUpdate?.timestamp || lastUpdate?.created_at || '');
+  const tsMs = Date.parse(tsRaw);
+  const isFresh = Number.isFinite(tsMs) ? Date.now() - tsMs < 120_000 : true;
   if (lastStatus && terminal.has(lastStatus)) return false;
   if (activeClaims?.length) return true;
-  return Boolean(lastUpdate?.claim_id && lastUpdate?.status && !terminal.has(lastUpdate.status));
+  if (!isFresh) return false;
+  return Boolean(lastUpdate?.claim_id && lastStatus && !terminal.has(lastStatus));
 }
 
 function ZonePulseDot({ tone }) {
@@ -459,6 +600,18 @@ export default function DashboardScreen({ navigation }) {
     staleTime: 1000 * 60 * 10,
   });
 
+  const riskModeQuery = useQuery({
+    queryKey: ['zoneRiskMode', effectiveZoneId],
+    enabled: Boolean(effectiveZoneId),
+    queryFn: () => zonesApi.getRiskMode(effectiveZoneId),
+    staleTime: 1000 * 60 * 5,
+    refetchInterval: 1000 * 120,
+  });
+  const riskModeData = riskModeQuery.data || null;
+  const riskModeName = String(riskModeData?.mode || '').toUpperCase();
+  const showProtectionBanner =
+    riskModeName === 'PROTECTION' || riskModeName === 'CRITICAL';
+
   const zoneStatus = zoneStatusQuery.data || null;
   /** Weather/AQI / gov heuristic from zone status (amber “watch”, not a billed disruption). */
   const disruptionAmbient =
@@ -567,11 +720,17 @@ export default function DashboardScreen({ navigation }) {
   const alertCount =
     typeof zoneStatus?.active_alerts_count === 'number' ? zoneStatus.active_alerts_count : 0;
 
+  const weeklyCapFallback = useMemo(() => {
+    const tier = String(policy?.tier ?? profile?.coverage_tier ?? 'standard').toLowerCase();
+    if (tier.includes('basic')) return 600;
+    if (tier.includes('pro')) return 1200;
+    return 900;
+  }, [policy?.tier, profile?.coverage_tier]);
+
   const protectedMax = useMemo(() => {
     const cap = Number(policy?.max_coverage_per_day);
-    if (Number.isFinite(cap) && cap > 0) return cap * 7;
-    return 3500;
-  }, [policy?.max_coverage_per_day]);
+    return Number.isFinite(cap) && cap > 0 ? cap : weeklyCapFallback;
+  }, [policy?.max_coverage_per_day, weeklyCapFallback]);
 
   const protectedThisWeek = useMemo(() => {
     const rows = payoutsQuery.data;
@@ -728,12 +887,10 @@ export default function DashboardScreen({ navigation }) {
     return mx > 0 ? mx : 1;
   }, [dnaQuery.data?.dna]);
 
-  const fingerprintPct = useMemo(() => {
-    const exp = Number(dnaQuery.data?.weekly_expected);
-    const act = Number(dnaQuery.data?.weekly_actual);
-    if (!Number.isFinite(exp) || exp <= 0) return null;
-    return Math.min(100, Math.round((act / exp) * 100));
-  }, [dnaQuery.data]);
+  const weeklyProtectionPct = useMemo(() => {
+    if (!Number.isFinite(protectedMax) || protectedMax <= 0) return null;
+    return Math.min(100, Math.round((protectedThisWeek / protectedMax) * 100));
+  }, [protectedThisWeek, protectedMax]);
   const dnaData = dnaQuery.data || {};
   const currentHourRate = useMemo(() => {
     const row = dnaData?.dna?.[getIstWeekdayMon0()] || [];
@@ -741,16 +898,19 @@ export default function DashboardScreen({ navigation }) {
     return Number(row?.[hr] || 0);
   }, [dnaData?.dna]);
   const liveBand = useMemo(() => {
-    if (currentHourRate >= 120) return { tone: '🟢 High earning window', min: Math.round(currentHourRate * 0.9), max: Math.round(currentHourRate * 1.1) };
-    if (currentHourRate >= 80) return { tone: '🟡 Moderate demand', min: Math.round(currentHourRate * 0.85), max: Math.round(currentHourRate * 1.1) };
-    return { tone: '🔵 Lower demand window', min: Math.max(1, Math.round(currentHourRate * 0.85)), max: Math.max(2, Math.round(currentHourRate * 1.1)) };
+    if (currentHourRate >= 80) return { tone: '🟡 Moderate demand', min: 52, max: 72 };
+    if (currentHourRate >= 45) return { tone: '🟢 Active demand', min: 52, max: 72 };
+    return { tone: '🔵 Lower demand window', min: 35, max: 52 };
   }, [currentHourRate]);
   const todayPotential = useMemo(() => {
     const row = dnaData?.dna?.[getIstWeekdayMon0()] || [];
     const total = row.slice(6, 23).reduce((s, n) => s + (Number(n) || 0), 0);
     const low = Math.round(total * 0.82);
     const high = Math.round(total * 1.12);
-    return { low: Math.max(250, low), high: Math.max(350, high) };
+    return {
+      low: Math.max(180, Math.min(420, low)),
+      high: Math.max(260, Math.min(720, high)),
+    };
   }, [dnaData?.dna]);
   const nextBestLabel = useMemo(() => {
     const pk = dnaData?.peak_window;
@@ -797,6 +957,35 @@ export default function DashboardScreen({ navigation }) {
     },
   });
 
+  const simTerminalStatuses = useMemo(
+    () =>
+      new Set([
+        'APPROVED',
+        'NO_PAYOUT',
+        'CLAIM_REJECTED',
+        'BLOCKED',
+        'PAYOUT_CREDITED',
+        'PAYOUT_DONE',
+        'DECISION_REJECTED',
+        'REJECTED',
+      ]),
+    []
+  );
+  const simClaimId = lastClaimUpdate?.claim_id;
+  const simStUpper = String(lastClaimUpdate?.status || '').toUpperCase();
+  const simAiExplanationEnabled = Boolean(
+    disruptionSheetVisible && sheetPhase === 'progress' && simClaimId != null && simTerminalStatuses.has(simStUpper)
+  );
+
+  const simAiQuery = useQuery({
+    queryKey: ['claimAiExplanation', simClaimId],
+    queryFn: () => claimsApi.getAiExplanation(simClaimId),
+    enabled: simAiExplanationEnabled,
+    retry: false,
+    staleTime: 0,
+    refetchInterval: (query) => (query.state.data?.ai_explanation ? false : 2500),
+  });
+
   const runningScenario =
     simMutation.isPending && simMutation.variables != null ? simMutation.variables : null;
 
@@ -841,6 +1030,12 @@ export default function DashboardScreen({ navigation }) {
         scenario,
         message: lastClaimUpdate?.message,
         forecastShieldLine,
+        recipient: String(firstName || 'your account'),
+        payoutRef:
+          lastClaimUpdate?.transaction_id ||
+          lastClaimUpdate?.payout_ref ||
+          lastClaimUpdate?.payment_ref ||
+          null,
       });
       setDisruptionSheetVisible(false);
       setSheetPhase('scenarios');
@@ -986,11 +1181,34 @@ export default function DashboardScreen({ navigation }) {
   }, [dnaQuery.dataUpdatedAt, dnaQuery.isRefetching, dnaQuery.isFetching, dnaTick]);
 
   const rideStatus = useMemo(() => {
-    if (disruptionActive) return { key: 'red', label: t('dashboard.disruption_active_bar'), bar: '#dc2626' };
+    if (disruptionActive) {
+      let detail = '';
+      if (Array.isArray(activeDisruptions) && activeDisruptions.length > 0) {
+        detail = formatDisruptionLabel(activeDisruptions[0].disruption_type);
+      } else if (inFlight && lastClaimUpdate?.disruption_type) {
+        detail = formatDisruptionLabel(lastClaimUpdate.disruption_type);
+      } else if (showProtectionBanner && riskModeName) {
+        detail = String(riskModeData?.label || riskModeName);
+      }
+      const label = detail ? `${detail} · ${t('dashboard.disruption_active_bar')}` : t('dashboard.disruption_active_bar');
+      return { key: 'red', label, bar: '#dc2626' };
+    }
     if (safeLevel === 'WATCH' || disruptionAmbient || (Number.isFinite(aqiNum) && aqiNum > 150))
       return { key: 'amber', label: t('dashboard.watch_ride'), bar: '#d97706' };
     return { key: 'green', label: t('dashboard.safe_ride'), bar: '#16a34a' };
-  }, [disruptionActive, safeLevel, aqiNum, disruptionAmbient, t]);
+  }, [
+    disruptionActive,
+    activeDisruptions,
+    inFlight,
+    lastClaimUpdate?.disruption_type,
+    showProtectionBanner,
+    riskModeName,
+    riskModeData?.label,
+    safeLevel,
+    aqiNum,
+    disruptionAmbient,
+    t,
+  ]);
 
   const zonePulseOverlayOpacity = zoneBgPulse.interpolate({
     inputRange: [0, 1],
@@ -1057,6 +1275,42 @@ export default function DashboardScreen({ navigation }) {
           >
             <Text style={styles.bankPromptBtnText}>Update bank details</Text>
           </TouchableOpacity>
+        </View>
+      ) : null}
+      {!dismissBankPrompt &&
+      (profile?.bank_upi_id || profile?.bank_account_number) &&
+      String(policy?.status || coverageStatus || '').toLowerCase() !== 'active' ? (
+        <View style={[styles.bankPromptCard, styles.coveragePromptCard]}>
+          <TouchableOpacity style={styles.bankPromptClose} onPress={() => setDismissBankPrompt(true)}>
+            <Text style={styles.bankPromptCloseText}>✕</Text>
+          </TouchableOpacity>
+          <Text style={[styles.bankPromptTitle, styles.coveragePromptTitle]}>
+            Bank details saved. Activate coverage to unlock payouts.
+          </Text>
+          <TouchableOpacity style={[styles.bankPromptBtn, styles.coveragePromptBtn]} onPress={() => navigation.navigate('Coverage')}>
+            <Text style={styles.bankPromptBtnText}>Activate coverage</Text>
+          </TouchableOpacity>
+        </View>
+      ) : null}
+      {showProtectionBanner ? (
+        <View
+          style={[
+            styles.card,
+            {
+              backgroundColor: riskModeName === 'CRITICAL' ? '#3a0d12' : '#2a210a',
+              borderColor: riskModeName === 'CRITICAL' ? '#b71c1c' : '#d97706',
+              marginBottom: 12,
+            },
+          ]}
+        >
+          <Text style={{ color: '#fff', fontWeight: '800', fontSize: 14 }}>
+            ⚠️ Your zone is in {riskModeData?.label || riskModeName} — coverage auto-upgraded
+          </Text>
+          {riskModeData?.description ? (
+            <Text style={{ color: 'rgba(255,255,255,0.85)', marginTop: 6, fontSize: 12 }}>
+              {riskModeData.description}
+            </Text>
+          ) : null}
         </View>
       ) : null}
       {severeDisruptionUi ? (
@@ -1131,45 +1385,6 @@ export default function DashboardScreen({ navigation }) {
           </Text>
         ) : null}
       </LinearGradient>
-
-      <View
-        style={[
-          styles.card,
-          styles.cardElevated,
-          { backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border || 'rgba(0,0,0,0.06)', marginBottom: 14 },
-        ]}
-      >
-        <Text style={[styles.zoneCardTitle, { color: colors.text }]}>SafeNet Trust Score</Text>
-        <Text style={[styles.cardSub, { color: colors.muted, marginBottom: 4 }]}>
-          Real actuarial pricing adjusts your weekly premium; trust tier affects payout speed after approval.
-        </Text>
-        <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 8, gap: 14 }}>
-          <Svg width={96} height={96} viewBox="0 0 100 100">
-            <Circle cx="50" cy="50" r="42" stroke={colors.muted} strokeWidth="8" fill="none" opacity={0.2} />
-            <Circle
-              cx="50"
-              cy="50"
-              r="42"
-              stroke="#1a73e8"
-              strokeWidth="8"
-              fill="none"
-              strokeDasharray={`${(Math.max(0, Math.min(100, trustPts)) / 100) * 264} 264`}
-              strokeLinecap="round"
-              transform="rotate(-90 50 50)"
-            />
-          </Svg>
-          <View style={{ flex: 1 }}>
-            <Text style={{ fontSize: 30, fontWeight: '900', color: colors.text }}>{trustPts}</Text>
-            <Text style={{ color: '#1a73e8', fontWeight: '800', fontSize: 16, marginTop: 2 }}>{trustTierUi}</Text>
-            <Text style={{ color: colors.muted, fontSize: 12, marginTop: 8, lineHeight: 18 }}>
-              On-time premium payments +5 · Clean claim history +10 · Zone verified ✓
-            </Text>
-            <Text style={{ color: colors.muted, fontSize: 12, marginTop: 4, lineHeight: 18 }}>
-              Elite members get 15% faster payout processing.
-            </Text>
-          </View>
-        </View>
-      </View>
 
       {/* Zone status - real-time zone intelligence */}
       <Animated.View
@@ -1320,7 +1535,9 @@ export default function DashboardScreen({ navigation }) {
               <View style={styles.dnaLiveCard}>
                 <Text style={styles.dnaLiveTone}>{liveBand.tone}</Text>
                 <Text style={styles.dnaLiveAmt}>
-                  ₹{liveBand.min}-₹{liveBand.max}/hr expected in your zone
+                  {currentHourRate >= 45
+                    ? '₹52–₹72/hr expected in your zone now'
+                    : '₹35–₹52/hr expected in your zone now'}
                 </Text>
               </View>
             )}
@@ -1389,7 +1606,7 @@ export default function DashboardScreen({ navigation }) {
                               visible: true,
                               dayName: DNA_DAY_NAMES_LONG[di],
                               hour: formatDnaHour12Long(hour),
-                              amount: Math.round(v),
+                              amount: Math.min(72, Math.round(v)),
                               x: pageX,
                               y: pageY,
                             });
@@ -1419,7 +1636,7 @@ export default function DashboardScreen({ navigation }) {
             <Text style={[styles.dnaInsightLine, { color: colors.text }]}>
               {isColdProfile
                 ? t('dashboard.protection_cold_hint')
-                : `₹${Math.round(Number(dnaQuery.data.weekly_actual || 0))} / ₹${Math.round(Number(dnaQuery.data.weekly_expected || 0))} expected`}
+                : `₹${Math.round(protectedThisWeek).toLocaleString('en-IN')} of ₹${Math.round(protectedMax).toLocaleString('en-IN')} used`}
             </Text>
             <View style={[styles.dnaProgressTrack, { backgroundColor: colors.border }]}>
               <View
@@ -1427,20 +1644,22 @@ export default function DashboardScreen({ navigation }) {
                   styles.dnaProgressFill,
                   {
                     backgroundColor: colors.primary,
-                    width: `${Math.min(
-                      100,
-                      (Number(dnaQuery.data.weekly_expected) > 0
-                        ? (Number(dnaQuery.data.weekly_actual) / Number(dnaQuery.data.weekly_expected)) * 100
-                        : 0) || 0
-                    )}%`,
+                    width: `${weeklyProtectionPct != null ? weeklyProtectionPct : 0}%`,
                   },
                 ]}
               />
             </View>
-            <Text style={[styles.dnaConfNote, { color: colors.muted }]}>This week earnings snapshot</Text>
+            <Text style={[styles.dnaConfNote, { color: colors.muted }]}>Weekly protection vs your plan cap</Text>
           </>
         ) : null}
       </View>
+
+      <TrustScoreCard
+        score={Math.min(100, Math.max(0, trustPts))}
+        tierLabel={trustTierUi}
+        colors={colors}
+        scheme={scheme}
+      />
 
       {/* Coverage ring - weekly protection */}
       <View style={[styles.card, styles.cardElevated, { backgroundColor: colors.card, borderColor: colors.border }]}>
@@ -1448,13 +1667,14 @@ export default function DashboardScreen({ navigation }) {
           <View style={{ flex: 1, paddingRight: 8 }}>
             <Text style={[styles.sectionTitle, { color: colors.text }]}>{t('dashboard.weekly_protection')}</Text>
             <Text style={[styles.coverageRingAmount, { color: colors.text }]}>
-              ₹{Math.round(shownWeeklyProtected).toLocaleString('en-IN')} protected this week
+              ₹{Math.round(shownWeeklyProtected).toLocaleString('en-IN')} of ₹
+              {Math.round(protectedMax).toLocaleString('en-IN')} used
             </Text>
             <Text style={[styles.fingerprintHint, { color: colors.muted }]}>
               {isColdProfile && Math.round(shownWeeklyProtected) === 0
                 ? t('dashboard.protection_cold_hint')
-                : fingerprintPct != null
-                  ? `↗ ${fingerprintPct}% of your earning fingerprint`
+                : weeklyProtectionPct != null
+                  ? `${weeklyProtectionPct}% of weekly cap`
                   : `${trend.dir === 'up' ? '↗' : trend.dir === 'down' ? '↘' : '→'} ${trend.pct}% vs typical week`}
             </Text>
             <Text style={[styles.cardSub, { color: colors.muted, marginTop: 6 }]}>
@@ -1508,23 +1728,23 @@ export default function DashboardScreen({ navigation }) {
             { backgroundColor: flagged ? colors.warnBg : colors.card, borderColor: colors.border },
           ]}
         >
-          <View style={styles.cardHeaderRow}>
-            <View style={{ flex: 1 }}>
-              <Text style={[styles.cardTitle, { color: colors.text }]}>Active claim</Text>
-              {lastClaimUpdate?.message ? (
-                <View style={styles.liveClaimHighlight}>
-                  <Text style={[styles.liveClaimHighlightText, { color: colors.text }]}>
-                    {stripDailyLimitPrefix(lastClaimUpdate.message)}
-                  </Text>
-                </View>
-              ) : (
-                <Text style={[styles.cardSub, { color: colors.muted }]} numberOfLines={2}>
-                  Processing in real-time…
-                </Text>
-              )}
-            </View>
-            <Text style={[styles.etaText, { color: colors.muted }]}>{etaSeconds ? `${etaSeconds}s` : '—'}</Text>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+            <Text style={[styles.cardTitle, { color: colors.text, marginBottom: 0 }]}>Active claim</Text>
+            <Text style={[styles.etaText, { color: colors.muted, fontWeight: '800' }]}>
+              {etaSeconds ? `${etaSeconds}s` : '—'}
+            </Text>
           </View>
+          {lastClaimUpdate?.message ? (
+            <View style={[styles.liveClaimHighlight, { marginBottom: 12 }]}>
+              <Text style={[styles.liveClaimHighlightText, { color: colors.text }]}>
+                {stripDailyLimitPrefix(lastClaimUpdate.message)}
+              </Text>
+            </View>
+          ) : (
+            <Text style={[styles.cardSub, { color: colors.muted, marginBottom: 12 }]} numberOfLines={2}>
+              Processing in real-time…
+            </Text>
+          )}
 
           <Stepper step={step} flagged={flagged} scheme={scheme} />
 
@@ -1543,6 +1763,20 @@ export default function DashboardScreen({ navigation }) {
             style={[styles.simulateCta, styles.simulateCtaHighlight, { backgroundColor: colors.primary }]}
             activeOpacity={0.9}
             onPress={() => {
+              const hasBank = Boolean(
+                String(profile?.bank_upi_id || '').trim() || String(profile?.bank_account_number || '').trim()
+              );
+              if (!hasBank) {
+                Alert.alert(
+                  'Bank details required',
+                  'Add a UPI ID or bank account in Account before running payout simulations.',
+                  [
+                    { text: 'Not now', style: 'cancel' },
+                    { text: 'Open Account', onPress: () => navigation.navigate('Account') },
+                  ]
+                );
+                return;
+              }
               logButtonTap('simulate_disruption_open');
               weeklyBeforeDemoRef.current = protectedThisWeek;
               demoStepStatusRef.current = null;
@@ -1655,6 +1889,9 @@ export default function DashboardScreen({ navigation }) {
                 <Text style={[styles.cardSub, { color: colors.muted, marginBottom: 14 }]}>
                   Pick one scenario — only that run starts. Watch each step update in real time.
                 </Text>
+                <Text style={[styles.cardSub, { color: colors.muted, marginBottom: 10, fontSize: 12 }]}>
+                  Red dot = disruption payout eligible
+                </Text>
                 {DEMO_SCENARIOS.map((s) => (
                   <TouchableOpacity
                     key={s.value}
@@ -1664,6 +1901,10 @@ export default function DashboardScreen({ navigation }) {
                       runningScenario === s.value ? { borderWidth: 2 } : null,
                     ]}
                     onPress={() => {
+                      if (!s.payoutEligible) {
+                        Alert.alert('No active disruption', 'Zone is calm and safe. No payout run is needed right now.');
+                        return;
+                      }
                       logButtonTap('trigger_simulation_button');
                       weeklyBeforeDemoRef.current = protectedThisWeek;
                       demoStepStatusRef.current = null;
@@ -1674,7 +1915,7 @@ export default function DashboardScreen({ navigation }) {
                     <Text style={styles.scenarioEmoji}>{s.emoji}</Text>
                     <View style={{ flex: 1 }}>
                       <Text style={[styles.scenarioTitle, { color: colors.text }]}>
-                        {s.label} 🟢
+                        {s.label} {s.payoutEligible ? '🔴' : '🟢'}
                       </Text>
                       <Text style={[styles.scenarioHint, { color: colors.muted }]}>{s.hint}</Text>
                     </View>
@@ -1703,7 +1944,12 @@ export default function DashboardScreen({ navigation }) {
                     Starting…
                   </Text>
                 )}
-                <DemoClaimProgress status={lastClaimUpdate?.status} colors={colors} primary={colors.primary} />
+                <SimulationClaimProgress update={lastClaimUpdate} colors={colors} primary={colors.primary} />
+                {simAiQuery.data?.ai_explanation ? (
+                  <Text style={[styles.cardSub, { color: colors.text, marginTop: 12, lineHeight: 18 }]}>
+                    🤖 SafeNet AI: {String(simAiQuery.data.ai_explanation).trim()}
+                  </Text>
+                ) : null}
               </>
             )}
             <TouchableOpacity
@@ -1764,11 +2010,14 @@ export default function DashboardScreen({ navigation }) {
         <Pressable style={styles.celebrationBackdrop} onPress={() => setPayoutCelebration(null)}>
           <Pressable style={styles.celebrationInner} onPress={(e) => e.stopPropagation()}>
             <Text style={styles.celebrationAmt}>₹{Math.round(Number(payoutCelebration?.amount || 0))}</Text>
-            <Text style={styles.celebrationSub}>credited to your wallet</Text>
+            <Text style={styles.celebrationSub}>sent to {payoutCelebration?.recipient || 'your account'}</Text>
             <View style={styles.celebrationCard}>
               <Text style={styles.celebrationExplain}>
-                {scenarioHumanPhrase(payoutCelebration?.scenario)} disruption verified. Payout was credited after safety checks.
+                Claim approved → Crediting payout → Amount sent successfully.
               </Text>
+              {payoutCelebration?.payoutRef ? (
+                <Text style={styles.celebrationShieldLine}>Payout ref: {String(payoutCelebration.payoutRef)}</Text>
+              ) : null}
               {payoutCelebration?.forecastShieldLine ? (
                 <Text style={styles.celebrationShieldLine}>{payoutCelebration.forecastShieldLine}</Text>
               ) : null}
@@ -1794,7 +2043,7 @@ export default function DashboardScreen({ navigation }) {
             <Text style={styles.paymentDetailLine}>Amount: ₹{Math.round(Number(selectedPayment?.amount || selectedPayment?.payout || selectedPayment?.payout_amount || 0))}</Text>
             <Text style={styles.paymentDetailLine}>Status: {String(selectedPayment?.status || 'credited').toUpperCase()}</Text>
             <Text style={styles.paymentDetailLine}>Timestamp: {formatPayoutWhen(selectedPayment)}</Text>
-            <Text style={styles.paymentDetailReason}>{String(selectedPayment?.reason || selectedPayment?.details?.reason || 'Disruption verified and payout credited.')}</Text>
+            <Text style={styles.paymentDetailReason}>Disruption verified and payout credited.</Text>
             <TouchableOpacity style={styles.paymentDetailBtn} onPress={() => setSelectedPayment(null)}>
               <Text style={styles.paymentDetailBtnText}>Close</Text>
             </TouchableOpacity>
@@ -1909,6 +2158,9 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
   },
   bankPromptBtnText: { color: '#fff', fontWeight: '900', fontSize: 12 },
+  coveragePromptCard: { backgroundColor: '#eff6ff', borderColor: '#60a5fa' },
+  coveragePromptTitle: { color: '#1e3a8a' },
+  coveragePromptBtn: { backgroundColor: '#1d4ed8' },
 
   headerGradient: {
     borderRadius: 20,

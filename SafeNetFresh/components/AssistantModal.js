@@ -13,6 +13,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import Constants from 'expo-constants';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import AppModal from './AppModal';
@@ -27,6 +28,7 @@ function bcp47ForAppLang(code) {
 }
 
 function getSpeechModule() {
+  if (Constants.appOwnership === 'expo') return null;
   try {
     // eslint-disable-next-line global-require
     const lib = require('expo-speech-recognition');
@@ -117,6 +119,7 @@ export default function AssistantModal({ visible, onClose }) {
   const [ticketText, setTicketText] = useState('');
   const [ticketOpen, setTicketOpen] = useState(false);
   const [recognizing, setRecognizing] = useState(false);
+  const [voiceNote, setVoiceNote] = useState('');
   const [voiceTarget, setVoiceTarget] = useState('message');
   const currentTranscriptRef = useRef('');
   const baseVoiceTextRef = useRef('');
@@ -124,6 +127,7 @@ export default function AssistantModal({ visible, onClose }) {
   const historyRef = useRef(null);
   const speechModuleRef = useRef(null);
   const webRecognitionRef = useRef(null);
+  const inputRef = useRef(null);
 
   const historyQuery = useQuery({
     queryKey: ['supportHistory', userId],
@@ -258,10 +262,7 @@ export default function AssistantModal({ visible, onClose }) {
           return;
         }
         if (!Ctor) {
-          Alert.alert(
-            'Voice input',
-            'This browser does not support speech recognition. Type your message instead, or use Chrome / Edge.'
-          );
+          setVoiceNote('Voice input is not supported in this browser. Use Chrome or Edge.');
           return;
         }
         setVoiceTarget(target);
@@ -300,10 +301,8 @@ export default function AssistantModal({ visible, onClose }) {
       const sm = speechModuleRef.current || getSpeechModule();
       speechModuleRef.current = sm;
       if (!sm) {
-        Alert.alert(
-          'Voice input',
-          'Speech recognition needs a development build with the native speech module (`npx expo run:ios` / `run:android`), or open Support from the web app where the browser can use voice typing.'
-        );
+        setVoiceNote('Voice input needs a Development Build on mobile. In Expo Go use keyboard mic typing.');
+        inputRef.current?.focus?.();
         return;
       }
       if (recognizing) {
@@ -313,9 +312,10 @@ export default function AssistantModal({ visible, onClose }) {
       setVoiceTarget(target);
       const perm = await sm.requestPermissionsAsync();
       if (!perm.granted) {
-        Alert.alert('Microphone', 'Allow microphone access to speak your message.');
+        setVoiceNote('Allow microphone access to use voice input.');
         return;
       }
+      setVoiceNote('');
       baseVoiceTextRef.current =
         target === 'ticket'
           ? String(ticketText || '').trim()
@@ -328,7 +328,7 @@ export default function AssistantModal({ visible, onClose }) {
         continuous: true,
       });
     } catch (e) {
-      Alert.alert('Voice input', e?.message || 'Speech recognition is not available here. Try the keyboard or use SafeNet on web.');
+      setVoiceNote(e?.message || 'Speech recognition is unavailable here. Use keyboard voice typing.');
     }
   };
 
@@ -499,6 +499,7 @@ export default function AssistantModal({ visible, onClose }) {
 
           <View style={styles.inputRow}>
             <TextInput
+              ref={inputRef}
               style={styles.input}
               placeholder={recognizing ? tloc('assistant.listening') : languagePack.placeholder}
               value={message}
@@ -518,7 +519,7 @@ export default function AssistantModal({ visible, onClose }) {
               <Text style={styles.sendText}>{sendMutation.isPending ? '...' : languagePack.send}</Text>
             </TouchableOpacity>
           </View>
-          <Text style={styles.voiceHint}>{tloc('assistant.voice_hint')}</Text>
+          <Text style={styles.voiceHint}>{voiceNote || tloc('assistant.voice_hint')}</Text>
           </Pressable>
         </KeyboardAvoidingView>
       </Pressable>

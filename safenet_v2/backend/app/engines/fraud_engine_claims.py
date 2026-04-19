@@ -20,9 +20,9 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.claim import Simulation
+from app.models.claim import DecisionType, Simulation
 from app.models.policy import Policy
-from app.models.worker import Profile
+from app.models.worker import Profile, User
 from app.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -68,6 +68,34 @@ async def check_fraud(
     now = _utcnow()
     flags: list[tuple[str, str]] = []
     score = 0.0
+
+    # ── Layer 2: Canonical identity dedup (same SHA-256 phone hash, other user, same event, 3h) ──
+    if disruption_event_id and int(disruption_event_id) > 0:
+        urow = await db.get(User, user_id)
+        ch = (str(urow.canonical_hash).strip() if urow and urow.canonical_hash else "") or ""
+        if ch:
+            window_3h = now - timedelta(hours=3)
+            dup_id = (
+                await db.execute(
+                    select(Simulation.id)
+                    .join(User, User.id == Simulation.user_id)
+                    .where(
+                        User.canonical_hash == ch,
+                        User.id != user_id,
+                        Simulation.disruption_event_id == int(disruption_event_id),
+                        Simulation.decision == DecisionType.APPROVED,
+                        Simulation.created_at >= window_3h,
+                    )
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if dup_id is not None:
+                return 1.0, [
+                    (
+                        "canonical_dedup",
+                        f"Canonical dedup blocked — worker already received payout for this disruption event (claim #{dup_id})",
+                    )
+                ]
 
     # ── Check 1: Repeated claim in last 24h ───────────────────────────────────
     window_24h = now - timedelta(hours=24)

@@ -62,10 +62,7 @@ export default function WebSocketBridge() {
           presentDisruptionLocalNotification({ event_type: merged.event_type, zone_id: merged.zone_id }).catch(() => {});
         }
       },
-      onDisconnect: () => {
-        // eslint-disable-next-line no-console
-        console.log('[WS] Disconnected', { workerId });
-      },
+      onDisconnect: () => {},
       onStatusChange: setWsStatus,
     };
   }, [token, workerId, setClaimUpdate, setDisruptionAlert, setWsStatus]);

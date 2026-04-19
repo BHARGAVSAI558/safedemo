@@ -11,7 +11,9 @@ const translations = {
   hi,
   te,
 };
-const STORAGE_KEY = 'safenet.language';
+/** Primary key per product spec; legacy key kept in sync for older installs. */
+const STORAGE_KEY_PRIMARY = 'safenet_lang';
+const STORAGE_KEY_LEGACY = 'safenet.language';
 
 function getDeviceLanguageTag() {
   try {
@@ -32,7 +34,9 @@ export function LocalizationProvider({ children }) {
     let mounted = true;
     (async () => {
       try {
-        const saved = await AsyncStorage.getItem(STORAGE_KEY);
+        const saved =
+          (await AsyncStorage.getItem(STORAGE_KEY_PRIMARY)) ||
+          (await AsyncStorage.getItem(STORAGE_KEY_LEGACY));
         if (saved && translations[saved] && mounted) {
           setLanguage(saved);
           return;
@@ -53,7 +57,8 @@ export function LocalizationProvider({ children }) {
     if (!translations[nextLanguage]) return;
     setLanguage(nextLanguage);
     try {
-      await AsyncStorage.setItem(STORAGE_KEY, nextLanguage);
+      await AsyncStorage.setItem(STORAGE_KEY_PRIMARY, nextLanguage);
+      await AsyncStorage.setItem(STORAGE_KEY_LEGACY, nextLanguage);
     } catch (_) {}
   };
 
@@ -85,7 +90,9 @@ export function LocalizationProvider({ children }) {
   };
 
   return (
-    <LocalizationContext.Provider value={{ language, setLanguage: changeLanguage, t }}>
+    <LocalizationContext.Provider
+      value={{ language, setLanguage: changeLanguage, setLocale: changeLanguage, t }}
+    >
       {children}
     </LocalizationContext.Provider>
   );

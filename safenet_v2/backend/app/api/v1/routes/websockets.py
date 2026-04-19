@@ -176,7 +176,7 @@ async def admin_ws(
     await websocket.accept()
 
     redis = getattr(websocket.app.state, "redis", None)
-    channels = ["all_claims_feed", "fraud_alerts", "zone_events", "pool_health"]
+    channels = ["all_claims_feed", "fraud_alerts", "zone_events", "pool_health", "zero_day_alerts"]
 
     admin_q: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
     tasks: list[asyncio.Task[Any]] = []

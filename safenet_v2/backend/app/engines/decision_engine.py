@@ -289,6 +289,14 @@ class DecisionEngine:
         await db.commit()
 
         try:
+            from app.services.claim_ai import persist_ai_explanation_for_simulation_id
+
+            await persist_ai_explanation_for_simulation_id(db, sim.id)
+            await db.commit()
+        except Exception:
+            await db.rollback()
+
+        try:
             await publish_claim_update(
                 redis=redis,
                 worker_id=user_id,

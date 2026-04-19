@@ -13,6 +13,7 @@ from app.models.zone_actuarial import ZoneActuarialSettings
 from app.models.support import SupportQuery
 from app.models.worker import EarningsDNA, OccupationType, Profile, RiskProfile, User
 from app.models.zone import Zone
+from app.models.zero_day_alert import ZeroDayAlert
 
 __all__ = [
     "DecisionType",
@@ -39,4 +40,5 @@ __all__ = [
     "ZoneActuarialSettings",
     "WeeklySummary",
     "PoolHealthWeeklySnapshot",
+    "ZeroDayAlert",
 ]

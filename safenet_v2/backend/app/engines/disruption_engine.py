@@ -2,8 +2,8 @@
 Disruption Engine
 -----------------
 Detects active environmental disruptions for a zone using live APIs:
-  - Open-Meteo  (weather — free, no key required)
-  - OpenAQ v2   (air quality — free tier)
+  - Open-Meteo weather
+  - Open-Meteo air-quality (pm2_5)
 
 Stores / updates DisruptionEvent rows in the DB.
 Returns the list of currently active events for the zone.
@@ -106,15 +106,16 @@ def fetch_weather_for_zone(lat: float, lng: float) -> dict[str, Any]:
 
 def fetch_aqi_for_zone(lat: float, lng: float) -> dict[str, Any]:
     """
-    Calls OpenAQ v2 /latest by coordinates and returns PM2.5 value.
+    Uses Open-Meteo air quality endpoint and returns latest PM2.5 value.
     Falls back to 0 on any failure or empty result.
     """
-    url = "https://api.openaq.org/v2/latest"
+    url = "https://air-quality-api.open-meteo.com/v1/air-quality"
     params = {
-        "coordinates": f"{lat},{lng}",
-        "radius": 25000,
-        "limit": 1,
-        "parameter": "pm25",
+        "latitude": lat,
+        "longitude": lng,
+        "hourly": "pm2_5",
+        "timezone": "auto",
+        "forecast_days": 1,
     }
     try:
         with httpx.Client(timeout=_HTTP_TIMEOUT) as client:
@@ -122,18 +123,12 @@ def fetch_aqi_for_zone(lat: float, lng: float) -> dict[str, Any]:
             r.raise_for_status()
             data = r.json()
 
-        results = data.get("results") or []
+        hourly = data.get("hourly") or {}
+        pm25_series = hourly.get("pm2_5") or []
         pm25_value = 0.0
-
-        for station in results:
-            for measurement in station.get("measurements") or []:
-                param = str(measurement.get("parameter", "")).lower().replace(".", "")
-                if param in ("pm25", "pm2_5"):
-                    val = measurement.get("value")
-                    if val is not None:
-                        pm25_value = max(0.0, float(val))
-                    break
-            if pm25_value > 0:
+        for v in reversed(pm25_series):
+            if isinstance(v, (int, float)):
+                pm25_value = max(0.0, float(v))
                 break
 
         log.info(
@@ -144,7 +139,7 @@ def fetch_aqi_for_zone(lat: float, lng: float) -> dict[str, Any]:
             lng=lng,
             pm25_value=pm25_value,
         )
-        return {"pm25_value": pm25_value, "source": "openaq"}
+        return {"pm25_value": pm25_value, "source": "open-meteo-aqi"}
 
     except Exception as exc:
         log.warning(
@@ -155,7 +150,7 @@ def fetch_aqi_for_zone(lat: float, lng: float) -> dict[str, Any]:
             lng=lng,
             error=str(exc),
         )
-        return {"pm25_value": 0.0, "source": "openaq-fallback"}
+        return {"pm25_value": 0.0, "source": "aqi-fallback"}
 
 
 # ── 3. Severity helpers ────────────────────────────────────────────────────────

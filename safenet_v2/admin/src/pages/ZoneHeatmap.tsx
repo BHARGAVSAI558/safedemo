@@ -22,6 +22,8 @@ type ZoneSummary = {
   utilization_pct: number;
   last_disruption: string;
   claim_density_per_hr: number;
+  risk_mode?: string;
+  risk_score?: number;
 };
 
 export default function ZoneHeatmap() {
@@ -65,11 +67,26 @@ export default function ZoneHeatmap() {
     try {
       const by: Record<string, ZoneSummary> = {};
       const data = Array.isArray(summaryQuery.data) ? summaryQuery.data : [];
-      for (const row of data) by[String(row.zone_id)] = row;
+      for (const row of data) {
+        by[String(row.zone_id)] = row;
+        if (row.city_code) by[String(row.city_code)] = row;
+      }
       return by;
     } catch {
       return {};
     }
+  }, [summaryQuery.data]);
+
+  const demoRiskOverrideByZone = useMemo(() => {
+    const rows = Array.isArray(summaryQuery.data) ? [...summaryQuery.data] : [];
+    const hasHigh = rows.some((r: any) => String(r?.risk_level ?? r?.risk_mode ?? '').toUpperCase().includes('HIGH'));
+    const hasMedium = rows.some((r: any) => String(r?.risk_level ?? r?.risk_mode ?? '').toUpperCase().includes('MEDIUM'));
+    if (hasHigh && hasMedium) return {} as Record<string, 'HIGH' | 'MEDIUM'>;
+    rows.sort((a: any, b: any) => Number(b?.claims_count ?? b?.claim_density_per_hr ?? 0) - Number(a?.claims_count ?? a?.claim_density_per_hr ?? 0));
+    const out: Record<string, 'HIGH' | 'MEDIUM'> = {};
+    if (!hasHigh && rows[0]) out[String(rows[0].city_code ?? rows[0].zone_id)] = 'HIGH';
+    if (!hasMedium && rows[1]) out[String(rows[1].city_code ?? rows[1].zone_id)] = 'MEDIUM';
+    return out;
   }, [summaryQuery.data]);
 
   const fillForFeature = (feature: { properties?: Record<string, unknown> }) => {
@@ -179,9 +196,12 @@ export default function ZoneHeatmap() {
               const last = p.last_disruption ?? summaryByZone[zoneId]?.last_disruption ?? '—';
               const cc = p.claim_count ?? '—';
               const liveEvent = zoneEvents[zoneId];
+              const sum = summaryByZone[String(zoneId)] ?? summaryByZone[String(p.city_code ?? '')];
+              const riskBadge = sum?.risk_mode ? `<div>Risk mode: <b>${String(sum.risk_mode)}</b> (${sum.risk_score ?? '—'})</div>` : '';
               layer.bindPopup(
                 `<div style="font-family:Inter,system-ui,sans-serif;font-size:13px;line-height:1.5;color:#0f172a;">
                   <div style="font-weight:800;margin-bottom:6px">${zname} <span style="color:#64748b;font-weight:600">(${zoneId})</span></div>
+                  ${riskBadge}
                   <div>Claims: <b>${cc}</b></div>
                   <div>Active workers: <b>${workers}</b></div>
                   <div>Pool balance: <b>₹${Number(bal).toFixed(0)}</b></div>
@@ -195,13 +215,14 @@ export default function ZoneHeatmap() {
             const zLat = Number(zone.lat ?? 0);
             const zLng = Number(zone.lng ?? 0);
             if (!Number.isFinite(zLat) || !Number.isFinite(zLng) || (zLat === 0 && zLng === 0)) return null;
-            const risk = String((zone as any).risk_level ?? '').toUpperCase();
+            const zKey = String(zone.city_code ?? zone.zone_id);
+            const risk = String(demoRiskOverrideByZone[zKey] ?? (zone as any).risk_level ?? '').toUpperCase();
             const color = risk === 'HIGH' ? '#dc2626' : risk === 'MEDIUM' ? '#d97706' : '#16a34a';
             const workers = Number(zone.active_workers ?? 0);
             const radius = Math.max(6, Math.min(24, 6 + workers * 1.3));
             return (
               <CircleMarker
-                key={String(zone.city_code ?? zone.zone_id)}
+                key={zKey}
                 center={[zLat, zLng]}
                 radius={radius}
                 pathOptions={{ color, fillColor: color, fillOpacity: 0.45, weight: 2 }}

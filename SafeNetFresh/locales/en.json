@@ -81,7 +81,10 @@
     "payout_basis": "Payout reflects your policy terms, verified disruption, and earning fingerprint for this time window.",
     "payout_basis_title": "How this payout was determined",
     "fingerprint_hint": "Aligned with your usual earning level for this day and time.",
-    "history_empty_hint": "Past claims will appear after verified disruptions."
+    "history_empty_hint": "Past claims will appear after verified disruptions.",
+    "past_summaries": "Past summaries",
+    "summaries_hint": "Sundays 8 PM IST",
+    "summaries_empty": "No weekly summaries yet — delivered Sundays 8 PM IST."
   },
   "policy": {
     "title": "Coverage",
@@ -115,7 +118,15 @@
     "gps_denied": "Location permission denied",
     "gps_failed": "Could not detect zone"
   },
+  "tabs": {
+    "home": "Home",
+    "claims": "Claims",
+    "coverage": "Coverage",
+    "account": "Account"
+  },
   "greeting": "Good evening",
+  "good_morning": "Good morning",
+  "your_zone": "Your zone",
   "zone": "Your Zone",
   "covered": "COVERED",
   "weather": "Weather",
@@ -124,5 +135,15 @@
   "earnings_dna": "Earnings DNA",
   "weekly_protection": "Weekly Protection",
   "simulate": "Simulate Disruption",
-  "claim_processing": "Processing your claim..."
+  "simulate_disruption": "Simulate disruption",
+  "claim_processing": "Processing your claim...",
+  "payout_credited": "Payout credited",
+  "trust_score": "Trust score",
+  "download_receipt": "Download receipt",
+  "no_disruptions": "No disruptions ✓",
+  "be_careful": "Stay careful",
+  "home": "Home",
+  "coverage": "Coverage",
+  "account": "Account",
+  "support": "Support"
 }

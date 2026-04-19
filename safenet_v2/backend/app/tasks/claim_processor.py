@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from celery import Celery
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.core.config import settings
 from app.db.mongo import connect_mongo
@@ -19,8 +19,10 @@ from app.engines.fraud_engine import FraudEngine
 from app.engines.fraud.types import AppActivityEvent, GPSPoint
 from app.engines.fraud_engine import build_gps_zone, first_simulation_time
 from app.engines.fraud_engine import FRAUD_THRESHOLD
+from app.engines.dual_gate import evaluate_gate2, gate1_from_confidence, gate_status_payload
 from app.models.claim import ClaimLifecycle, DecisionType
 from app.models.worker import Profile
+from app.models.zone import Zone
 from app.engines.trust_payout import payout_delay_seconds, trust_points_from_profile
 from app.services.realtime_service import publish_claim_update, publish_zone_event
 from app.services.zone_resolver import resolve_city_to_zone
@@ -120,6 +122,8 @@ async def process_claim_async(
         message: str,
         payout_amount: Optional[float] = None,
         payout_countdown_seconds: Optional[int] = None,
+        gate_status: Optional[dict[str, str]] = None,
+        gate_messages: Optional[list[str]] = None,
     ) -> None:
         try:
             await publish_claim_update(
@@ -133,6 +137,8 @@ async def process_claim_async(
                 disruption_type=disruption_type,
                 correlation_id=correlation_id,
                 payout_countdown_seconds=payout_countdown_seconds,
+                gate_status=gate_status,
+                gate_messages=gate_messages,
             )
         except Exception:
             pass
@@ -200,6 +206,53 @@ async def process_claim_async(
                     await _set_lifecycle_status(db, "DECISION", "No payout: low confidence")
                     await _publish("CLAIM_REJECTED", "Confidence LOW: no payout")
                     return {"claim_id": claim_id, "status": "NO_PAYOUT", "confidence_level": conf.level}
+
+                g1_ok, g1_src, g1_val = gate1_from_confidence(conf)
+                zone_row = (
+                    await db.execute(select(Zone).where(func.lower(Zone.city_code) == str(zone_id).lower()))
+                ).scalar_one_or_none()
+                if zone_row is not None:
+                    base = float(zone_row.zone_baseline_orders or 100.0)
+                    zone_row.orders_last_hour = base * 0.42
+                g2_res = evaluate_gate2(profile, zone_row, datetime.now(tz=timezone.utc))
+                if zone_row is not None and str(zone_row.risk_mode or "").upper() == "CRITICAL":
+                    g2_res.passed = True
+                    g2_res.signals["critical_mode_bypass"] = True
+
+                lc_row = (
+                    await db.execute(select(ClaimLifecycle).where(ClaimLifecycle.claim_id == claim_id))
+                ).scalar_one_or_none()
+                if lc_row is not None:
+                    lc_row.gate1_passed = bool(g1_ok)
+                    lc_row.gate1_source = g1_src
+                    lc_row.gate1_value = g1_val
+                    lc_row.gate2_passed = bool(g2_res.passed)
+                    lc_row.gate2_signals = dict(g2_res.signals)
+                    lc_row.gate2_failure_reason = None if g2_res.passed else (g2_res.failure_reason or "")
+                    await db.commit()
+
+                gs = gate_status_payload(True, bool(g2_res.passed), f"Gate 1: {g1_val} | Gate 2: {g2_res.human_summary}")
+                gate_msgs = [
+                    f"Gate 1: Disruption confirmed — {g1_val} ✅",
+                    (
+                        f"Gate 2: Verifying you were working... ✅ {g2_res.human_summary}"
+                        if g2_res.passed
+                        else "Gate 2: Not detected as active during disruption"
+                    ),
+                ]
+                await _publish("GATE_CHECK", gate_msgs[0], gate_status=gs, gate_messages=gate_msgs)
+                await _publish("GATE_CHECK", gate_msgs[1], gate_status=gs, gate_messages=gate_msgs)
+
+                if not g2_res.passed:
+                    msg = "Disruption confirmed in your zone, but you were not detected as active"
+                    await _set_lifecycle_status(db, "NO_PAYOUT_NOT_WORKING", msg)
+                    await _publish(
+                        "NO_PAYOUT_NOT_WORKING",
+                        msg,
+                        gate_status=gate_status_payload(True, False, msg),
+                        gate_messages=gate_msgs,
+                    )
+                    return {"claim_id": claim_id, "status": "NO_PAYOUT_NOT_WORKING"}
 
                 # Step 3: BehavioralEngine
                 await _publish("VERIFYING", "Loading worker baseline and deviation score")

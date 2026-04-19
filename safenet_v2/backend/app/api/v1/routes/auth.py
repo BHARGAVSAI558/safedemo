@@ -13,6 +13,7 @@ from app.models.auth_token import RefreshToken
 from app.models.worker import User
 from app.schemas.auth import AdminLoginRequest, RefreshRequest, SendOTPRequest, TokenResponse, VerifyOTPRequest
 from app.services.otp_service import OTPService
+from app.utils.canonical_id import generate_canonical_hash
 from app.utils.logger import get_logger
 from structlog.contextvars import bind_contextvars
 
@@ -78,7 +79,12 @@ async def admin_login(
     result = await db.execute(select(User).where(User.phone == phone))
     user = result.scalar_one_or_none()
     if not user:
-        user = User(phone=phone, is_active=True, is_admin=True)
+        user = User(
+            phone=phone,
+            is_active=True,
+            is_admin=True,
+            canonical_hash=generate_canonical_hash(phone),
+        )
         db.add(user)
         await db.flush()
         await db.refresh(user)
@@ -90,6 +96,8 @@ async def admin_login(
     else:
         if not user.is_admin:
             user.is_admin = True
+        if not user.canonical_hash:
+            user.canonical_hash = generate_canonical_hash(phone)
         log.info(
             "admin_password_login",
             engine_name="auth_route",
@@ -146,7 +154,7 @@ async def verify_otp(
     is_new_user = False
     if not user:
         is_new_user = True
-        user = User(phone=phone)
+        user = User(phone=phone, canonical_hash=generate_canonical_hash(phone))
         db.add(user)
         await db.flush()
         await db.refresh(user)
@@ -158,6 +166,8 @@ async def verify_otp(
             worker_id=user.id,
         )
     else:
+        if not user.canonical_hash:
+            user.canonical_hash = generate_canonical_hash(phone)
         log.info(
             "user_login",
             engine_name="auth_route",

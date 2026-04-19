@@ -16,8 +16,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useAuth } from '../contexts/AuthContext';
-import { usePolicy } from '../contexts/PolicyContext';
-import { gigProfile, workers, policies, formatApiError } from '../services/api';
+import { gigProfile, workers, formatApiError } from '../services/api';
 import { useGPSZoneDetection } from '../hooks/useGPSZoneDetection';
 import { formatShortLocation } from '../utils/locationDisplay';
 
@@ -78,7 +77,6 @@ function formatValidUntil(iso) {
 
 export default function ProfileSetupScreen({ navigation }) {
   const { signOut, dispatch } = useAuth();
-  const { setPolicy } = usePolicy();
   const insets = useSafeAreaInsets();
   const nameRef = useRef(null);
   const [step, setStep] = useState(1);
@@ -155,36 +153,22 @@ export default function ProfileSetupScreen({ navigation }) {
       });
       const chosenTierId = tierRef.current || tier;
       const chosenTier = TIERS.find((t) => t.id === chosenTierId) || selectedTier;
-      const activated = await policies.activate({ tier: chosenTierId, zone_id: zone.id });
       const mergedSuccess = {
-        ...activated,
         tier: chosenTierId,
-        weekly_premium: activated?.weekly_premium || chosenTier.weekly,
-        zone_label: zone?.label || activated?.zone_label || 'Selected zone',
+        weekly_premium: chosenTier.weekly,
+        zone_label: zone?.label || zone?.zone_name || zone?.placeName || 'Selected zone',
         zone_risk_level:
           zone?.riskLevel === 'high'
             ? 'High Risk'
             : zone?.riskLevel === 'low'
               ? 'Low Risk'
-              : activated?.zone_risk_level || 'Medium Risk',
-        max_coverage_per_day: activated?.max_coverage_per_day || chosenTier.daily,
-        premium_breakdown: activated?.premium_breakdown || null,
+              : 'Medium Risk',
+        max_coverage_per_day: chosenTier.daily,
+        valid_until: null,
+        trust_level: 'Newcomer',
+        needs_payment: true,
       };
       setSuccessPolicy(mergedSuccess);
-      // Keep app state synced immediately with selected plan after activation.
-      setPolicy(
-        {
-          status: 'active',
-          tier: chosenTierId,
-          weekly_premium: Number(chosenTier.weekly),
-          valid_until: activated?.valid_until,
-          max_coverage_per_day: chosenTier.daily,
-          risk_score: Number(activated?.risk_score ?? zoneScore),
-          zone: zone?.label || 'Selected zone',
-          policy_id: activated?.id,
-        },
-        'active'
-      );
       setStep(6);
     } catch (e) {
       if (e?.response?.status === 401) {
@@ -529,8 +513,8 @@ export default function ProfileSetupScreen({ navigation }) {
               <TouchableOpacity style={styles.backBtn} onPress={() => setStep(3)}>
                 <Text style={styles.backBtnText}>Back</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={[styles.next, { flex: 1 }]} onPress={() => setStep(5)}>
-                <Text style={styles.nextText}>Continue</Text>
+              <TouchableOpacity style={[styles.next, { flex: 1 }]} onPress={submitOnboarding} disabled={loading}>
+                {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.nextText}>Continue</Text>}
               </TouchableOpacity>
             </View>
           </ScrollView>
@@ -585,7 +569,7 @@ export default function ProfileSetupScreen({ navigation }) {
                 <ActivityIndicator color="#fff" />
               ) : (
                 <Text style={styles.activateText}>
-                  Activate {tier} — ₹{selectedTier.weekly}/week
+                  Save plan — pay ₹{selectedTier.weekly}/week in Coverage
                 </Text>
               )}
             </TouchableOpacity>
@@ -601,11 +585,13 @@ export default function ProfileSetupScreen({ navigation }) {
             <Animated.View style={[styles.shieldWrap, { transform: [{ scale: shieldScale }] }]}>
               <Text style={styles.shieldEmoji}>🛡️</Text>
             </Animated.View>
-            <Text style={styles.successTitle}>{"You're protected 🛡️"}</Text>
-            <Text style={styles.successSub}>Coverage is active and synced with your dashboard.</Text>
+            <Text style={styles.successTitle}>You're almost protected</Text>
+            <Text style={styles.successSub}>
+              Open Coverage and complete weekly payment for {successPolicy.tier}. Protection starts immediately after payment confirmation.
+            </Text>
 
             <View style={styles.summaryCardPremium}>
-              <Text style={styles.summaryCardTitle}>Your coverage</Text>
+              <Text style={styles.summaryCardTitle}>Your selected plan</Text>
               <Text style={styles.summaryLine}>
                 <Text style={styles.summaryBold}>Zone: </Text>
                 {successPolicy.zone_label} ({successPolicy.zone_risk_level})
@@ -619,20 +605,16 @@ export default function ProfileSetupScreen({ navigation }) {
                 {Math.round(successPolicy.weekly_premium).toLocaleString('en-IN')}/week
               </Text>
               <Text style={styles.summaryLine}>
-                <Text style={styles.summaryBold}>Active until: </Text>
-                {formatValidUntil(successPolicy.valid_until)}
-              </Text>
-              <Text style={styles.summaryLine}>
                 <Text style={styles.summaryBold}>Trust level: </Text>
                 {successPolicy.trust_level || 'Newcomer'}
               </Text>
               <Text style={styles.summaryFootnote}>
-                AI risk calculation 0/100 · updates live as you ride with SafeNet
+                Add bank/UPI in Account so payouts can be sent after verified disruptions.
               </Text>
             </View>
 
             <TouchableOpacity style={styles.successPrimaryBtn} onPress={goDashboard}>
-              <Text style={styles.successPrimaryBtnText}>Go to Dashboard</Text>
+              <Text style={styles.successPrimaryBtnText}>Continue to app</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
