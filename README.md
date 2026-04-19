@@ -4,7 +4,7 @@
 
 ### *"SafeNet doesn't ask you to prove anything. It proves it for you."*
 
-**AI-powered parametric income protection for India's 15 million gig delivery workers.**
+**AI-powered parametric income protection for India's millions of gig delivery workers.**
 When rain, heat, floods, or shutdowns erase a day's earnings — SafeNet detects it, validates it, and pays it. Automatically. No claim. No proof. No waiting.
 
 ---
